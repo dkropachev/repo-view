@@ -1,5 +1,7 @@
 # repo-view
 
+[![CI](https://github.com/dkropachev/repo-view/actions/workflows/ci.yml/badge.svg)](https://github.com/dkropachev/repo-view/actions/workflows/ci.yml)
+
 `repo-view` is a Go code navigation library and CLI. It finds where a function,
 class, method, type, or other symbol is used and can return:
 
@@ -8,6 +10,18 @@ class, method, type, or other symbol is used and can return:
 - fenced code snippets
 
 It can also drop comments and Python docstrings from returned snippets.
+
+## Installation
+
+Install the latest source with Go:
+
+```bash
+go install github.com/dkropachev/repo-view/cmd/repo-view@latest
+```
+
+Version tags publish prebuilt Linux, macOS, and Windows binaries, plus a
+`SHA256SUMS` file, on the
+[GitHub Releases page](https://github.com/dkropachev/repo-view/releases).
 
 ## Navigation CLI
 
