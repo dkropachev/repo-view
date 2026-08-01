@@ -347,7 +347,7 @@ func readSourceFiles(root string) ([]fileData, error) {
 		}
 		lines, err := readLines(path)
 		if err != nil {
-			return nil
+			return nil //nolint:nilerr // Unreadable source files are skipped during discovery.
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {

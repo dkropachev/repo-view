@@ -27,37 +27,36 @@ type options struct {
 	resolutionPath string
 	evidenceRoot   string
 	caseIDs        string
-	maxLevel       int
 	outputDir      string
+	repairAttempt  string
+	maxLevel       int
+	judgeRepeats   int
 	skipAnalyze    bool
 	skipQuality    bool
 	allowMissing   bool
-	judgeRepeats   int
-	repairAttempt  string
 }
 
 type caseResult struct {
-	ID                       string                           `json:"id"`
-	Level                    int                              `json:"level"`
+	FixtureQualityProvenance string                           `json:"fixture_quality_provenance,omitempty"`
+	QualityProvenance        string                           `json:"quality_provenance,omitempty"`
 	Complexity               string                           `json:"complexity"`
 	Outcome                  string                           `json:"expected_outcome"`
 	CurrentStatus            string                           `json:"current_status,omitempty"`
 	RootCause                string                           `json:"root_cause,omitempty"`
 	Fix                      string                           `json:"fix,omitempty"`
 	FixtureEvidence          string                           `json:"fixture_evidence,omitempty"`
-	FixtureQualityProvenance string                           `json:"fixture_quality_provenance,omitempty"`
-	FixtureMetrics           []experimentsuite.EvidenceMetric `json:"fixture_metrics,omitempty"`
-	Evidence                 string                           `json:"evidence"`
-	QualityProvenance        string                           `json:"quality_provenance,omitempty"`
-	Passed                   bool                             `json:"passed"`
-	Skipped                  bool                             `json:"skipped"`
 	Error                    string                           `json:"error,omitempty"`
+	Evidence                 string                           `json:"evidence"`
+	ID                       string                           `json:"id"`
+	FixtureMetrics           []experimentsuite.EvidenceMetric `json:"fixture_metrics,omitempty"`
 	Checks                   []experimentsuite.CheckResult    `json:"checks,omitempty"`
 	Metrics                  []experimentsuite.EvidenceMetric `json:"metrics,omitempty"`
+	Level                    int                              `json:"level"`
+	Passed                   bool                             `json:"passed"`
+	Skipped                  bool                             `json:"skipped"`
 }
 
 type suiteResult struct {
-	SchemaVersion            int          `json:"schema_version"`
 	Command                  string       `json:"command"`
 	EvidenceAnalysis         string       `json:"evidence_analysis,omitempty"`
 	QualityAggregation       string       `json:"quality_aggregation,omitempty"`
@@ -68,6 +67,7 @@ type suiteResult struct {
 	ResolutionManifest       string       `json:"resolution_manifest,omitempty"`
 	ResolutionManifestSHA256 string       `json:"resolution_manifest_sha256,omitempty"`
 	Cases                    []caseResult `json:"cases"`
+	SchemaVersion            int          `json:"schema_version"`
 	Passed                   bool         `json:"passed"`
 }
 
@@ -78,9 +78,9 @@ const (
 )
 
 type evidencePreparationOutcome struct {
+	err      error
 	analysis string
 	quality  string
-	err      error
 }
 
 type evidencePreparationTracker struct {
@@ -298,9 +298,10 @@ func run(ctx context.Context, args []string) int {
 	started := time.Now().UTC()
 	var results []caseResult
 	var preparation evidencePreparationTracker
-	if command == "replay" {
+	switch command {
+	case "replay":
 		results = replay(ctx, opts, selected, &preparation)
-	} else if command == "resolve" {
+	case "resolve":
 		results = resolveCases(
 			ctx,
 			opts,
@@ -308,9 +309,9 @@ func run(ctx context.Context, args []string) int {
 			selectedResolutions,
 			&preparation,
 		)
-	} else if command == "repair" {
+	case "repair":
 		results = repairCases(ctx, opts, selected, selectedResolutions)
-	} else {
+	default:
 		results = live(ctx, opts, selected)
 	}
 	finished := time.Now().UTC()
@@ -403,9 +404,9 @@ func replay(
 }
 
 type goTestOutcome struct {
-	passed bool
-	log    string
 	err    error
+	log    string
+	passed bool
 }
 
 type goTestEvent struct {
@@ -607,7 +608,8 @@ func prepareEvidence(
 	}
 	if outcome.err == nil && !opts.skipQuality {
 		qualityArgs := []string{runDir}
-		if qualityProvenance == "strict-current" {
+		switch qualityProvenance {
+		case "strict-current":
 			judgeRepeats, err := recordedStrictJudgeRepeats(runDir)
 			if err != nil {
 				outcome.err = err
@@ -617,7 +619,7 @@ func prepareEvidence(
 					"--judge-repeats", strconv.Itoa(judgeRepeats),
 				)
 			}
-		} else if qualityProvenance == "legacy-unisolated-attested" {
+		case "legacy-unisolated-attested":
 			qualityArgs = append(qualityArgs, "--bind-legacy-judges")
 		}
 		if opts.skipAnalyze {
@@ -706,14 +708,13 @@ func runGoTest(
 	if err != nil {
 		return goTestOutcome{log: logPath, err: err}
 	}
-	defer os.RemoveAll(tempDir)
+	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	filter, err := parseGoTestFilter(goTest.Run)
 	if err != nil {
 		if writeErr := writeFileAtomic(
 			logPath,
 			[]byte(err.Error()+"\n"),
-			0o644,
 		); writeErr != nil {
 			return goTestOutcome{log: logPath, err: writeErr}
 		}
@@ -753,7 +754,7 @@ func runGoTest(
 	err = command.Run()
 	logOutput := append([]byte(nil), stdout.Bytes()...)
 	logOutput = append(logOutput, stderr.Bytes()...)
-	if writeErr := writeFileAtomic(logPath, logOutput, 0o644); writeErr != nil {
+	if writeErr := writeFileAtomic(logPath, logOutput); writeErr != nil {
 		return goTestOutcome{log: logPath, err: writeErr}
 	}
 	if err == nil {
@@ -1358,7 +1359,7 @@ func ensureDirectory(path string, perm os.FileMode) error {
 	return nil
 }
 
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+func writeFileAtomic(path string, data []byte) error {
 	directory := filepath.Dir(path)
 	info, err := os.Lstat(directory)
 	if err != nil {
@@ -1376,7 +1377,7 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_ = temporary.Close()
 		_ = os.Remove(temporaryPath)
 	}()
-	if err := temporary.Chmod(perm); err != nil {
+	if err := temporary.Chmod(0o644); err != nil {
 		return err
 	}
 	if _, err := temporary.Write(data); err != nil {
@@ -1398,7 +1399,7 @@ func writeResults(outputDir string, result suiteResult) error {
 		return err
 	}
 	jsonData = append(jsonData, '\n')
-	if err := writeFileAtomic(filepath.Join(outputDir, "results.json"), jsonData, 0o644); err != nil {
+	if err := writeFileAtomic(filepath.Join(outputDir, "results.json"), jsonData); err != nil {
 		return err
 	}
 	if result.Command == "resolve" {
@@ -1477,7 +1478,7 @@ func writeResults(outputDir string, result suiteResult) error {
 	if failures == 0 {
 		fmt.Fprintln(&summary, "\nNone.")
 	}
-	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()), 0o644)
+	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()))
 }
 
 func writeRepairSummary(outputDir string, result suiteResult) error {
@@ -1509,7 +1510,7 @@ func writeRepairSummary(outputDir string, result suiteResult) error {
 			if candidate.Variant != "optimized" {
 				continue
 			}
-			baseline, _ := findMetric(current.Metrics, "baseline", candidate.Task)
+			baseline := findMetric(current.Metrics, "baseline", candidate.Task)
 			savings := "n/a"
 			if candidate.HasComparison {
 				savings = fmt.Sprintf("%.2f%%", candidate.EffectiveReductionPercent)
@@ -1585,7 +1586,7 @@ func writeRepairSummary(outputDir string, result suiteResult) error {
 	if failures == 0 {
 		fmt.Fprintln(&summary, "\nNone.")
 	}
-	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()), 0o644)
+	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()))
 }
 
 func writeResolutionSummary(outputDir string, result suiteResult) error {
@@ -1693,7 +1694,7 @@ func writeResolutionSummary(outputDir string, result suiteResult) error {
 			if candidate.Variant != "optimized" {
 				continue
 			}
-			baseline, _ := findMetric(current.FixtureMetrics, "baseline", candidate.Task)
+			baseline := findMetric(current.FixtureMetrics, "baseline", candidate.Task)
 			savings := "n/a"
 			if candidate.HasComparison {
 				savings = fmt.Sprintf("%.2f%%", candidate.EffectiveReductionPercent)
@@ -1762,7 +1763,7 @@ func writeResolutionSummary(outputDir string, result suiteResult) error {
 			if candidate.Variant != "optimized" {
 				continue
 			}
-			baseline, _ := findMetric(current.FixtureMetrics, "baseline", candidate.Task)
+			baseline := findMetric(current.FixtureMetrics, "baseline", candidate.Task)
 			baselineGraph := filepath.Join(
 				current.FixtureEvidence,
 				filepath.FromSlash(baseline.CallGraphMarkdownFile),
@@ -1916,7 +1917,7 @@ func writeResolutionSummary(outputDir string, result suiteResult) error {
 	if failures == 0 {
 		fmt.Fprintln(&summary, "\nNone.")
 	}
-	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()), 0o644)
+	return writeFileAtomic(filepath.Join(outputDir, "summary.md"), []byte(summary.String()))
 }
 
 func writeEvidencePreparationModes(summary *strings.Builder, result suiteResult) {
@@ -1967,13 +1968,13 @@ func findMetric(
 	metrics []experimentsuite.EvidenceMetric,
 	variant string,
 	task string,
-) (experimentsuite.EvidenceMetric, bool) {
+) experimentsuite.EvidenceMetric {
 	for _, metric := range metrics {
 		if metric.Variant == variant && metric.Task == task {
-			return metric, true
+			return metric
 		}
 	}
-	return experimentsuite.EvidenceMetric{}, false
+	return experimentsuite.EvidenceMetric{}
 }
 
 func formatCalls(metric experimentsuite.EvidenceMetric) string {

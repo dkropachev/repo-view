@@ -539,7 +539,7 @@ func TestWriteFileAtomicDoesNotFollowDestinationSymlink(t *testing.T) {
 	if err := os.Symlink(external, destination); err != nil {
 		t.Skipf("symlinks unavailable: %v", err)
 	}
-	if err := writeFileAtomic(destination, []byte("published"), 0o644); err != nil {
+	if err := writeFileAtomic(destination, []byte("published")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(destination)
