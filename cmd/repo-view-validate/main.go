@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -27,20 +28,45 @@ type location struct {
 	line int
 }
 
+type repositorySpec struct {
+	name string
+	url  string
+}
+
+var repositoryNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
+
 func main() {
 	os.Exit(run(os.Args[1:]))
 }
 
 func run(args []string) int {
 	flags := flag.NewFlagSet("repo-view-validate", flag.ContinueOnError)
-	repoList := flags.String("repo-list", "", "file containing repository paths, one per line")
-	repoRoot := flags.String("repo-root", ".", "fallback directory scanned for git repositories")
+	repoList := flags.String("repo-list", "", "use existing repository paths from this file instead of managed clones")
+	repoRoot := flags.String("repo-root", "", "scan an existing directory instead of using managed clones")
+	repoSpec := flags.String("repo-spec", "testdata/validation-repos.tsv", "managed repository name/URL manifest")
+	cloneRoot := flags.String("clone-root", "validation-repos", "directory for managed repository clones")
 	casesPerRepo := flags.Int("cases", 100, "number of validation cases per repository")
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
 
-	repos, source, err := discoverRepos(*repoList, *repoRoot)
+	if *repoList != "" && *repoRoot != "" {
+		fmt.Fprintln(os.Stderr, "--repo-list and --repo-root are mutually exclusive")
+		return 2
+	}
+
+	var repos []string
+	var source string
+	var err error
+	switch {
+	case *repoList != "":
+		repos, err = readRepoList(*repoList)
+		source = *repoList
+	case *repoRoot != "":
+		repos, source, err = discoverRepos("", *repoRoot)
+	default:
+		repos, source, err = ensureManagedRepositories(*repoSpec, *cloneRoot)
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -62,6 +88,134 @@ func run(args []string) int {
 	}
 	fmt.Printf("validated repos=%d cases=%d source=%s\n", len(repos), total, source)
 	return 0
+}
+
+func ensureManagedRepositories(specPath, cloneRoot string) ([]string, string, error) {
+	specs, err := readRepositorySpecs(specPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if err := os.MkdirAll(cloneRoot, 0o755); err != nil {
+		return nil, "", fmt.Errorf("create clone root %s: %w", cloneRoot, err)
+	}
+	cloneRootInfo, err := os.Lstat(cloneRoot)
+	if err != nil {
+		return nil, "", fmt.Errorf("inspect clone root %s: %w", cloneRoot, err)
+	}
+	if !cloneRootInfo.IsDir() || cloneRootInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, "", fmt.Errorf("clone root %s is not a directory", cloneRoot)
+	}
+
+	repositories := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		repository, cloned, err := ensureManagedRepository(cloneRoot, spec)
+		if err != nil {
+			return nil, "", err
+		}
+		if cloned {
+			fmt.Fprintf(os.Stderr, "cloned %s into %s\n", spec.name, repository)
+		} else {
+			fmt.Fprintf(os.Stderr, "reusing %s at %s\n", spec.name, repository)
+		}
+		repositories = append(repositories, repository)
+	}
+	return repositories, specPath + " -> " + cloneRoot, nil
+}
+
+func readRepositorySpecs(path string) ([]repositorySpec, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open repository manifest %s: %w", path, err)
+	}
+	defer file.Close()
+
+	seen := make(map[string]struct{})
+	var specs []repositorySpec
+	scanner := bufio.NewScanner(file)
+	for lineNumber := 1; scanner.Scan(); lineNumber++ {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("%s:%d: expected repository name and URL", path, lineNumber)
+		}
+		name, url := fields[0], fields[1]
+		if !repositoryNamePattern.MatchString(name) || name == "." || name == ".." {
+			return nil, fmt.Errorf("%s:%d: invalid repository name %q", path, lineNumber, name)
+		}
+		if _, exists := seen[name]; exists {
+			return nil, fmt.Errorf("%s:%d: duplicate repository name %q", path, lineNumber, name)
+		}
+		seen[name] = struct{}{}
+		specs = append(specs, repositorySpec{name: name, url: url})
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	if len(specs) == 0 {
+		return nil, fmt.Errorf("repository manifest %s is empty", path)
+	}
+	return specs, nil
+}
+
+func ensureManagedRepository(cloneRoot string, spec repositorySpec) (string, bool, error) {
+	target := filepath.Join(cloneRoot, spec.name)
+	if _, err := os.Lstat(target); err == nil {
+		return target, false, validateManagedRepository(target, spec.url)
+	} else if !os.IsNotExist(err) {
+		return "", false, fmt.Errorf("inspect repository %s: %w", target, err)
+	}
+
+	stage, err := os.MkdirTemp(cloneRoot, ".clone-"+spec.name+"-")
+	if err != nil {
+		return "", false, fmt.Errorf("create clone stage for %s: %w", spec.name, err)
+	}
+	defer os.RemoveAll(stage)
+	stagedRepository := filepath.Join(stage, "repository")
+	command := exec.Command("git", "clone", "--depth", "1", "--no-tags", "--", spec.url, stagedRepository)
+	if output, err := command.CombinedOutput(); err != nil {
+		return "", false, fmt.Errorf("clone %s: %w\n%s", spec.url, err, output)
+	}
+	if err := os.Rename(stagedRepository, target); err != nil {
+		if _, statErr := os.Lstat(target); statErr == nil {
+			return target, false, validateManagedRepository(target, spec.url)
+		}
+		return "", false, fmt.Errorf("publish clone %s: %w", target, err)
+	}
+	return target, true, nil
+}
+
+func validateManagedRepository(path, expectedOrigin string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("managed repository path %s is not a directory", path)
+	}
+	inside, err := gitOutput(path, "rev-parse", "--is-inside-work-tree")
+	if err != nil || inside != "true" {
+		return fmt.Errorf("managed repository path %s is not a Git worktree", path)
+	}
+	origin, err := gitOutput(path, "config", "--get", "remote.origin.url")
+	if err != nil {
+		return fmt.Errorf("read origin for %s: %w", path, err)
+	}
+	if origin != expectedOrigin {
+		return fmt.Errorf("managed repository %s has origin %q, expected %q", path, origin, expectedOrigin)
+	}
+	return nil
+}
+
+func gitOutput(directory string, arguments ...string) (string, error) {
+	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func discoverRepos(repoList, repoRoot string) ([]string, string, error) {

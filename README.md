@@ -155,13 +155,19 @@ failure against the current Go regressions and accepted replacement evidence.
 ## Validation
 
 ```bash
-go run ./cmd/repo-view-validate --repo-list testdata/scylladb-repo-list.txt --cases 100
-go run ./cmd/repo-view-validate --repo-root /path/to/repositories --cases 100
+go run ./cmd/repo-view-validate --cases 100
 ```
 
 The validator builds an independent line-location index, selects deterministic
 symbols per repository, and checks point locations, enclosing ranges, and
-returned source for each symbol.
+returned source for each symbol. By default it shallow-clones the repositories
+in `testdata/validation-repos.tsv` under the ignored `validation-repos/`
+directory. A matching existing clone is reused without fetching or checking
+out another revision. A conflicting directory or `origin` fails closed.
+
+Use `--repo-list FILE` to validate an existing list of checkout paths, or
+`--repo-root DIR` to scan an existing directory instead of managing clones.
+`--repo-spec` and `--clone-root` override the managed-clone defaults.
 
 Output examples:
 

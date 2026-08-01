@@ -65,15 +65,14 @@ per-command bounds and a cumulative repo-view-invocation cap into the binary.
 Run deterministic cross-repository validation:
 
 ```bash
-go run ./cmd/repo-view-validate \
-  --repo-list testdata/scylladb-repo-list.txt \
-  --cases 100
+go run ./cmd/repo-view-validate --cases 100
 ```
 
 The validator builds an independent line index, chooses deterministic symbols,
-and verifies point locations, enclosing ranges, and returned source. Replace
-the generic paths in `testdata/scylladb-repo-list.txt` with local checkouts;
-no machine-global repository list is used.
+and verifies point locations, enclosing ranges, and returned source. It
+shallow-clones `testdata/validation-repos.tsv` into the ignored
+`validation-repos/` directory. Existing matching clones are reused without a
+fetch or checkout; conflicting directories fail validation.
 
 Run the model-navigation regression suite:
 

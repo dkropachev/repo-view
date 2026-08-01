@@ -1,7 +1,0 @@
-/path/to/repositories/curl
-/path/to/repositories/java-driver
-/path/to/repositories/python-driver
-/path/to/repositories/scylla-rust-driver
-/path/to/repositories/scylladb
-/path/to/repositories/seastar
-/path/to/repositories/temporal

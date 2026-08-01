@@ -1,0 +1,7 @@
+curl https://github.com/curl/curl.git
+java-driver https://github.com/scylladb/java-driver.git
+python-driver https://github.com/scylladb/python-driver.git
+scylla-rust-driver https://github.com/scylladb/scylla-rust-driver.git
+scylladb https://github.com/scylladb/scylladb.git
+seastar https://github.com/scylladb/seastar.git
+temporal https://github.com/temporalio/temporal.git
