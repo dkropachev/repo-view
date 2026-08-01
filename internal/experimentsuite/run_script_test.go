@@ -284,13 +284,15 @@ func TestRunScriptRequiresPromptCommitTargetPrefix(t *testing.T) {
 		}
 	}
 
-	output, err := exec.Command(
+	command := exec.Command(
 		bashPath,
 		runScript,
 		"--task", "explain",
 		"--commit", target,
 		"--dry-run",
-	).CombinedOutput()
+	)
+	command.Env = runScriptTestEnvironment(t, false)
+	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("derived prompt commit failed: %v\n%s", err, output)
 	}
