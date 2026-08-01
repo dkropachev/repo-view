@@ -666,10 +666,11 @@ func TestChangedRangeReportsChangedScopesOnly(t *testing.T) {
 
 func TestScopeNameDoesNotBorrowPreviousDeclaration(t *testing.T) {
 	lines := strings.Split("package demo\n\nfunc previous() {}\n\n// next documents next.\nfunc next() {\n\tprintln(\"next\")\n}\n", "\n")
-	if got := scopeName(lines, 5, ".go"); got != "next" {
+	goBackend := languageForExtension(".go")
+	if got := scopeName(lines, 5, goBackend); got != "next" {
 		t.Fatalf("comment scope = %q, want next", got)
 	}
-	if got := scopeName(lines, 7, ".go"); got != "next" {
+	if got := scopeName(lines, 7, goBackend); got != "next" {
 		t.Fatalf("body scope = %q, want next", got)
 	}
 }

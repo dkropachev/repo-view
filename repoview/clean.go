@@ -5,24 +5,6 @@ import (
 	"strings"
 )
 
-func cleanSource(source, ext string, dropComments, dropDocstrings bool) string {
-	cleaned := source
-	if dropDocstrings && ext == ".py" {
-		cleaned = dropPythonDocstrings(cleaned)
-	}
-	if dropComments {
-		if ext == ".py" {
-			cleaned = dropPythonComments(cleaned)
-		} else {
-			cleaned = dropCLikeComments(cleaned)
-		}
-	}
-	if dropComments || dropDocstrings {
-		cleaned = dropBlankArtifactLines(cleaned)
-	}
-	return cleaned
-}
-
 func dropPythonComments(source string) string {
 	lines := strings.Split(source, "\n")
 	for i, line := range lines {

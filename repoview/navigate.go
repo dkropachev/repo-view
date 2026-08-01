@@ -176,8 +176,12 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		if err != nil {
 			continue
 		}
-		ext := filepath.Ext(path)
-		skipLines := ignoredSearchLines(lines, ext, opts.DropComments || opts.NoComments, opts.DropDocstrings)
+		language := languageForExtension(filepath.Ext(path))
+		skipLines := language.ignoredSearchLines(
+			lines,
+			opts.DropComments || opts.NoComments,
+			opts.DropDocstrings,
+		)
 		for idx, line := range lines {
 			lineNo := idx + 1
 			if skipLines[lineNo] {
@@ -193,13 +197,13 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 				if !containsSymbol(line, state.symbol) {
 					continue
 				}
-				if opts.NoComments && symbolOnlyInComment(line, state.symbol, ext) {
+				if opts.NoComments && symbolOnlyInComment(line, state.symbol, language) {
 					continue
 				}
 				if opts.NoStrings && symbolOnlyInStrings(line, state.symbol) {
 					continue
 				}
-				isDef := looksLikeDefinition(line, state.symbol, ext)
+				isDef := looksLikeDefinition(line, state.symbol, language)
 				if !includeKind(opts.Include, isDef) {
 					continue
 				}
@@ -207,7 +211,7 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 					state.symbol,
 					kindForMatch(isDef),
 					rel,
-					ext,
+					language,
 					lines,
 					lineNo,
 					opts,
@@ -269,13 +273,13 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 	if lineNo < 1 || lineNo > len(lines) {
 		return InspectResponse{}, fmt.Errorf("line %d out of range for %s", lineNo, path)
 	}
-	ext := filepath.Ext(path)
-	symbol := bestSymbolOnLine(lines[lineNo-1], ext)
+	language := languageForExtension(filepath.Ext(path))
+	symbol := bestSymbolOnLine(lines[lineNo-1], language)
 	results := []Result{
-		r.resultForHit(symbol, "scope", filepath.ToSlash(path), ext, lines, lineNo, opts),
+		r.resultForHit(symbol, "scope", filepath.ToSlash(path), language, lines, lineNo, opts),
 	}
 	if opts.Include == IncludeImports || opts.Include == IncludeAll {
-		if result, ok := importResult(filepath.ToSlash(path), ext, lines); ok {
+		if result, ok := importResult(filepath.ToSlash(path), language, lines); ok {
 			results = append(results, result)
 		}
 	}
@@ -355,15 +359,15 @@ func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
 	if err != nil {
 		return OutlineResponse{}, err
 	}
-	ext := filepath.Ext(path)
+	language := languageForExtension(filepath.Ext(path))
 	results := make([]Result, 0)
 	for idx, line := range lines {
 		lineNo := idx + 1
-		symbol, ok := definitionSymbol(line, ext)
+		symbol, ok := language.definitionSymbol(line)
 		if !ok {
 			continue
 		}
-		result := r.resultForHit(symbol, "def", filepath.ToSlash(path), ext, lines, lineNo, opts)
+		result := r.resultForHit(symbol, "def", filepath.ToSlash(path), language, lines, lineNo, opts)
 		result.Signature = strings.TrimSpace(line)
 		if opts.Limit > 0 && len(results) >= opts.Limit {
 			return OutlineResponse{
@@ -414,9 +418,10 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	}
 	results := make([]Result, 0)
 	for _, rel := range selectedFiles {
+		language := languageForExtension(filepath.Ext(rel))
 		lines, cleanRel, err := r.readRelativeLines(rel)
 		if err != nil || len(lines) == 0 {
-			results = append(results, Result{Kind: "file", Path: rel, Language: languageForExt(filepath.Ext(rel))})
+			results = append(results, Result{Kind: "file", Path: rel, Language: language.name()})
 			continue
 		}
 		rel = cleanRel
@@ -430,7 +435,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		if opts.Return == ReturnLocations {
 			for _, span := range mergeContextRanges(len(lines), lineNumbers, 0) {
 				results = append(results, r.resultForRange(
-					"", "changed", rel, filepath.Ext(rel), lines, span[0], span[1],
+					"", "changed", rel, language, lines, span[0], span[1],
 					linesInRange(lineNumbers, span[0], span[1]), opts,
 				))
 			}
@@ -439,7 +444,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		if opts.Return == ReturnContext {
 			for _, span := range mergeContextRanges(len(lines), lineNumbers, opts.Context) {
 				results = append(results, r.resultForRange(
-					"", "changed", rel, filepath.Ext(rel), lines, span[0], span[1],
+					"", "changed", rel, language, lines, span[0], span[1],
 					linesInRange(lineNumbers, span[0], span[1]), opts,
 				))
 			}
@@ -449,7 +454,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 			if lineNo < 1 || lineNo > len(lines) {
 				lineNo = 1
 			}
-			results = append(results, r.resultForHit("", "changed", rel, filepath.Ext(rel), lines, lineNo, opts))
+			results = append(results, r.resultForHit("", "changed", rel, language, lines, lineNo, opts))
 			results = dedupeResults(results)
 		}
 	}
@@ -464,7 +469,8 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 }
 
 func (r *RepoView) resultForRange(
-	symbol, kind, rel, ext string,
+	symbol, kind, rel string,
+	language languageBackend,
 	lines []string,
 	start, end int,
 	hitLines []int,
@@ -478,10 +484,10 @@ func (r *RepoView) resultForRange(
 		Line:         lineNo,
 		StartLine:    start,
 		EndLine:      end,
-		Language:     languageForExt(ext),
+		Language:     language.name(),
 		ChangedLines: append([]int(nil), hitLines...),
 	}
-	scopes := scopeNamesForLines(lines, hitLines, ext)
+	scopes := scopeNamesForLines(lines, hitLines, language)
 	if len(scopes) == 1 {
 		result.Scope = scopes[0]
 	} else if len(scopes) > 1 {
@@ -497,17 +503,23 @@ func (r *RepoView) resultForRange(
 		}
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
 			snippet(lines, start, end, focus, opts.MaxCodeLines)
-		result.Code = cleanSource(result.Code, ext, opts.DropComments, opts.DropDocstrings)
+		result.Code = language.cleanSource(result.Code, opts.DropComments, opts.DropDocstrings)
 		result.Code = strings.TrimRight(result.Code, "\n")
 	}
 	return result
 }
 
-func (r *RepoView) resultForHit(symbol, kind, rel, ext string, lines []string, lineNo int, opts Options) Result {
+func (r *RepoView) resultForHit(
+	symbol, kind, rel string,
+	language languageBackend,
+	lines []string,
+	lineNo int,
+	opts Options,
+) Result {
 	start, end := lineNo, lineNo
 	switch opts.Return {
 	case ReturnScope:
-		start, end = enclosingScope(lines, lineNo, ext)
+		start, end = language.enclosingScope(lines, lineNo)
 	case ReturnContext:
 		start, end = contextRange(len(lines), lineNo, opts.Context)
 	case ReturnLine, ReturnLocations:
@@ -520,8 +532,8 @@ func (r *RepoView) resultForHit(symbol, kind, rel, ext string, lines []string, l
 		Line:      lineNo,
 		StartLine: start,
 		EndLine:   end,
-		Language:  languageForExt(ext),
-		Scope:     scopeName(lines, lineNo, ext),
+		Language:  language.name(),
+		Scope:     scopeName(lines, lineNo, language),
 	}
 	if kind == "def" && result.Scope == "" {
 		result.Scope = symbol
@@ -529,7 +541,7 @@ func (r *RepoView) resultForHit(symbol, kind, rel, ext string, lines []string, l
 	if opts.Return != ReturnLocations {
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
 			snippet(lines, start, end, lineNo, opts.MaxCodeLines)
-		result.Code = cleanSource(result.Code, ext, opts.DropComments, opts.DropDocstrings)
+		result.Code = language.cleanSource(result.Code, opts.DropComments, opts.DropDocstrings)
 		result.Code = strings.TrimRight(result.Code, "\n")
 	}
 	return result
@@ -716,33 +728,6 @@ func snippet(lines []string, start, end, focus, maxLines int) (string, int, int,
 	return code, codeStart, codeEnd, true
 }
 
-func languageForExt(ext string) string {
-	switch ext {
-	case ".go":
-		return "go"
-	case ".rs":
-		return "rust"
-	case ".py":
-		return "python"
-	case ".js":
-		return "javascript"
-	case ".jsx":
-		return "jsx"
-	case ".ts":
-		return "typescript"
-	case ".tsx":
-		return "tsx"
-	case ".c", ".h":
-		return "c"
-	case ".cc", ".cpp", ".hpp":
-		return "cpp"
-	case ".java":
-		return "java"
-	default:
-		return strings.TrimPrefix(ext, ".")
-	}
-}
-
 func parseLocation(location string) (string, int, error) {
 	idx := strings.LastIndex(location, ":")
 	if idx < 1 || idx == len(location)-1 {
@@ -755,34 +740,8 @@ func parseLocation(location string) (string, int, error) {
 	return location[:idx], lineNo, nil
 }
 
-func definitionSymbol(line, ext string) (string, bool) {
-	stripped := strings.TrimSpace(line)
-	var patterns []string
-	switch ext {
-	case ".go":
-		patterns = []string{
-			`^func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\b`,
-			`^type\s+([A-Za-z_][A-Za-z0-9_]*)\b`,
-			`^([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)\b`,
-		}
-	case ".py":
-		patterns = []string{`^(?:async\s+def|def|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b`}
-	case ".rs":
-		patterns = []string{`^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|impl)\s+([A-Za-z_][A-Za-z0-9_]*)\b`}
-	default:
-		patterns = []string{`^(?:function|class)\s+([A-Za-z_][A-Za-z0-9_]*)\b`, `^.*\b([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{?\s*$`}
-	}
-	for _, pattern := range patterns {
-		match := regexp.MustCompile(pattern).FindStringSubmatch(stripped)
-		if len(match) == 2 {
-			return match[1], true
-		}
-	}
-	return "", false
-}
-
-func bestSymbolOnLine(line, ext string) string {
-	if symbol, ok := definitionSymbol(line, ext); ok {
+func bestSymbolOnLine(line string, language languageBackend) string {
+	if symbol, ok := language.definitionSymbol(line); ok {
 		return symbol
 	}
 	memberCall := regexp.MustCompile(`\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
@@ -804,10 +763,10 @@ func bestSymbolOnLine(line, ext string) string {
 	return ""
 }
 
-func scopeName(lines []string, lineNo int, ext string) string {
-	start, end := enclosingScope(lines, lineNo, ext)
+func scopeName(lines []string, lineNo int, language languageBackend) string {
+	start, end := language.enclosingScope(lines, lineNo)
 	for pos := min(lineNo, end); pos >= start; pos-- {
-		if symbol, ok := definitionSymbol(lines[pos-1], ext); ok {
+		if symbol, ok := language.definitionSymbol(lines[pos-1]); ok {
 			return symbol
 		}
 	}
@@ -824,7 +783,7 @@ func scopeName(lines []string, lineNo int, ext string) string {
 			strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if symbol, ok := definitionSymbol(lines[pos-1], ext); ok {
+		if symbol, ok := language.definitionSymbol(lines[pos-1]); ok {
 			return symbol
 		}
 		break
@@ -832,14 +791,14 @@ func scopeName(lines []string, lineNo int, ext string) string {
 	return ""
 }
 
-func scopeNamesForLines(lines []string, lineNumbers []int, ext string) []string {
+func scopeNamesForLines(lines []string, lineNumbers []int, language languageBackend) []string {
 	seen := make(map[string]bool)
 	var scopes []string
 	for _, lineNo := range lineNumbers {
 		if lineNo < 1 || lineNo > len(lines) {
 			continue
 		}
-		scope := scopeName(lines, lineNo, ext)
+		scope := scopeName(lines, lineNo, language)
 		if scope != "" && !seen[scope] {
 			seen[scope] = true
 			scopes = append(scopes, scope)
@@ -862,50 +821,9 @@ func wantsInspectRelated(include Include) bool {
 	return include == IncludeDefs || include == IncludeRefs || include == IncludeBoth || include == IncludeAll
 }
 
-func importResult(path, ext string, lines []string) (Result, bool) {
-	start, end := 0, 0
-	switch ext {
-	case ".go":
-		inBlock := false
-		for idx, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "import (") {
-				start = idx + 1
-				inBlock = true
-				continue
-			}
-			if start == 0 && strings.HasPrefix(trimmed, "import ") {
-				if start == 0 {
-					start = idx + 1
-				}
-				end = idx + 1
-			}
-			if inBlock && trimmed == ")" {
-				end = idx + 1
-				break
-			}
-		}
-	case ".py":
-		for idx, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ") {
-				if start == 0 {
-					start = idx + 1
-				}
-				end = idx + 1
-			}
-		}
-	case ".rs":
-		for idx, line := range lines {
-			if strings.HasPrefix(strings.TrimSpace(line), "use ") {
-				if start == 0 {
-					start = idx + 1
-				}
-				end = idx + 1
-			}
-		}
-	}
-	if start == 0 || end < start {
+func importResult(path string, language languageBackend, lines []string) (Result, bool) {
+	start, end, ok := language.importRange(lines)
+	if !ok {
 		return Result{}, false
 	}
 	return Result{
@@ -913,7 +831,7 @@ func importResult(path, ext string, lines []string) (Result, bool) {
 		Path:      path,
 		StartLine: start,
 		EndLine:   end,
-		Language:  languageForExt(ext),
+		Language:  language.name(),
 		Code:      strings.Join(lines[start-1:end], "\n"),
 	}, true
 }
@@ -922,13 +840,8 @@ func symbolOnlyInStrings(line, symbol string) bool {
 	return !containsSymbol(withoutStrings(line), symbol)
 }
 
-func symbolOnlyInComment(line, symbol, ext string) bool {
-	var code string
-	if ext == ".py" {
-		code = stripHashComment(line)
-	} else {
-		code = stripSlashComment(line)
-	}
+func symbolOnlyInComment(line, symbol string, language languageBackend) bool {
+	code := language.stripComment(line)
 	return containsSymbol(line, symbol) && !containsSymbol(code, symbol)
 }
 
