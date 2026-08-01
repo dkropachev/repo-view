@@ -7,7 +7,6 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"unicode"
@@ -34,43 +33,6 @@ func New(root string) (*RepoView, error) {
 		return nil, fmt.Errorf("repository root is not a directory: %s", root)
 	}
 	return &RepoView{root: filepath.Clean(resolved)}, nil
-}
-
-func ignoredSearchLines(lines []string, ext string, dropComments, dropDocstrings bool) map[int]bool {
-	ignored := map[int]bool{}
-	if dropComments {
-		for idx, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if ext == ".py" && strings.HasPrefix(trimmed, "#") {
-				ignored[idx+1] = true
-			}
-			if ext != ".py" && (strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*")) {
-				ignored[idx+1] = true
-			}
-		}
-	}
-	if dropDocstrings && ext == ".py" {
-		inDocstring := false
-		quote := ""
-		for idx, line := range lines {
-			trimmed := strings.TrimSpace(line)
-			if inDocstring {
-				ignored[idx+1] = true
-				if strings.Contains(trimmed, quote) {
-					inDocstring = false
-				}
-				continue
-			}
-			if strings.HasPrefix(trimmed, `"""`) || strings.HasPrefix(trimmed, `'''`) {
-				quote = trimmed[:3]
-				ignored[idx+1] = true
-				if strings.Count(trimmed, quote) < 2 {
-					inDocstring = true
-				}
-			}
-		}
-	}
-	return ignored
 }
 
 func (r *RepoView) sourceFiles() ([]string, error) {
@@ -105,12 +67,11 @@ func (r *RepoView) sourceFiles() ([]string, error) {
 }
 
 func defaultExtensions() map[string]bool {
-	return map[string]bool{
-		".c": true, ".cc": true, ".cpp": true, ".cs": true, ".go": true,
-		".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
-		".kt": true, ".mjs": true, ".mod": true, ".py": true, ".rs": true,
-		".swift": true, ".ts": true, ".tsx": true,
+	extensions := make(map[string]bool, len(languagesByExtension))
+	for _, extension := range supportedExtensions() {
+		extensions[extension] = true
 	}
+	return extensions
 }
 
 func defaultExcludes() map[string]bool {
@@ -254,21 +215,7 @@ func isIdent(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-func looksLikeDefinition(line, symbol, ext string) bool {
-	if found, ok := definitionSymbol(line, ext); ok {
-		return found == symbol
-	}
-	escaped := regexp.QuoteMeta(symbol)
-	stripped := strings.TrimSpace(line)
-	switch ext {
-	case ".go":
-		return regexp.MustCompile(`^func\s+(\([^)]*\)\s*)?`+escaped+`\b`).MatchString(stripped) ||
-			regexp.MustCompile(`^type\s+`+escaped+`\b`).MatchString(stripped)
-	case ".py":
-		return regexp.MustCompile(`^(async\s+def|def|class)\s+` + escaped + `\b`).MatchString(stripped)
-	case ".rs":
-		return regexp.MustCompile(`^(pub(\([^)]*\))?\s+)?(async\s+)?(fn|struct|enum|trait|impl)\s+` + escaped + `\b`).MatchString(stripped)
-	default:
-		return regexp.MustCompile(`^(function|class)\s+` + escaped + `\b`).MatchString(stripped)
-	}
+func looksLikeDefinition(line, symbol string, language languageBackend) bool {
+	found, ok := language.definitionSymbol(line)
+	return ok && found == symbol
 }

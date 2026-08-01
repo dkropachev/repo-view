@@ -1,0 +1,169 @@
+package repoview
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		extension string
+		name      string
+		backend   any
+	}{
+		{extension: ".go", name: "go", backend: goLanguage{}},
+		{extension: ".py", name: "python", backend: pythonLanguage{}},
+		{extension: ".rs", name: "rust", backend: rustLanguage{}},
+		{extension: ".js", name: "javascript", backend: braceLanguage{}},
+		{extension: ".mjs", name: "mjs", backend: braceLanguage{}},
+		{extension: ".jsx", name: "jsx", backend: braceLanguage{}},
+		{extension: ".ts", name: "typescript", backend: braceLanguage{}},
+		{extension: ".tsx", name: "tsx", backend: braceLanguage{}},
+		{extension: ".c", name: "c", backend: braceLanguage{}},
+		{extension: ".h", name: "c", backend: braceLanguage{}},
+		{extension: ".cpp", name: "cpp", backend: braceLanguage{}},
+		{extension: ".cs", name: "cs", backend: braceLanguage{}},
+		{extension: ".java", name: "java", backend: braceLanguage{}},
+		{extension: ".kt", name: "kt", backend: braceLanguage{}},
+		{extension: ".swift", name: "swift", backend: braceLanguage{}},
+		{extension: ".mod", name: "mod", backend: braceLanguage{}},
+	}
+
+	for _, test := range tests {
+		t.Run(test.extension, func(t *testing.T) {
+			t.Parallel()
+			backend := languageForExtension(test.extension)
+			if backend.name() != test.name {
+				t.Fatalf("name = %q, want %q", backend.name(), test.name)
+			}
+			if reflect.TypeOf(backend) != reflect.TypeOf(test.backend) {
+				t.Fatalf("backend = %T, want %T", backend, test.backend)
+			}
+		})
+	}
+}
+
+func TestSupportedExtensionsComeFromLanguageRegistry(t *testing.T) {
+	t.Parallel()
+	extensions := defaultExtensions()
+	if len(extensions) != len(languagesByExtension) {
+		t.Fatalf("extensions = %d, registry = %d", len(extensions), len(languagesByExtension))
+	}
+	for extension := range languagesByExtension {
+		if !extensions[extension] {
+			t.Fatalf("registered extension %q is not searchable", extension)
+		}
+	}
+}
+
+func TestLanguageBackendsOwnDefinitionRules(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		extension string
+		line      string
+		want      string
+	}{
+		{extension: ".go", line: "func (s Service) Run() {}", want: "Run"},
+		{extension: ".py", line: "async def fetch():", want: "fetch"},
+		{extension: ".rs", line: "pub(crate) async fn fetch() {}", want: "fetch"},
+		{extension: ".js", line: "function render() {", want: "render"},
+		{extension: ".ts", line: "class Renderer {", want: "Renderer"},
+		{extension: ".c", line: "void render(void) {", want: "render"},
+		{extension: ".java", line: "public void render() {", want: "render"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.extension, func(t *testing.T) {
+			t.Parallel()
+			got, ok := languageForExtension(test.extension).definitionSymbol(test.line)
+			if !ok || got != test.want {
+				t.Fatalf("definition = %q, %v; want %q, true", got, ok, test.want)
+			}
+		})
+	}
+}
+
+func TestLanguageBackendsOwnScopeAndImportRules(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		extension   string
+		source      string
+		line        int
+		wantStart   int
+		wantEnd     int
+		importStart int
+		importEnd   int
+	}{
+		{
+			name:        "go declarations",
+			extension:   ".go",
+			source:      "package demo\n\nimport (\n\t\"fmt\"\n)\n\nfunc run() {\n\tif true {\n\t\tfmt.Println()\n\t}\n}\n",
+			line:        9,
+			wantStart:   7,
+			wantEnd:     11,
+			importStart: 3,
+			importEnd:   5,
+		},
+		{
+			name:        "python indentation",
+			extension:   ".py",
+			source:      "import os\nfrom pathlib import Path\n\ndef run():\n    if True:\n        print(Path.cwd())\n",
+			line:        6,
+			wantStart:   5,
+			wantEnd:     6,
+			importStart: 1,
+			importEnd:   2,
+		},
+		{
+			name:        "rust braces",
+			extension:   ".rs",
+			source:      "use std::io;\n\nfn run() {\n    println!(\"ok\");\n}\n",
+			line:        4,
+			wantStart:   3,
+			wantEnd:     5,
+			importStart: 1,
+			importEnd:   1,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			backend := languageForExtension(test.extension)
+			lines := strings.Split(strings.TrimSuffix(test.source, "\n"), "\n")
+			start, end := backend.enclosingScope(lines, test.line)
+			if start != test.wantStart || end != test.wantEnd {
+				t.Fatalf("scope = %d-%d, want %d-%d", start, end, test.wantStart, test.wantEnd)
+			}
+			importStart, importEnd, ok := backend.importRange(lines)
+			if !ok || importStart != test.importStart || importEnd != test.importEnd {
+				t.Fatalf(
+					"imports = %d-%d, %v; want %d-%d, true",
+					importStart,
+					importEnd,
+					ok,
+					test.importStart,
+					test.importEnd,
+				)
+			}
+		})
+	}
+}
+
+func TestLanguageBackendsOwnCommentCleaning(t *testing.T) {
+	t.Parallel()
+	python := languageForExtension(".py")
+	pythonSource := "def run():\n    \"\"\"docs\"\"\"\n    return value  # explanation"
+	if got := python.cleanSource(pythonSource, true, true); got != "def run():\n    return value" {
+		t.Fatalf("python cleaned source = %q", got)
+	}
+
+	goBackend := languageForExtension(".go")
+	goSource := "func run() {\n\treturn // explanation\n}"
+	if got := goBackend.cleanSource(goSource, true, false); got != "func run() {\n\treturn\n}" {
+		t.Fatalf("Go cleaned source = %q", got)
+	}
+}

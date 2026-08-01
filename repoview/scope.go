@@ -5,21 +5,6 @@ import (
 	"strings"
 )
 
-func enclosingScope(lines []string, lineNo int, ext string) (int, int) {
-	if ext == ".py" {
-		return indentScope(lines, lineNo)
-	}
-	if ext == ".go" {
-		if start, end, ok := goDeclarationScope(lines, lineNo); ok {
-			return start, end
-		}
-	}
-	if start, end, ok := braceScope(lines, lineNo); ok {
-		return start, end
-	}
-	return lineNo, lineNo
-}
-
 func goDeclarationScope(lines []string, lineNo int) (int, int, bool) {
 	function := regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\b`)
 	namedType := regexp.MustCompile(`^type\s+[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]+\])?\s+(?:struct|interface)\b`)
