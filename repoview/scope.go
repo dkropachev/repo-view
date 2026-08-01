@@ -5,42 +5,6 @@ import (
 	"strings"
 )
 
-func goDeclarationScope(lines []string, lineNo int) (int, int, bool) {
-	function := regexp.MustCompile(`^func\s+(?:\([^)]*\)\s*)?[A-Za-z_][A-Za-z0-9_]*\b`)
-	namedType := regexp.MustCompile(`^type\s+[A-Za-z_][A-Za-z0-9_]*(?:\[[^]]+\])?\s+(?:struct|interface)\b`)
-	for pos := lineNo - 1; pos >= 0; pos-- {
-		stripped := strings.TrimSpace(lines[pos])
-		if !function.MatchString(stripped) && !namedType.MatchString(stripped) {
-			continue
-		}
-		end, ok := declarationBraceEnd(lines, pos)
-		if ok && pos+1 <= lineNo && lineNo <= end {
-			return pos + 1, end, true
-		}
-	}
-	return 0, 0, false
-}
-
-func declarationBraceEnd(lines []string, start int) (int, bool) {
-	depth := 0
-	seenOpen := false
-	for pos := start; pos < len(lines); pos++ {
-		for _, char := range withoutStrings(lines[pos]) {
-			switch char {
-			case '{':
-				depth++
-				seenOpen = true
-			case '}':
-				depth--
-				if seenOpen && depth == 0 {
-					return pos + 1, true
-				}
-			}
-		}
-	}
-	return 0, false
-}
-
 func braceScope(lines []string, lineNo int) (int, int, bool) {
 	idx := lineNo - 1
 	startIdx, ok := findBraceStart(lines, idx)

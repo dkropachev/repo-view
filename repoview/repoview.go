@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 type RepoView struct {
@@ -193,29 +194,45 @@ func readLines(path string) ([]string, error) {
 	return lines, nil
 }
 
-func containsSymbol(line, symbol string) bool {
-	pos := strings.Index(line, symbol)
-	for pos >= 0 {
-		beforeOK := pos == 0 || !isIdent(rune(line[pos-1]))
-		after := pos + len(symbol)
-		afterOK := after >= len(line) || !isIdent(rune(line[after]))
-		if beforeOK && afterOK {
-			return true
-		}
-		next := strings.Index(line[pos+1:], symbol)
-		if next < 0 {
-			return false
-		}
-		pos += next + 1
+func countSymbolOccurrences(line, symbol string) int {
+	if symbol == "" {
+		return 0
 	}
-	return false
+	count := 0
+	offset := 0
+	for offset <= len(line)-len(symbol) {
+		relative := strings.Index(line[offset:], symbol)
+		if relative < 0 {
+			break
+		}
+		pos := offset + relative
+		before, _ := utf8.DecodeLastRuneInString(line[:pos])
+		beforeOK := pos == 0 || !isIdent(before)
+		after := pos + len(symbol)
+		afterRune, _ := utf8.DecodeRuneInString(line[after:])
+		afterOK := after >= len(line) || !isIdent(afterRune)
+		if beforeOK && afterOK {
+			count++
+		}
+		_, size := utf8.DecodeRuneInString(line[pos:])
+		if size == 0 {
+			size = 1
+		}
+		offset = pos + size
+	}
+	return count
 }
 
 func isIdent(r rune) bool {
 	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
-func looksLikeDefinition(line, symbol string, language languageBackend) bool {
-	found, ok := language.definitionSymbol(line)
-	return ok && found == symbol
+func definitionCount(definitions []sourceDefinition, lineNo int, symbol string) int {
+	count := 0
+	for _, definition := range definitions {
+		if definition.line == lineNo && definition.symbol == symbol {
+			count++
+		}
+	}
+	return count
 }

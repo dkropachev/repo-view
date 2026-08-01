@@ -177,12 +177,18 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 			continue
 		}
 		language := languageForExtension(filepath.Ext(path))
+		definitions := language.sourceDefinitions(lines)
 		skipLines := language.ignoredSearchLines(
 			lines,
 			opts.DropComments || opts.NoComments,
 			opts.DropDocstrings,
 		)
-		for idx, line := range lines {
+		searchLines := language.searchLines(
+			lines,
+			opts.DropComments || opts.NoComments,
+			opts.NoStrings,
+		)
+		for idx, line := range searchLines {
 			lineNo := idx + 1
 			if skipLines[lineNo] {
 				continue
@@ -194,34 +200,41 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 				if opts.Limit > 0 && len(state.results) > opts.Limit {
 					continue
 				}
-				if !containsSymbol(line, state.symbol) {
+				occurrences := countSymbolOccurrences(line, state.symbol)
+				if occurrences == 0 {
 					continue
 				}
-				if opts.NoComments && symbolOnlyInComment(line, state.symbol, language) {
-					continue
+				definitionsOnLine := definitionCount(definitions, lineNo, state.symbol)
+				matchKinds := []bool{false}
+				if definitionsOnLine > 0 {
+					matchKinds = []bool{true}
+					if occurrences > definitionsOnLine {
+						matchKinds = append(matchKinds, false)
+					}
 				}
-				if opts.NoStrings && symbolOnlyInStrings(line, state.symbol) {
-					continue
+				for _, isDefinition := range matchKinds {
+					if opts.Limit > 0 && len(state.results) > opts.Limit {
+						break
+					}
+					if !includeKind(opts.Include, isDefinition) {
+						continue
+					}
+					result := r.resultForHit(
+						state.symbol,
+						kindForMatch(isDefinition),
+						rel,
+						language,
+						lines,
+						lineNo,
+						opts,
+					)
+					key := resultKey(result)
+					if state.seen[key] {
+						continue
+					}
+					state.seen[key] = true
+					state.results = append(state.results, result)
 				}
-				isDef := looksLikeDefinition(line, state.symbol, language)
-				if !includeKind(opts.Include, isDef) {
-					continue
-				}
-				result := r.resultForHit(
-					state.symbol,
-					kindForMatch(isDef),
-					rel,
-					language,
-					lines,
-					lineNo,
-					opts,
-				)
-				key := resultKey(result)
-				if state.seen[key] {
-					continue
-				}
-				state.seen[key] = true
-				state.results = append(state.results, result)
 			}
 		}
 	}
@@ -274,7 +287,7 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 		return InspectResponse{}, fmt.Errorf("line %d out of range for %s", lineNo, path)
 	}
 	language := languageForExtension(filepath.Ext(path))
-	symbol := bestSymbolOnLine(lines[lineNo-1], language)
+	symbol := bestSymbolOnLine(lines, lineNo, language)
 	results := []Result{
 		r.resultForHit(symbol, "scope", filepath.ToSlash(path), language, lines, lineNo, opts),
 	}
@@ -360,15 +373,13 @@ func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
 		return OutlineResponse{}, err
 	}
 	language := languageForExtension(filepath.Ext(path))
-	results := make([]Result, 0)
-	for idx, line := range lines {
-		lineNo := idx + 1
-		symbol, ok := language.definitionSymbol(line)
-		if !ok {
-			continue
-		}
+	definitions := language.sourceDefinitions(lines)
+	results := make([]Result, 0, len(definitions))
+	for _, definition := range definitions {
+		lineNo := definition.line
+		symbol := definition.symbol
 		result := r.resultForHit(symbol, "def", filepath.ToSlash(path), language, lines, lineNo, opts)
-		result.Signature = strings.TrimSpace(line)
+		result.Signature = strings.TrimSpace(lines[lineNo-1])
 		if opts.Limit > 0 && len(results) >= opts.Limit {
 			return OutlineResponse{
 				Path:             filepath.ToSlash(path),
@@ -493,7 +504,7 @@ func (r *RepoView) resultForRange(
 	} else if len(scopes) > 1 {
 		result.Scopes = scopes
 	}
-	if kind == "def" && result.Scope == "" {
+	if kind == "def" {
 		result.Scope = symbol
 	}
 	if opts.Return != ReturnLocations {
@@ -502,9 +513,7 @@ func (r *RepoView) resultForRange(
 			focus = hitLines[0]
 		}
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
-			snippet(lines, start, end, focus, opts.MaxCodeLines)
-		result.Code = language.cleanSource(result.Code, opts.DropComments, opts.DropDocstrings)
-		result.Code = strings.TrimRight(result.Code, "\n")
+			resultSnippet(language, lines, start, end, focus, opts)
 	}
 	return result
 }
@@ -535,16 +544,43 @@ func (r *RepoView) resultForHit(
 		Language:  language.name(),
 		Scope:     scopeName(lines, lineNo, language),
 	}
-	if kind == "def" && result.Scope == "" {
+	if kind == "def" {
 		result.Scope = symbol
 	}
 	if opts.Return != ReturnLocations {
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
-			snippet(lines, start, end, lineNo, opts.MaxCodeLines)
-		result.Code = language.cleanSource(result.Code, opts.DropComments, opts.DropDocstrings)
-		result.Code = strings.TrimRight(result.Code, "\n")
+			resultSnippet(language, lines, start, end, lineNo, opts)
 	}
 	return result
+}
+
+func resultSnippet(
+	language languageBackend,
+	lines []string,
+	start, end, focus int,
+	opts Options,
+) (string, int, int, bool) {
+	snippetLines := lines
+	cleanedWholeSource := false
+	if cleaner, ok := language.(linePreservingSourceCleaner); ok &&
+		(opts.DropComments || opts.DropDocstrings) {
+		cleaned := cleaner.cleanSourceLines(lines, opts.DropComments, opts.DropDocstrings)
+		if len(cleaned) == len(lines) {
+			snippetLines = cleaned
+			cleanedWholeSource = true
+		}
+	}
+	code, codeStart, codeEnd, truncated := snippet(
+		snippetLines,
+		start,
+		end,
+		focus,
+		opts.MaxCodeLines,
+	)
+	if !cleanedWholeSource {
+		code = language.cleanSource(code, opts.DropComments, opts.DropDocstrings)
+	}
+	return strings.TrimRight(code, "\n"), codeStart, codeEnd, truncated
 }
 
 func normalizeOptions(opts Options, defaultReturn Return) Options {
@@ -740,21 +776,35 @@ func parseLocation(location string) (string, int, error) {
 	return location[:idx], lineNo, nil
 }
 
-func bestSymbolOnLine(line string, language languageBackend) string {
+func bestSymbolOnLine(lines []string, lineNo int, language languageBackend) string {
+	for _, definition := range language.sourceDefinitions(lines) {
+		if definition.line == lineNo {
+			return definition.symbol
+		}
+	}
+	if resolver, ok := language.(interface {
+		symbolOnLine([]string, int) (string, bool)
+	}); ok {
+		if symbol, found := resolver.symbolOnLine(lines, lineNo); found {
+			return symbol
+		}
+	}
+	line := language.searchLines(lines, true, true)[lineNo-1]
 	if symbol, ok := language.definitionSymbol(line); ok {
 		return symbol
 	}
-	memberCall := regexp.MustCompile(`\.([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
-	if match := memberCall.FindStringSubmatch(line); len(match) == 2 {
+	identifier := `[\p{L}_][\p{L}\p{Nd}_]*`
+	member := regexp.MustCompile(`\.\s*(` + identifier + `)`)
+	if match := member.FindStringSubmatch(line); len(match) == 2 {
 		return match[1]
 	}
-	directCall := regexp.MustCompile(`\b([A-Za-z_][A-Za-z0-9_]*)\s*\(`)
+	directCall := regexp.MustCompile(`(` + identifier + `)\s*(?:\[|\()`)
 	for _, match := range directCall.FindAllStringSubmatch(line, -1) {
 		if len(match) == 2 && match[1] != "_" && !isKeyword(match[1]) {
 			return match[1]
 		}
 	}
-	ident := regexp.MustCompile(`[A-Za-z_][A-Za-z0-9_]*`)
+	ident := regexp.MustCompile(identifier)
 	for _, symbol := range ident.FindAllString(line, -1) {
 		if symbol != "_" && !isKeyword(symbol) {
 			return symbol
@@ -765,9 +815,30 @@ func bestSymbolOnLine(line string, language languageBackend) string {
 
 func scopeName(lines []string, lineNo int, language languageBackend) string {
 	start, end := language.enclosingScope(lines, lineNo)
+	definitions := language.sourceDefinitions(lines)
+	bestSymbol := ""
+	bestSize := 0
+	for _, definition := range definitions {
+		if !definition.ownsScope {
+			continue
+		}
+		if lineNo < definition.scopeStart || lineNo > definition.scopeEnd {
+			continue
+		}
+		size := definition.scopeEnd - definition.scopeStart
+		if bestSymbol == "" || size < bestSize {
+			bestSymbol = definition.symbol
+			bestSize = size
+		}
+	}
+	if bestSymbol != "" {
+		return bestSymbol
+	}
 	for pos := min(lineNo, end); pos >= start; pos-- {
-		if symbol, ok := language.definitionSymbol(lines[pos-1]); ok {
-			return symbol
+		for _, definition := range definitions {
+			if definition.ownsScope && definition.line == pos {
+				return definition.symbol
+			}
 		}
 	}
 	forwardEnd := end
@@ -783,8 +854,10 @@ func scopeName(lines []string, lineNo int, language languageBackend) string {
 			strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		if symbol, ok := language.definitionSymbol(lines[pos-1]); ok {
-			return symbol
+		for _, definition := range definitions {
+			if definition.ownsScope && definition.line == pos {
+				return definition.symbol
+			}
 		}
 		break
 	}
@@ -834,15 +907,6 @@ func importResult(path string, language languageBackend, lines []string) (Result
 		Language:  language.name(),
 		Code:      strings.Join(lines[start-1:end], "\n"),
 	}, true
-}
-
-func symbolOnlyInStrings(line, symbol string) bool {
-	return !containsSymbol(withoutStrings(line), symbol)
-}
-
-func symbolOnlyInComment(line, symbol string, language languageBackend) bool {
-	code := language.stripComment(line)
-	return containsSymbol(line, symbol) && !containsSymbol(code, symbol)
 }
 
 func isKeyword(symbol string) bool {
