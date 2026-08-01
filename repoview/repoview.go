@@ -224,7 +224,17 @@ func countSymbolOccurrences(line, symbol string) int {
 }
 
 func isIdent(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+	return pythonIdentifierContinue(r) || r == '_' || unicode.In(
+		r,
+		unicode.L,
+		unicode.Nl,
+		unicode.Nd,
+		unicode.Mn,
+		unicode.Mc,
+		unicode.Pc,
+		unicode.Other_ID_Start,
+		unicode.Other_ID_Continue,
+	)
 }
 
 func definitionCount(definitions []sourceDefinition, lineNo int, symbol string) int {
