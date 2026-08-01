@@ -43,6 +43,12 @@ type sourceBackendPreparer interface {
 	prepareSource(lines []string) languageBackend
 }
 
+// symbolOccurrenceCounter lets a backend apply language-specific identifier
+// boundaries without changing matching rules for every other language.
+type symbolOccurrenceCounter interface {
+	countSymbolOccurrences(line, symbol string) int
+}
+
 // optionAwareSearchCleaner lets a backend mask constructs, such as Python
 // docstrings, that cannot be represented by the languageBackend's two search
 // flags without hiding executable code on the same physical line.
@@ -54,9 +60,8 @@ type optionAwareSearchCleaner interface {
 }
 
 // navigationScopeResolver separates the smallest syntactic suite from the
-// named definition shown for a ReturnScope result. Python needs both: an if
-// suite is its enclosingScope, while navigation should return its whole
-// decorated function when one owns the selected line.
+// named definition shown for a ReturnScope result. Indentation and brace
+// languages can both have a smaller control-flow suite inside a named owner.
 type navigationScopeResolver interface {
 	navigationScope(lines []string, lineNo int) (int, int)
 }
