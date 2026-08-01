@@ -21,11 +21,26 @@ const (
 type languageBackend interface {
 	name() string
 	definitionSymbol(line string) (string, bool)
+	sourceDefinitions(lines []string) []sourceDefinition
 	enclosingScope(lines []string, lineNo int) (int, int)
 	importRange(lines []string) (int, int, bool)
 	cleanSource(source string, dropComments, dropDocstrings bool) string
 	ignoredSearchLines(lines []string, dropComments, dropDocstrings bool) map[int]bool
+	searchLines(lines []string, noComments, noStrings bool) []string
 	stripComment(line string) string
+}
+
+type linePreservingSourceCleaner interface {
+	cleanSourceLines(lines []string, dropComments, dropDocstrings bool) []string
+}
+
+type sourceDefinition struct {
+	symbol     string
+	line       int
+	column     int
+	scopeStart int
+	scopeEnd   int
+	ownsScope  bool
 }
 
 type languageDefinition struct {
@@ -72,6 +87,26 @@ func (l languageDefinition) definitionSymbol(line string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (l languageDefinition) sourceDefinitions(lines []string) []sourceDefinition {
+	definitions := make([]sourceDefinition, 0)
+	for idx, line := range lines {
+		symbol, ok := l.definitionSymbol(line)
+		if !ok {
+			continue
+		}
+		lineNo := idx + 1
+		definitions = append(definitions, sourceDefinition{
+			symbol:     symbol,
+			line:       lineNo,
+			column:     strings.Index(line, symbol) + 1,
+			scopeStart: lineNo,
+			scopeEnd:   lineNo,
+			ownsScope:  true,
+		})
+	}
+	return definitions
 }
 
 func (l languageDefinition) enclosingScope(lines []string, lineNo int) (int, int) {
@@ -133,6 +168,23 @@ func (l languageDefinition) ignoredSearchLines(
 		markPythonDocstringLines(lines, ignored)
 	}
 	return ignored
+}
+
+func (l languageDefinition) searchLines(
+	lines []string,
+	noComments, noStrings bool,
+) []string {
+	searchable := make([]string, len(lines))
+	for idx, line := range lines {
+		if noComments {
+			line = l.stripComment(line)
+		}
+		if noStrings {
+			line = withoutStrings(line)
+		}
+		searchable[idx] = line
+	}
+	return searchable
 }
 
 func (l languageDefinition) stripComment(line string) string {

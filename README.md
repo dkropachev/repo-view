@@ -224,17 +224,19 @@ for _, result := range response.Results {
 }
 ```
 
-Go, Rust, JavaScript, TypeScript, Java, C/C++, and similar brace languages use a
-conservative brace scanner. Python uses indentation scanning.
+Go uses the standard library parser and scanner, with a conservative fallback
+for incomplete source. Rust, JavaScript, TypeScript, Java, C/C++, and similar
+brace languages use a brace scanner. Python uses indentation scanning.
 
 ## Language backends
 
 Language-dependent navigation is isolated behind a backend interface. Each
 backend owns its language name, definition recognition, scope selection,
-import extraction, comment syntax, and docstring behavior. Go, Python, and
-Rust have dedicated implementations. Brace-based languages are registered as
-distinct language backends while sharing the common brace scanner and generic
-definition matcher.
+import extraction, comment syntax, and docstring behavior. The Go backend uses
+`go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
+comment/string handling. Python and Rust also have dedicated implementations.
+Brace-based languages are registered as distinct language backends while
+sharing the common brace scanner and generic definition matcher.
 
 The searchable-extension list is derived from the backend registry, so adding
 a language requires registering its extensions in one place. Shared scanning,
