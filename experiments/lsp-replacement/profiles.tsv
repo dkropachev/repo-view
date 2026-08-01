@@ -1,0 +1,30 @@
+# name	return	context	limit	max_code_lines	max_patch_lines	reasoning_effort	answer_guard	navigation_policy	navigation_command_cap	description
+balanced	context	4	20	60	300	inherit	off	terminal	1	Control with inherited reasoning
+context2	context	2	20	60	300	inherit	off	terminal	1	Smaller source window
+patch-only	locations	0	20	60	300	inherit	off	terminal	1	Exact patch plus changed ranges, no source snippets
+balanced-high	context	4	20	60	300	high	off	terminal	1	Balanced packet with lower reasoning effort
+patch-high	locations	0	20	60	300	high	off	terminal	1	Patch-only packet with lower reasoning effort
+balanced-medium	context	4	20	60	300	medium	off	terminal	1	Balanced packet with medium reasoning effort
+context2-medium	context	2	20	60	300	medium	off	terminal	1	Smaller context with medium reasoning effort
+patch-medium	locations	0	20	60	300	medium	off	terminal	1	Patch-only packet with medium reasoning effort
+guarded-high	context	4	20	60	300	high	on	terminal	1	Recommended default: quality-confirmed lower-cost profile
+guarded-medium	context	4	20	60	300	medium	on	terminal	1	Balanced packet, medium reasoning, explicit answer completeness guard
+investigative-high	context	4	20	60	300	high	on	adaptive	0	Unbounded exploratory control; rejected on deep tasks
+investigative-batched-high	context	4	20	60	300	high	on	batched	20	Batched multi-stage navigation with a 20-repo-view-invocation ceiling
+investigative-batched-medium	context	4	20	60	300	medium	on	batched	20	Batched multi-stage navigation with medium reasoning
+investigative-budgeted-high	context	4	20	60	300	high	on	batched	24	Rejected writable-budget control for the read-only sandbox
+investigative-budgeted-medium	context	4	20	60	300	medium	on	batched	24	Rejected writable-budget control with medium reasoning
+investigative-mandatory-high	context	4	20	60	300	high	on	batched	24	Mandatory repo-view navigation with a transcript-gated 24-invocation ceiling
+investigative-mandatory-medium	context	4	20	60	300	medium	on	batched	24	Mandatory repo-view navigation, transcript gate, and medium reasoning
+investigative-confirmed-high	context	4	20	60	300	high	on	batched	26	Dependency- and clock-confirmed navigation with a 26-repo-view-invocation ceiling
+investigative-confirmed-medium	context	4	20	60	300	medium	on	batched	26	Dependency- and clock-confirmed navigation with medium reasoning
+investigative-complete-high	context	4	20	60	300	high	on	batched	32	Hit-preserving scopes and complete interface audit with a 32-repo-view-invocation ceiling
+investigative-complete-medium	context	4	20	60	300	medium	on	batched	32	Hit-preserving scopes and complete interface audit with medium reasoning
+investigative-enforced-high	context	4	20	60	300	high	on	batched	32	Mechanically enforced 32-repo-view-invocation budget with hit-preserving scopes
+investigative-enforced-medium	context	4	20	60	300	medium	on	batched	32	Mechanically enforced 32-repo-view-invocation budget with medium reasoning
+investigative-transcript-high	context	4	20	60	300	high	on	batched	32	Live-transcript-enforced 32-repo-view-invocation budget with hit-preserving scopes
+investigative-transcript-medium	context	4	20	60	300	medium	on	batched	32	Live-transcript-enforced 32-repo-view-invocation budget with medium reasoning
+investigative-path-complete-high	context	4	20	60	300	high	on	batched	32	Transcript budget plus per-category production-path completeness gate
+investigative-path-complete-medium	context	4	20	60	300	medium	on	batched	32	Transcript budget and production-path gate with medium reasoning
+investigative-verified-high	context	4	20	60	300	high	on	batched	34	Verified contracts, production paths, and direct/indirect/upstream test evidence
+investigative-verified-medium	context	4	20	60	300	medium	on	batched	34	Verified evidence matrix with medium reasoning

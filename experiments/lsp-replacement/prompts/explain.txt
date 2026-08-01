@@ -1,0 +1,1 @@
+Explain changes in commit {{COMMIT_SHORT}} compared with its first parent ({{BASE}}). Describe the behavior change, affected code paths, tests, and performance rationale. Read only; do not modify files.

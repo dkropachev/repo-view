@@ -1,0 +1,6 @@
+{"type":"item.started","item":{"id":"plan-1","type":"todo_list","items":[]}}
+{"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"rg Alpha ."}}
+{"type":"item.completed","item":{"id":"command-1","type":"command_execution","command":"rg Alpha .","aggregated_output":"pkg/a.go:1: Alpha","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"command-2","type":"command_execution","command":"sed -n '1,20p' pkg/a.go"}}
+{"type":"item.completed","item":{"id":"command-2","type":"command_execution","command":"sed -n '1,20p' pkg/a.go","aggregated_output":"package pkg","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"plan-1","type":"todo_list","items":[]}}

@@ -1,0 +1,347 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_view_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_view_cache_dir="${REPO_VIEW_CACHE_DIR:-${repo_view_root}/.cache/bin}"
+changed_return="${REPO_VIEW_CHANGED_RETURN:-context}"
+changed_context="${REPO_VIEW_CHANGED_CONTEXT:-4}"
+changed_limit="${REPO_VIEW_CHANGED_LIMIT:-20}"
+changed_max_code_lines="${REPO_VIEW_CHANGED_MAX_CODE_LINES:-60}"
+changed_max_patch_lines="${REPO_VIEW_CHANGED_MAX_PATCH_LINES:-300}"
+reasoning_effort="${REPO_VIEW_REASONING_EFFORT:-high}"
+answer_guard="${REPO_VIEW_ANSWER_GUARD:-on}"
+navigation_policy="${REPO_VIEW_NAVIGATION_POLICY:-terminal}"
+navigation_context_cap="${REPO_VIEW_NAVIGATION_CONTEXT_CAP:-20}"
+navigation_command_cap="${REPO_VIEW_NAVIGATION_COMMAND_CAP:-0}"
+required_navigation_root="${REPO_VIEW_REQUIRED_ROOT:-}"
+required_navigation_base_commit="${REPO_VIEW_REQUIRED_BASE_COMMIT:-}"
+required_changed_return="${REPO_VIEW_REQUIRED_CHANGED_RETURN:-}"
+required_changed_context="${REPO_VIEW_REQUIRED_CHANGED_CONTEXT:-}"
+require_navigation_semantics="${REPO_VIEW_REQUIRE_NAVIGATION_SEMANTICS:-}"
+
+case "${changed_return}" in
+  locations|line|context|scope) ;;
+  *)
+    printf 'invalid REPO_VIEW_CHANGED_RETURN: %s\n' "${changed_return}" >&2
+    exit 2
+    ;;
+esac
+for numeric in changed_context changed_limit changed_max_code_lines changed_max_patch_lines navigation_context_cap navigation_command_cap; do
+  value="${!numeric}"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    printf '%s must be a non-negative integer: %s\n' "${numeric}" "${value}" >&2
+    exit 2
+  fi
+done
+case "${reasoning_effort}" in
+  ""|inherit|low|medium|high|xhigh|ultra) ;;
+  *)
+    printf 'invalid REPO_VIEW_REASONING_EFFORT: %s\n' "${reasoning_effort}" >&2
+    exit 2
+    ;;
+esac
+case "${answer_guard}" in
+  on|off) ;;
+  *)
+    printf 'invalid REPO_VIEW_ANSWER_GUARD: %s\n' "${answer_guard}" >&2
+    exit 2
+    ;;
+esac
+case "${navigation_policy}" in
+  terminal|adaptive|batched) ;;
+  *)
+    printf 'invalid REPO_VIEW_NAVIGATION_POLICY: %s\n' "${navigation_policy}" >&2
+    exit 2
+    ;;
+esac
+if [[ "${navigation_policy}" == "batched" && "${navigation_command_cap}" -eq 0 ]]; then
+  printf 'REPO_VIEW_NAVIGATION_COMMAND_CAP must be positive for batched navigation\n' >&2
+  exit 2
+fi
+navigation_semantics_configured=false
+if [[ -n "${required_navigation_root}" ||
+      -n "${required_navigation_base_commit}" ||
+      -n "${required_changed_return}" ||
+      -n "${required_changed_context}" ||
+      -n "${require_navigation_semantics}" ]]; then
+  navigation_semantics_configured=true
+fi
+if "${navigation_semantics_configured}"; then
+  if [[ "${require_navigation_semantics}" != "1" ||
+        -z "${required_navigation_root}" ||
+        -z "${required_navigation_base_commit}" ||
+        -z "${required_changed_return}" ||
+        -z "${required_changed_context}" ]]; then
+    printf 'mechanical navigation semantics configuration is incomplete\n' >&2
+    exit 2
+  fi
+  if [[ "${navigation_command_cap}" -eq 0 ]]; then
+    printf 'mechanical navigation semantics require a positive command cap\n' >&2
+    exit 2
+  fi
+  if [[ ! "${required_changed_context}" =~ ^[0-9]+$ ]]; then
+    printf 'REPO_VIEW_REQUIRED_CHANGED_CONTEXT must be a non-negative integer: %s\n' \
+      "${required_changed_context}" >&2
+    exit 2
+  fi
+  if [[ ! "${required_navigation_base_commit}" =~ ^([0-9a-f]{40}|[0-9a-f]{64})$ ]]; then
+    printf 'REPO_VIEW_REQUIRED_BASE_COMMIT must be a full lowercase object ID: %s\n' \
+      "${required_navigation_base_commit}" >&2
+    exit 2
+  fi
+  case "${required_changed_return}" in
+    locations|line|context|scope) ;;
+    *)
+      printf 'invalid REPO_VIEW_REQUIRED_CHANGED_RETURN: %s\n' \
+        "${required_changed_return}" >&2
+      exit 2
+      ;;
+  esac
+fi
+if [[ "${navigation_command_cap}" -gt 0 ]]; then
+  json_events=false
+  for argument in "$@"; do
+    if [[ "${argument}" == "--json" ]]; then
+      json_events=true
+      break
+    fi
+  done
+  if ! "${json_events}"; then
+    printf 'capped repo-view navigation requires codex --json events\n' >&2
+    exit 2
+  fi
+fi
+
+validate_directory_path() {
+  local path="$1"
+  local label="$2"
+  local create_missing="$3"
+  local relative component current
+  local -a components
+  if [[ "${path}" != /* ||
+    "${path}" == "/" ||
+    "${path}" == */ ||
+    "${path}" == *//* ||
+    "${path}" =~ (^|/)\.\.?(/|$) ||
+    "${path}" =~ [[:cntrl:]] ]]; then
+    printf '%s must be a clean absolute directory path: %s\n' \
+      "${label}" "${path}" >&2
+    return 1
+  fi
+  relative="${path#/}"
+  IFS='/' read -r -a components <<< "${relative}"
+  current=""
+  for component in "${components[@]}"; do
+    current="${current}/${component}"
+    if [[ -L "${current}" ]]; then
+      printf '%s must not contain a symlink component: %s\n' \
+        "${label}" "${current}" >&2
+      return 1
+    fi
+    if [[ -e "${current}" ]]; then
+      if [[ ! -d "${current}" ]]; then
+        printf '%s contains a non-directory component: %s\n' \
+          "${label}" "${current}" >&2
+        return 1
+      fi
+      continue
+    fi
+    if ! "${create_missing}"; then
+      printf '%s parent directory does not exist: %s\n' \
+        "${label}" "${current}" >&2
+      return 1
+    fi
+    if ! mkdir -m 700 -- "${current}"; then
+      printf 'failed to create %s component: %s\n' \
+        "${label}" "${current}" >&2
+      return 1
+    fi
+    if [[ -L "${current}" || ! -d "${current}" ]]; then
+      printf '%s component changed while it was created: %s\n' \
+        "${label}" "${current}" >&2
+      return 1
+    fi
+  done
+}
+
+validate_directory_path "${repo_view_cache_dir}" "REPO_VIEW_CACHE_DIR" true
+if [[ -n "${REPO_VIEW_BIN_DIR:-}" ]]; then
+  repo_view_bin_dir="${REPO_VIEW_BIN_DIR}"
+  bin_parent="${repo_view_bin_dir%/*}"
+  if [[ -z "${bin_parent}" ]]; then
+    bin_parent="/"
+  fi
+  validate_directory_path "${bin_parent}" "REPO_VIEW_BIN_DIR" false
+  if [[ -e "${repo_view_bin_dir}" || -L "${repo_view_bin_dir}" ]]; then
+    printf 'REPO_VIEW_BIN_DIR target must not already exist: %s\n' \
+      "${repo_view_bin_dir}" >&2
+    exit 2
+  fi
+  if ! mkdir -m 700 -- "${repo_view_bin_dir}"; then
+    printf 'failed to create REPO_VIEW_BIN_DIR: %s\n' \
+      "${repo_view_bin_dir}" >&2
+    exit 2
+  fi
+else
+  repo_view_bin_dir="$(mktemp -d "${repo_view_cache_dir}/repo-view-run.XXXXXX")"
+fi
+
+linker_flags=(
+  "-X main.enforcedLimitCap=${changed_limit}"
+  "-X main.enforcedContextCap=${navigation_context_cap}"
+  "-X main.enforcedMaxCodeLinesCap=${changed_max_code_lines}"
+  "-X main.enforcedMaxPatchLinesCap=${changed_max_patch_lines}"
+)
+quote_linker_argument() {
+  local argument="$1"
+  if [[ "${argument}" == *"'"* && "${argument}" == *'"'* ]]; then
+    printf 'linker argument contains both quote characters\n' >&2
+    return 1
+  elif [[ "${argument}" =~ [[:space:]] && "${argument}" == *"'"* ]]; then
+    printf '"%s"' "${argument}"
+  elif [[ "${argument}" =~ [[:space:]] || "${argument}" == *'"'* ]]; then
+    printf "'%s'" "${argument}"
+  elif [[ "${argument}" == *"'"* ]]; then
+    printf '"%s"' "${argument}"
+  else
+    printf '%s' "${argument}"
+  fi
+}
+if "${navigation_semantics_configured}"; then
+  linker_flags+=(
+    "-X $(quote_linker_argument "main.enforcedNavigationRoot=${required_navigation_root}")"
+    "-X $(quote_linker_argument "main.enforcedNavigationBaseCommit=${required_navigation_base_commit}")"
+    "-X $(quote_linker_argument "main.enforcedChangedReturn=${required_changed_return}")"
+    "-X $(quote_linker_argument "main.enforcedChangedContext=${required_changed_context}")"
+    "-X main.enforcedNavigationSemantics=1"
+  )
+fi
+navigation_transcript=""
+cleanup_navigation_transcript() {
+  if [[ -n "${navigation_transcript}" ]]; then
+    rm -f -- "${navigation_transcript}"
+  fi
+  rm -f -- "${repo_view_bin_dir}/repo-view"
+  rmdir -- "${repo_view_bin_dir}" 2>/dev/null || true
+}
+trap cleanup_navigation_transcript EXIT
+if [[ "${navigation_command_cap}" -gt 0 ]]; then
+  navigation_transcript="$(mktemp "${repo_view_bin_dir}/navigation-transcript.XXXXXX.jsonl")"
+  linker_flags+=(
+    "-X main.enforcedNavigationCommandCap=${navigation_command_cap}"
+    "-X $(quote_linker_argument "main.enforcedNavigationTranscriptPath=${navigation_transcript}")"
+  )
+fi
+build_flags=(-ldflags "${linker_flags[*]}")
+
+(
+  cd "${repo_view_root}"
+  env \
+    -u GOOS \
+    -u GOARCH \
+    -u GO386 \
+    -u GOAMD64 \
+    -u GOARM \
+    -u GOARM64 \
+    -u GOMIPS \
+    -u GOMIPS64 \
+    -u GOPPC64 \
+    -u GORISCV64 \
+    -u GOWASM \
+    -u CGO_ENABLED \
+    -u CC \
+    -u CXX \
+    -u CGO_CFLAGS \
+    -u CGO_CPPFLAGS \
+    -u CGO_CXXFLAGS \
+    -u CGO_LDFLAGS \
+    -u PKG_CONFIG \
+    -u GOROOT \
+    -u GOEXPERIMENT \
+    -u GODEBUG \
+    GO111MODULE=on \
+    GOENV=off \
+    GOTOOLCHAIN=local \
+    GOWORK=off \
+    GOFLAGS='-mod=readonly -trimpath -buildvcs=false' \
+    go build "${build_flags[@]}" \
+      -o "${repo_view_bin_dir}/repo-view" \
+      ./cmd/repo-view
+)
+
+answer_guard_instructions=""
+if [[ "${answer_guard}" == "on" ]]; then
+  if [[ "${navigation_policy}" == "batched" ]]; then
+    answer_guard_instructions='Before answering a change task, check completeness against the changed response and any follow-up evidence. Cite the public producer contract and returned-value interface declarations separately; implementation files do not substitute for those contract citations. For each requested production-path category, require cited construction or delegation and a cited caller that consumes the returned value. Verify that every adjacent edge belongs to the same callable chain; a method declaration, including a sibling method on the constructed type, is not caller evidence. A category label without observable use is incomplete. Separate changed-path tests, indirect unchanged-wrapper tests, and upstream dependency tests, and trace helper calls before claiming a method lacks coverage. When external dependency behavior is discussed, explicitly state and cite the version selected by the repository manifest; a module-cache path alone is not manifest evidence. For this reservation audit, both explanation and review must state that go.mod pins golang.org/x/time v0.14.0. After citing the implementation, use this exact standalone sentence in both final answers: `time.Time.UTC strips the monotonic reading: UTC delegates to setLoc, and setLoc calls stripMono.` In the test-coverage section, use these exact standalone sentences: `Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context cancellation, timer advancement, and recycle/no-recycle behavior.` `No changed-path test covers wall-clock jumps or the monotonic-time distinction.` Do not infer monotonic preservation from the short UTC method body without reading setLoc. Never state that explicit DelayFrom or CancelAt semantics depend solely on the supplied timestamp: monotonic selection depends on both the reservation anchor and comparison timestamp, and cancellation also depends on reservation and limiter state. Scope negative repository claims to the searched package or affected path unless a complete repository-wide search supports broader wording; in particular, distinguish no relevant allocation assertion from no AllocsPerRun use anywhere. Never report a shell, test, or environment command as failed unless its command and failure both appear in the raw transcript; a successful go env call is not a failed restricted-toolchain attempt. Never call evidence complete when a cited response still reports code_truncated or results_truncated; either obtain a later untruncated response covering that evidence or disclose the remaining truncation without claiming complete retrieval. For an explanation, name every changed artifact, distinguish direct changes from downstream impact, and retain every relevant numeric measurement. For a review, label each finding and residual risk with severity, include exact file:line references, and state an explicit correctness-regression conclusion. State unresolved evidence gaps or truncation explicitly. Do not omit evidence merely to be concise.'
+  else
+    answer_guard_instructions='Before answering a change task, check completeness against the changed response and any follow-up evidence. For an explanation, name every changed artifact, distinguish direct changes from downstream impact, and retain every relevant numeric measurement. For a review, label each finding and residual risk with severity, include exact file:line references, and state an explicit correctness-regression conclusion. State unresolved evidence gaps or truncation explicitly. Do not omit evidence merely to be concise.'
+  fi
+fi
+
+case "${navigation_policy}" in
+  terminal)
+    change_navigation_instructions="For a branch, commit, or PR task, changed is the only navigation command: when patch_truncated is false, answer directly from that response without git metadata commands, find, inspect, outline, git diff, rg, sed, cat, or nl."
+    ;;
+  adaptive)
+    change_navigation_instructions="For a branch, commit, or PR task, start with changed, then treat it as the change map rather than complete repository evidence. When the task asks about unchanged contracts, callers, implementations, tests, or downstream behavior, continue with targeted repo-view calls. Use find --include defs for contracts before searching references. For broad reference searches, request locations first, narrow with --path, then inspect only representative returned locations; use outline only when the structure of a known file is itself evidence. Every bounded response explicitly reports results_truncated: when true, narrow the query if omitted results matter, and when false, do not repeat the same search. Batch symbols or inspect locations only when they answer the same evidence question. The navigation bounds are experiment requirements, not suggestions: every repo-view command must use --limit ${changed_limit} or less, --max-code-lines ${changed_max_code_lines} or less, --context ${navigation_context_cap} or less, and --max-patch-lines ${changed_max_patch_lines} or less. A command exceeding a bound invalidates the run. Stop each caller category after the requested representative path is fully evidenced, and stop the investigation when every requested category is supported or explicitly unresolved. Do not follow adjacent constructors or make redundant calls merely to increase the count. Use a shell fallback only for evidence outside the repository or evidence repo-view cannot represent."
+    ;;
+  batched)
+    change_navigation_instructions="MANDATORY repository-navigation protocol for branch, commit, and PR tasks:
+1. The first command must be the listed repo-view changed command. Treat its response as the change map.
+2. Obtain repository evidence only through repo-view. Do not use git, rg, grep, sed, cat, nl, head, tail, find, or ls to read or search files under the repository root. Shell reads are allowed only for absolute dependency or standard-library paths outside the repository after repository evidence is complete.
+3. Use at most ${navigation_command_cap} repo-view invocations. Count batched CLI invocations, not returned locations. Target 26 or fewer repo-view invocations; the hard cap is emergency headroom, not a target. Every successful response includes navigation_budget. Treat remaining as authoritative: at 12 or less, freeze production-path selection and use calls only to close the selected paths, mandatory semantics, and tests; at 4 or less, use calls only for unresolved mandatory evidence; at 0, stop navigation and answer without attempting another call. The binary mechanically enforces this ceiling and the transcript analyzer also checks it. Do not inspect, unset, or override REPO_VIEW_* state; any attempt invalidates the run.
+4. Stay within --limit ${changed_limit}, --max-code-lines ${changed_max_code_lines}, --context ${navigation_context_cap}, and --max-patch-lines ${changed_max_patch_lines}. Any overage invalidates the run. Numeric limits must be positive; never use 0 as a sentinel. If code is not needed, use --return locations instead of --max-code-lines 0.
+5. Immediately after changed, close mandatory non-caller evidence before exploring production paths. First use one batched find --include defs with exactly these symbols: RateLimiter, Reservation, ClockedReservation, RateLimiterImpl, ClockedRateLimiter, DynamicRateLimiterImpl, TimeSource, and RealTimeSource. ClockedReservationImpl does not exist; never search it. Then inspect the real clock implementation with one path-scoped find for NewRealTimeSource and Now, and run a dedicated repository-wide ClockedReservation reference search with --include refs --return scope; do not defer either check. Resolve the dependency manifest version at this stage. Only then search production references as locations, narrowed with repeatable --path, and batch selected PATH:LINE values into inspect --include scope. outline and inspect both accept multiple positional inputs and preserve valid items when another requested item reports error. Use these phase ceilings after changed: four calls for contracts, clock, concrete-type references, and manifest; three calls for the direct path; three for the dynamic path; six calls for the adapter path; six for all repository test evidence. Carry unused calls forward, but never exceed a phase ceiling merely to collect a second example. Before each call, name the unresolved required fact it will close; if prior output already contains that fact, do not call again.
+6. Do not search lowercase local names. Do not inspect and outline the same scope unless results_truncated proves evidence is missing. A truncated snippet is centered on its requested line and reports code_start_line/code_end_line; do not reissue that location when those bounds include the required line. Visibility of the required line does not make a response untruncated: do not describe it as completely retrieved unless a later response clears both truncation flags. Stop after one complete representative path per requested category.
+7. Audit every requested production category separately. Build a same-subsystem edge ledger for each path: constructor -> stored or passed value -> concrete production caller invocation -> delegation into the affected Reserve or ReserveN -> returned reservation consumption through OK, Delay, DelayFrom, Cancel, or CancelAt. Cite every adjacent edge. A method declaration on the constructed type, including a sibling method, does not prove that the selected subsystem invokes it. If any edge is unproven, spend remaining budget to prove it or choose a different fully linked path. For this reservation audit, prefer the shortest established owners when search returns them: service/worker/scheduler for a direct path; service/worker/pernamespaceworker.go for the dynamic path; and service/history/queues/reader_quotas.go plus reader.go for the adapter path. For the dynamic path, make one path-scoped batched reference query for NewDefaultOutgoingRateLimiter, Reserve, and Delay, then inspect all selected locations together; do not repeat constructor searches under service/history or the whole repository. Never connect scheduler_quotas.go construction to queue_scheduled.go readerRateLimiter; they are separate limiter graphs. Before answering, name the construction citation, concrete caller citation, and consumption citation for each category; do not merge evidence from two categories into one nominal path. For the preferred reader adapter path, close ReaderImpl.loadAndSubmitTasks -> ratelimiter.Wait -> MultiRequestRateLimiterImpl.Wait/Reserve -> PriorityRateLimiterImpl.Reserve -> RequestRateLimiterAdapterImpl.Reserve -> DynamicRateLimiterImpl.ReserveN -> changed RateLimiterImpl.ReserveN. Use at most this exact six-call adapter sequence: (1) find loadAndSubmitTasks, Wait, and rateLimiter in reader.go as locations; (2) inspect the returned caller, field, and storage locations together; (3) find Wait, Reserve, and ReserveN definitions together in multi_request_rate_limiter_impl.go, priority_rate_limiter_impl.go, request_rate_limiter_adapter_impl.go, and dynamic_rate_limiter_impl.go; (4) find NewReaderPriorityRateLimiter and newShardReaderRateLimiter in reader_quotas.go with scope; (5) find NewReader references in queue_base.go as locations; (6) inspect the returned queue_base.go injection and only reader.go locations still truncated after call 2. Do not probe arbitrary line numbers, re-read complete scopes, or search common/quotas constructors after reader_quotas.go already shows the nested adapter/dynamic construction. Skip a sequence call when prior output already proves its fact. The selected adapter category is incomplete if the NewReader injection edge remains unresolved, even when its lookup location is known; do not present an incomplete selected path in the final answer. ReaderImpl has no Wait method; do not invent one as shorthand. Wait or WaitN alone proves the changed path only if its inspected implementation delegates through the changed Reserve or ReserveN; an unchanged RequestRateLimiterAdapterImpl.WaitN -> ClockedRateLimiter.WaitN path is not affected-path evidence. If a candidate path reaches that unchanged WaitN chain, reject it immediately and switch paths; never present it as the selected adapter category. If adapter or health is allowed, prefer the adapter unless a health caller already shows that consumption.
+8. Resolve an external dependency version from its repository manifest before reading that version outside the repository. Use repo-view find DEPENDENCY --path MANIFEST --include refs --return line for exact manifest text. When behavior or test coverage depends on that package, inspect the selected version's implementation and focused upstream tests for delayed reservations and cancellation/refund behavior. Carry the manifest citation and exact selected version into the final answer; a dependency-cache path is not a substitute.
+9. For repository test coverage, inspect helper implementations reached by tests before declaring a method untested. Distinguish direct coverage of the changed native-return path from indirect coverage of the unchanged wrapper; in this case ClockedRateLimiter.WaitN constructs ClockedReservation and its wait tests indirectly exercise no-argument Delay and Cancel. Inspect and report local priority and multi-reservation tests for DelayFrom aggregation and CancelAt delegation, specifically common/quotas/priority_reservation_impl_test.go and common/quotas/multi_reservation_impl_test.go, in addition to changed-path, wrapper, selected production-path, and upstream tests. Do not use outline for test discovery in this audit. First search TestRateLimiterReserve, TestClockedRateLimiter_Reserve, TestClockedRateLimiter_Wait_Ok, TestClockedRateLimiter_Wait_Canceled, TestClockedRateLimiter_Wait_DeadlineWouldExceed, TestClockedRateLimiter_Wait_Recycle, TestClockedRateLimiter_WaitN_NoRecycle, waitForRateLimiterPermission, and TestRateLimit together across the changed-path, wrapper, scheduler, and per-namespace test files. Then search DelayFrom and CancelAt together, scoped only to priority_reservation_impl_test.go and multi_reservation_impl_test.go. Batch all returned representative locations into one inspect call. Search tests for the concrete production caller selected in every path. Reserve two test-phase calls for reader_test.go: one dedicated path-scoped find for newTestReader, loadAndSubmitTasks, Start, Wait, and NewReaderPriorityRateLimiter, then one inspect of returned setup and caller locations. Use the sixth test-phase call for AllocsPerRun, ReportAllocs, and BenchmarkRateLimiterReserve scoped to common/quotas. Never infer reader-path absence from a multi-path search whose results can fill before reader_test.go. Reader tests construct a real priority -> adapter -> dynamic -> RateLimiterImpl graph and invoke reader work through it; distinguish that path execution from missing assertions for delayed, cancellation/refund, or allocation semantics. Per-namespace TestRateLimit exercises the dynamic-worker caller with a mock RateLimiter; report caller timing as covered but the changed concrete delegation as not reached. Never say no dynamic-worker caller test was hit. Report whether tests exercise real direct, dynamic, and adapter or health paths end to end, and whether cancellation or refund tests assert restored quota or tokens rather than merely reaching cancellation code. Before making a negative end-to-end coverage claim, inspect whether test setup uses a real affected limiter behind mocked outer dependencies. Never generalize from one subsystem test search to the other selected paths.
+10. For time-sensitive behavior, verify both the reservation anchor timestamp and the later no-argument clock source. Go Time.UTC delegates to setLoc, which calls stripMono; inspect enough standard-library source to see that delegation and state that UTC strips the monotonic reading. Claim monotonic comparison only when both timestamps retain monotonic readings. Explicit DelayFrom and CancelAt still compare against reservation state anchored earlier; never say their behavior depends solely on the supplied timestamp. Include rejected-reservation behavior in the method matrix: OK is false, Delay returns InfDuration, and cancellation is a no-op.
+11. Preserve unresolved out-of-repository risk for exported dynamic types. Absence of repository references does not eliminate external consumers that type-assert an exported interface value; state that distinction explicitly. Distinguish aggregate performance claims from unavailable raw commands, samples, variance, and confidence evidence."
+    ;;
+esac
+
+repo_view_instructions="$(cat <<EOF
+Use repo-view as the primary code-navigation tool. Pick exactly one initial command from this table:
+- Branch, commit, or PR task: repo-view changed --root . --base <BASE> --return ${changed_return} --context ${changed_context} --limit ${changed_limit} --max-code-lines ${changed_max_code_lines} --max-patch-lines ${changed_max_patch_lines} --json
+- Known symbols: repo-view find <SYMBOL>... --root . --include both --return scope --context ${navigation_context_cap} --limit ${changed_limit} --max-code-lines ${changed_max_code_lines} --max-patch-lines ${changed_max_patch_lines} --json
+- Known source location(s): repo-view inspect <PATH:LINE>... --root . --include scope --return scope --context ${navigation_context_cap} --limit ${changed_limit} --max-code-lines ${changed_max_code_lines} --max-patch-lines ${changed_max_patch_lines} --json. Use --include all only when imports and repository-wide related symbol results are both required.
+- Known source file(s): repo-view outline <PATH>... --root . --return scope --context ${navigation_context_cap} --limit ${changed_limit} --max-code-lines ${changed_max_code_lines} --max-patch-lines ${changed_max_patch_lines} --json
+For <BASE>, use the revision stated by the task; do not substitute another revision. ${change_navigation_instructions} For non-change tasks, batch symbols that answer the same question and do not raise the listed limits. Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this navigation task and invalidate the run.
+${answer_guard_instructions}
+EOF
+)"
+
+codex_config=(-c "developer_instructions=\"${repo_view_instructions}\"")
+if [[ -n "${reasoning_effort}" && "${reasoning_effort}" != "inherit" ]]; then
+  codex_config+=(-c "model_reasoning_effort=\"${reasoning_effort}\"")
+fi
+
+run_codex() {
+  env \
+    -u REPO_VIEW_NAVIGATION_COMMAND_CAP \
+    -u REPO_VIEW_NAVIGATION_BUDGET_FILE \
+    PATH="${repo_view_bin_dir}:${PATH}" \
+    REPO_VIEW_LIMIT_CAP="${changed_limit}" \
+    REPO_VIEW_CONTEXT_CAP="${navigation_context_cap}" \
+    REPO_VIEW_MAX_CODE_LINES_CAP="${changed_max_code_lines}" \
+    REPO_VIEW_MAX_PATCH_LINES_CAP="${changed_max_patch_lines}" \
+    codex "${codex_config[@]}" "$@"
+}
+
+status=0
+if [[ -n "${navigation_transcript}" ]]; then
+  set +e
+  run_codex "$@" | tee "${navigation_transcript}"
+  pipeline_status=("${PIPESTATUS[@]}")
+  set -e
+  status="${pipeline_status[0]}"
+  if [[ "${status}" -eq 0 && "${pipeline_status[1]}" -ne 0 ]]; then
+    status="${pipeline_status[1]}"
+  fi
+  rm -f -- "${navigation_transcript}"
+  navigation_transcript=""
+else
+  run_codex "$@" || status=$?
+fi
+exit "${status}"

@@ -1,0 +1,166 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task",
+    "baseline",
+    "candidates"
+  ],
+  "properties": {
+    "task": {
+      "type": "string",
+      "enum": [
+        "explain",
+        "review",
+        "deep-explain",
+        "deep-review"
+      ]
+    },
+    "baseline": {
+      "$ref": "#/definitions/score"
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/candidate"
+      }
+    }
+  },
+  "definitions": {
+    "score": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "correctness",
+        "completeness",
+        "grounding",
+        "task_adherence",
+        "critical_omissions",
+        "unsupported_claims"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "correctness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "completeness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "grounding": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "task_adherence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "critical_omissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unsupported_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "correctness",
+        "completeness",
+        "grounding",
+        "task_adherence",
+        "critical_omissions",
+        "unsupported_claims",
+        "core_conclusion_matches_baseline",
+        "material_contradictions",
+        "baseline_material_points_omitted",
+        "candidate_material_additions",
+        "not_worse_than_baseline",
+        "rationale"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "correctness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "completeness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "grounding": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "task_adherence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "critical_omissions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unsupported_claims": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "core_conclusion_matches_baseline": {
+          "type": "boolean"
+        },
+        "material_contradictions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "baseline_material_points_omitted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "candidate_material_additions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "not_worse_than_baseline": {
+          "type": "boolean"
+        },
+        "rationale": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

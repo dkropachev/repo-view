@@ -1,0 +1,710 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "01-simple-explain-accepted",
+      "level": 1,
+      "complexity": "single changed packet",
+      "outcome": "accepted",
+      "evidence": "runs/router-no-model-config-simple-explain-v2-20260731",
+      "source_checksum_sha256": "e339f331279b986efd73eee9f244e10702a622ac7ffae7ebf805d63a7b12c375",
+    "quality_aggregate_sha256": "89b0e002d02e4a798a1faef72dd936e66abe6b414afa18191c78075a94400eaf",
+      "quality_provenance": "strict-current",
+      "description": "A short explanation resolved by one bounded repo-view changed call.",
+      "live": {
+        "task": "explain",
+        "profile": "guarded-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "assertions": [
+        {
+          "description": "simple explain completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "simple explain uses one total tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple explain uses one repo-view tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple explain uses no other tool calls",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "other_tool_call_count",
+          "operator": "eq",
+          "value": 0
+        },
+        {
+          "description": "simple explain saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "explain",
+            "profile": "guarded-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "simple explain static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "simple explain judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "02-simple-review-accepted",
+      "level": 2,
+      "complexity": "single changed packet review",
+      "outcome": "accepted",
+      "evidence": "runs/router-no-model-config-simple-review-final-20260731",
+      "source_checksum_sha256": "e339f331279b986efd73eee9f244e10702a622ac7ffae7ebf805d63a7b12c375",
+    "quality_aggregate_sha256": "7c0f0a1d3c17d595e82969d57a1a22df97f4b11af385a68328a690560939ab1c",
+      "quality_provenance": "strict-current",
+      "description": "A short review resolved by one bounded repo-view changed call.",
+      "live": {
+        "task": "review",
+        "profile": "guarded-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "assertions": [
+        {
+          "description": "simple review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "simple review uses one total tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple review uses one repo-view tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple review uses no other tool calls",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "other_tool_call_count",
+          "operator": "eq",
+          "value": 0
+        },
+        {
+          "description": "simple review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "review",
+            "profile": "guarded-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "simple review static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "simple review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "03-rejected-incomplete-deep-run",
+      "level": 3,
+      "complexity": "unbounded deep exploration",
+      "outcome": "rejected",
+      "evidence": "fixtures/03-rejected-incomplete-deep-run",
+      "source_checksum_sha256": "60dbf0e246d485f6bb7fdd033bff3e284b7d4b223d02b7b61438921df37a99f3",
+    "quality_aggregate_sha256": "9979951b0d1074e1df9aad99097048f8a8ae62eead71bbe004cc9da2b2f73237",
+      "quality_provenance": "non-strict",
+      "description": "Retains the unbounded run where deep review did not complete.",
+      "assertions": [
+        {
+          "description": "deep baseline review is incomplete",
+          "source": "metrics.case",
+          "selector": {
+            "name": "baseline-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "04-rejected-tool-contract-defects",
+      "level": 4,
+      "complexity": "unbounded repo-view navigation",
+      "outcome": "rejected",
+      "evidence": "fixtures/04-rejected-tool-contract-defects",
+      "source_checksum_sha256": "d2a3d2a6fe011b19c8d1f8921d2bfea3eee79f767694af527c9eb4786f3d50b2",
+    "quality_aggregate_sha256": "0ac64723d0ac8c3e346c0cbfc284a13ceda8ff3f6c3c59245333117d9435e3a1",
+      "quality_provenance": "non-strict",
+      "description": "Retains ignored filters, rejected batches, starvation, wrong symbol selection, and bound violations.",
+      "assertions": [
+        {
+          "description": "deep review has at least 60 bound violations",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-high-deep-review"
+          },
+          "field": "repo_view_bound_violation_count",
+          "operator": "gte",
+          "value": 60
+        }
+      ]
+    },
+    {
+      "id": "05-rejected-bounded-cost-regression",
+      "level": 5,
+      "complexity": "bounded but inefficient navigation",
+      "outcome": "rejected",
+      "evidence": "fixtures/05-rejected-bounded-cost-regression",
+      "source_checksum_sha256": "98745856554a3084e5c6c064c8f040e0156afef16a993c747bf0aad131fbc256",
+    "quality_aggregate_sha256": "256f7c32442c0782b6304f39ec1bd34fc6eac83c15873737810e9a88d728f488",
+      "quality_provenance": "non-strict",
+      "description": "Retains the bounded run whose explain and review token costs regressed.",
+      "assertions": [
+        {
+          "description": "deep explain effective-token reduction is negative",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-explain",
+            "profile": "investigative-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "lt",
+          "value": 0
+        },
+        {
+          "description": "deep review effective-token reduction is negative",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-review",
+            "profile": "investigative-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "lt",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "id": "06-rejected-soft-cap-and-quality",
+      "level": 6,
+      "complexity": "batched navigation with prose cap",
+      "outcome": "rejected",
+      "evidence": "fixtures/06-rejected-soft-cap-and-quality",
+      "source_checksum_sha256": "3f71c81ff9c247696fc9adc0831dc9803dbef8e408aa41b3869c0e2ad56399ca",
+    "quality_aggregate_sha256": "4672d33bbdba74e71ba45056628a7d90a56ea88087aa93269ea2697222f03828",
+      "quality_provenance": "non-strict",
+      "description": "Retains a cost-saving run that exceeded its soft cap and regressed explain quality.",
+      "assertions": [
+        {
+          "description": "deep review exceeds the repo-view invocation cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-batched-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep explain static quality is below complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-batched-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "lt",
+          "value": 100
+        }
+      ]
+    },
+    {
+      "id": "07-rejected-environment-budget-bypass",
+      "level": 7,
+      "complexity": "mutable environment budget",
+      "outcome": "rejected",
+      "evidence": "fixtures/07-rejected-environment-budget-bypass",
+      "source_checksum_sha256": "e5efb3e1a02353813d57348fc28e5363983e54d448ea1df661eda8c7f94fa957",
+    "quality_aggregate_sha256": "87bb26b2244a48413e1fa9bcb31392544bc2fb89ca54b70fc60cb3875061d4ba",
+      "quality_provenance": "non-strict",
+      "description": "Retains proof that env -u bypassed an environment-only repo-view invocation budget.",
+      "assertions": [
+        {
+          "description": "budget tampering is observed",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-budgeted-high-deep-review"
+          },
+          "field": "repo_view_budget_tamper_command_count",
+          "operator": "gte",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "08-rejected-repo-view-not-used",
+      "level": 8,
+      "complexity": "failed mandatory navigation policy",
+      "outcome": "rejected",
+      "evidence": "fixtures/08-rejected-repo-view-not-used",
+      "source_checksum_sha256": "057992a9be67f88539622d6498ec5b65428573916f781a04068570f7edb34eb8",
+    "quality_aggregate_sha256": "33f70ce963537d96b7d12caa78ef39370d4ebc86bed3d0d8fd15ca5258224c3e",
+      "quality_provenance": "non-strict",
+      "description": "Retains a setup where the model ignored repo-view entirely.",
+      "assertions": [
+        {
+          "description": "deep explain has zero repo-view invocations",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-budgeted-high-deep-explain"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "eq",
+          "value": 0
+        },
+        {
+          "description": "deep review has zero repo-view invocations",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-budgeted-high-deep-review"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "eq",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "id": "09-rejected-read-only-budget-file",
+      "level": 9,
+      "complexity": "writable state in read-only sandbox",
+      "outcome": "rejected",
+      "evidence": "fixtures/09-rejected-read-only-budget-file",
+      "source_checksum_sha256": "a8c539de11e6d04612e04b8a3ae596c2ff7b0753695be2a139b600ae7e7d6ce7",
+    "quality_aggregate_sha256": "43a1dbab01c10f269e82c7439740eaa0b7d7db36525ac15a1f64dc516691b06c",
+      "quality_provenance": "non-strict",
+      "description": "Retains the writable-budget-file design that failed in the read-only sandbox.",
+      "assertions": [
+        {
+          "description": "deep explain performs no tool calls",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-budgeted-high-deep-explain"
+          },
+          "field": "tool_call_count",
+          "operator": "eq",
+          "value": 0
+        }
+      ]
+    },
+    {
+      "id": "10-rejected-wrong-dependency-semantics",
+      "level": 10,
+      "complexity": "capped semantic investigation",
+      "outcome": "rejected",
+      "evidence": "fixtures/10-rejected-wrong-dependency-semantics",
+      "source_checksum_sha256": "77a0c889e59c954b89b7a52e729a5f8d725f9b7ea431e1573cc0764d2cc26186",
+    "quality_aggregate_sha256": "6fc6e687d32bb67fd9f9602639eef02a5d3d1d087603ec029976f73b355e26f7",
+      "quality_provenance": "legacy-unisolated-attested",
+      "description": "Retains the wrong x/time version and false monotonic-time conclusion.",
+      "assertions": [
+        {
+          "description": "source judge marks deep explain worse than baseline",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-mandatory-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "11-rejected-confirmed-soft-cap",
+      "level": 11,
+      "complexity": "dependency-confirmed soft cap",
+      "outcome": "rejected",
+      "evidence": "fixtures/11-rejected-confirmed-soft-cap",
+      "source_checksum_sha256": "8500a495e02267c2e7014243e3099c58add196f3f48e6f76fd40d84b878c4928",
+    "quality_aggregate_sha256": "21f0ca5a975c11c2dce9ae953512a1db9f815fa3baea687e1ca3e1bc60e7df44",
+      "quality_provenance": "non-strict",
+      "description": "Retains a corrected dependency investigation that still exceeded the prose-only cap.",
+      "assertions": [
+        {
+          "description": "deep explain exceeds the repo-view invocation cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-confirmed-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep review exceeds the repo-view invocation cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-confirmed-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "12-rejected-instruction-only-cap",
+      "level": 12,
+      "complexity": "complete audit with instruction-only cap",
+      "outcome": "rejected",
+      "evidence": "fixtures/12-rejected-instruction-only-cap",
+      "source_checksum_sha256": "5c4eed6238cc08e7d7e21fe6f10d59e57303004d3b0950579914841ae394b383",
+    "quality_aggregate_sha256": "6f509745c5ab901551d3d64ff96a873d75adc6e4d71d8de3a918e0070eff479d",
+      "quality_provenance": "non-strict",
+      "description": "Retains static-complete answers that ignored the instruction-only invocation cap.",
+      "assertions": [
+        {
+          "description": "deep explain exceeds the repo-view invocation cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-complete-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep review exceeds the repo-view invocation cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-complete-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "13-rejected-inherited-fd-budget",
+      "level": 13,
+      "complexity": "inherited file-descriptor budget",
+      "outcome": "rejected",
+      "evidence": "fixtures/13-rejected-inherited-fd-budget",
+      "source_checksum_sha256": "e8ccc802fc6cd7f075975bd2af1bfe013ab5505777be9a4807044c83be080372",
+    "quality_aggregate_sha256": "f16508924d9436f2cce8d8617406f66c992f5e712d6c36e296d34548bb4ad273",
+      "quality_provenance": "non-strict",
+      "description": "Retains the file-descriptor design whose first navigation calls falsely saw an exhausted budget.",
+      "assertions": [
+        {
+          "description": "deep explain stops after one repo-view invocation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-enforced-high-deep-explain"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "deep review stops after one repo-view invocation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-enforced-high-deep-review"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "eq",
+          "value": 1
+        }
+      ]
+    },
+    {
+      "id": "14-rejected-semantic-call-chain",
+      "level": 14,
+      "complexity": "transcript-enforced deep navigation",
+      "outcome": "rejected",
+      "evidence": "fixtures/14-rejected-semantic-call-chain",
+      "source_checksum_sha256": "bdbb7170cf04adbcde8c7ce559a2dbc53304ff71c30375a42f3ebb8160921a22",
+    "quality_aggregate_sha256": "fcc6fca22de43b4172e8dc5f0d760cd0d7b412d58aec84f8d1a044e0e85e3fc4",
+      "quality_provenance": "legacy-unisolated-attested",
+      "description": "Retains invalid production chaining, false indirect-test claims, and an incomplete review path.",
+      "assertions": [
+        {
+          "description": "deep explain static quality is below complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-transcript-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "lt",
+          "value": 100
+        },
+        {
+          "description": "deep explain judge marks candidate worse",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-transcript-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "15-rejected-incomplete-review-path",
+      "level": 15,
+      "complexity": "path-complete review policy",
+      "outcome": "rejected",
+      "evidence": "fixtures/15-rejected-incomplete-review-path",
+      "source_checksum_sha256": "c60935e208c08485f2dab336f8b84148164ae800746385582b923a5a6d9a7c64",
+    "quality_aggregate_sha256": "c38079383176556df20ee62c4eb635a4d8f8c15dca990286bfe79a823af285a2",
+      "quality_provenance": "non-strict",
+      "description": "Retains a review that omitted contract proof and focused upstream test evidence.",
+      "assertions": [
+        {
+          "description": "deep review still omits required behavior test evidence",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-path-complete-high-deep-review",
+            "id": "behavior_test_matrix"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "16-deep-verified-accepted",
+      "level": 16,
+      "complexity": "verified multi-stage navigation",
+      "outcome": "accepted",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "description": "The accepted hard-budget workload with contracts, complete paths, direct and indirect tests, pinned dependency behavior, and source judges.",
+      "live": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "assertions": [
+        {
+          "description": "deep explain completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep explain uses multiple repo-view tool calls",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "gte",
+          "value": 8
+        },
+        {
+          "description": "deep review uses multiple repo-view tool calls",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "gte",
+      "value": 8
+        },
+        {
+          "description": "deep explain stays within the hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "deep review stays within the hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "deep explain saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-explain",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "deep review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-review",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "deep explain static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "deep review static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "deep explain judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "deep review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,2007 @@
+package experimentsuite
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"testing"
+)
+
+type qualityRubric struct {
+	Tasks map[string]struct {
+		Criteria []qualityCriterion `json:"criteria"`
+	} `json:"tasks"`
+}
+
+type qualityCriterion struct {
+	ID     string   `json:"id"`
+	AllOf  []string `json:"all_of"`
+	NoneOf []string `json:"none_of"`
+}
+
+func TestLoadManifestRejectsPlaceholderAndUnsafeFields(t *testing.T) {
+	validDigest := strings.Repeat("1", 64)
+	baseCase := func() map[string]any {
+		return map[string]any{
+			"id":                       "01-safe",
+			"level":                    1,
+			"complexity":               "fixture",
+			"outcome":                  "accepted",
+			"evidence":                 "current/simple",
+			"source_checksum_sha256":   validDigest,
+			"quality_aggregate_sha256": validDigest,
+			"description":              "fixture",
+			"assertions": []any{map[string]any{
+				"description": "fixture",
+				"source":      "metrics.json",
+				"field":       "schema_version",
+				"operator":    "equals",
+				"value":       2,
+			}},
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "placeholder source digest",
+			mutate: func(current map[string]any) {
+				current["source_checksum_sha256"] = strings.Repeat("0", 64)
+			},
+		},
+		{
+			name: "placeholder aggregate digest",
+			mutate: func(current map[string]any) {
+				current["quality_aggregate_sha256"] = strings.Repeat("0", 64)
+			},
+		},
+		{
+			name: "unsafe id",
+			mutate: func(current map[string]any) {
+				current["id"] = "../escape"
+			},
+		},
+		{
+			name: "unsafe evidence",
+			mutate: func(current map[string]any) {
+				current["evidence"] = "../escape"
+			},
+		},
+		{
+			name: "unsafe live configuration",
+			mutate: func(current map[string]any) {
+				current["live"] = map[string]any{
+					"task":          "arbitrary",
+					"profile":       "../profile",
+					"baseline_from": "/outside",
+				}
+			},
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			current := baseCase()
+			testCase.mutate(current)
+			manifestPath := filepath.Join(t.TempDir(), "cases.json")
+			writeJSON(t, manifestPath, map[string]any{
+				"schema_version": 1,
+				"cases":          []any{current},
+			})
+			if _, err := LoadManifest(manifestPath); err == nil {
+				t.Fatal("LoadManifest accepted an unsafe or placeholder field")
+			}
+		})
+	}
+	current := baseCase()
+	current["live"] = map[string]any{
+		"task":          "explain",
+		"profile":       "guarded-high",
+		"baseline_from": "",
+		"source":        "fixtures/source.git",
+		"commit":        strings.Repeat("a", 40),
+		"prompt_commit": strings.Repeat("a", 9),
+		"base":          strings.Repeat("b", 40),
+		"model_mode":    "router",
+	}
+	manifestPath := filepath.Join(t.TempDir(), "same-run-cases.json")
+	writeJSON(t, manifestPath, map[string]any{
+		"schema_version": 1,
+		"cases":          []any{current},
+	})
+	if _, err := LoadManifest(manifestPath); err != nil {
+		t.Fatalf("LoadManifest rejected same-run live configuration: %v", err)
+	}
+}
+
+func TestLoadManifestRejectsUnanchoredLiveConfiguration(t *testing.T) {
+	validDigest := strings.Repeat("1", 64)
+	baseLive := func() map[string]any {
+		return map[string]any{
+			"task":          "explain",
+			"profile":       "guarded-high",
+			"baseline_from": "",
+			"source":        "fixtures/source.git",
+			"commit":        strings.Repeat("a", 40),
+			"prompt_commit": strings.Repeat("a", 9),
+			"base":          strings.Repeat("b", 40),
+			"model_mode":    "router",
+		}
+	}
+	for _, testCase := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "missing source", mutate: func(live map[string]any) { delete(live, "source") }},
+		{name: "missing commit", mutate: func(live map[string]any) { delete(live, "commit") }},
+		{name: "prompt not commit prefix", mutate: func(live map[string]any) { live["prompt_commit"] = strings.Repeat("c", 9) }},
+		{name: "same base", mutate: func(live map[string]any) { live["base"] = strings.Repeat("a", 40) }},
+		{name: "unknown model mode", mutate: func(live map[string]any) { live["model_mode"] = "automatic" }},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			live := baseLive()
+			testCase.mutate(live)
+			manifestPath := filepath.Join(t.TempDir(), "cases.json")
+			writeJSON(t, manifestPath, map[string]any{
+				"schema_version": 1,
+				"cases": []any{map[string]any{
+					"id":                       "01-safe",
+					"level":                    1,
+					"complexity":               "fixture",
+					"outcome":                  "accepted",
+					"evidence":                 "current/simple",
+					"source_checksum_sha256":   validDigest,
+					"quality_aggregate_sha256": validDigest,
+					"description":              "fixture",
+					"live":                     live,
+					"assertions": []any{map[string]any{
+						"description": "fixture",
+						"source":      "metrics.json",
+						"field":       "schema_version",
+						"operator":    "equals",
+						"value":       2,
+					}},
+				}},
+			})
+			if _, err := LoadManifest(manifestPath); err == nil {
+				t.Fatal("LoadManifest accepted unanchored live configuration")
+			}
+		})
+	}
+}
+
+func TestValidateLiveIdentity(t *testing.T) {
+	config := LiveConfig{
+		Task:         "deep",
+		Profile:      "investigative-verified-high",
+		Source:       "fixtures/source.git",
+		Commit:       strings.Repeat("a", 40),
+		PromptCommit: strings.Repeat("a", 9),
+		Base:         strings.Repeat("b", 40),
+		ModelMode:    "router",
+	}
+	runDir := t.TempDir()
+	writeJSON(t, filepath.Join(runDir, "manifest.json"), map[string]any{
+		"source_repo":   config.Source,
+		"target_commit": config.Commit,
+		"prompt_commit": config.PromptCommit,
+		"base_commit":   config.Base,
+		"model_mode":    config.ModelMode,
+	})
+	if result := ValidateLiveIdentity(runDir, config); !result.Passed {
+		t.Fatalf("ValidateLiveIdentity rejected matching identity: %+v", result)
+	}
+	config.Commit = strings.Repeat("c", 40)
+	if result := ValidateLiveIdentity(runDir, config); result.Passed {
+		t.Fatalf("ValidateLiveIdentity accepted mismatched identity: %+v", result)
+	}
+}
+
+func TestLoadResolutionManifestRejectsUnsafeExecutionPaths(t *testing.T) {
+	validDigest := strings.Repeat("1", 64)
+	for _, packagePath := range []string{
+		"example.com/remote/module",
+		"../outside",
+		"./../outside",
+		`.\outside`,
+	} {
+		t.Run(packagePath, func(t *testing.T) {
+			manifestPath := filepath.Join(t.TempDir(), "resolutions.json")
+			writeJSON(t, manifestPath, map[string]any{
+				"schema_version": 1,
+				"cases": []any{map[string]any{
+					"id":                       "01-safe",
+					"status":                   "accepted",
+					"root_cause":               "fixture",
+					"fix":                      "fixture",
+					"evidence":                 "current/simple",
+					"source_checksum_sha256":   validDigest,
+					"quality_aggregate_sha256": validDigest,
+					"metric_cases":             []any{"baseline-explain"},
+					"assertions": []any{map[string]any{
+						"description": "fixture",
+						"source":      "metrics.json",
+						"field":       "schema_version",
+						"operator":    "equals",
+						"value":       2,
+					}},
+					"go_tests": []any{map[string]any{
+						"description": "fixture",
+						"package":     packagePath,
+						"run":         "TestFixture",
+					}},
+				}},
+			})
+			if _, err := LoadResolutionManifest(manifestPath); err == nil {
+				t.Fatal("LoadResolutionManifest accepted a non-local Go package")
+			}
+		})
+	}
+}
+
+func loadRubricCriterion(t *testing.T, task, criterionID string) qualityCriterion {
+	t.Helper()
+
+	var rubric qualityRubric
+	data, err := os.ReadFile(filepath.Join(
+		"..", "..", "experiments", "lsp-replacement", "quality-rubric.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &rubric); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, criterion := range rubric.Tasks[task].Criteria {
+		if criterion.ID == criterionID {
+			return criterion
+		}
+	}
+	t.Fatalf("%s %s criterion not found", task, criterionID)
+	return qualityCriterion{}
+}
+
+func loadRubricPatterns(t *testing.T, task, criterionID string) []string {
+	t.Helper()
+	return loadRubricCriterion(t, task, criterionID).AllOf
+}
+
+func matchesAllPatterns(patterns []string, answer string) bool {
+	for _, pattern := range patterns {
+		if !regexp.MustCompile("(?is)" + pattern).MatchString(answer) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesCriterion(criterion qualityCriterion, answer string) bool {
+	if !matchesAllPatterns(criterion.AllOf, answer) {
+		return false
+	}
+	for _, pattern := range criterion.NoneOf {
+		if regexp.MustCompile("(?is)" + pattern).MatchString(answer) {
+			return false
+		}
+	}
+	return true
+}
+
+func TestDeepExplainProductionPathsRubricAcceptsDirectPath(t *testing.T) {
+	criterion := loadRubricCriterion(t, "deep-explain", "production_paths")
+	complete := `
+Exactly three production paths:
+Direct RateLimiterImpl construction and consumption.
+DynamicRateLimiterImpl construction, delegation, and consumption.
+RequestRateLimiterAdapterImpl construction, delegation, and consumption.
+`
+	if !matchesCriterion(criterion, complete) {
+		t.Fatal("complete direct/dynamic/adapter path evidence did not match")
+	}
+	incomplete := `
+DynamicRateLimiterImpl construction, delegation, and consumption.
+RequestRateLimiterAdapterImpl construction, delegation, and consumption.
+`
+	if matchesCriterion(criterion, incomplete) {
+		t.Fatal("rubric accepted production paths without a direct path")
+	}
+	unaffected := complete + `
+This selected adapter path does not receive the native reservation improvement.
+`
+	if matchesCriterion(criterion, unaffected) {
+		t.Fatal("rubric accepted an explicitly unaffected selected adapter path")
+	}
+	unresolved := complete + `
+The adapter's final constructor injection edge remains unresolved.
+`
+	if matchesCriterion(criterion, unresolved) {
+		t.Fatal("rubric accepted a selected adapter path with an unresolved edge")
+	}
+	externalUnknown := complete + `
+External consumers remain unresolved.
+`
+	if !matchesCriterion(criterion, externalUnknown) {
+		t.Fatal("rubric confused external risk with an unresolved production edge")
+	}
+}
+
+func TestDeepExplainPerformanceRubricAcceptsNounForms(t *testing.T) {
+	patterns := loadRubricPatterns(t, "deep-explain", "performance_evidence")
+	complete := `
+Measurements: 88 B/op became 64 B/op; throughput changed by 3.49%,
+19.45%, and 4.49%. Inference is limited because raw commands, samples,
+variance, and confidence intervals are unavailable.
+`
+	if !matchesAllPatterns(patterns, complete) {
+		t.Fatal("measurement and inference noun forms did not match")
+	}
+	withoutInference := `
+Measurements: 88 B/op became 64 B/op; throughput changed by 3.49%,
+19.45%, and 4.49%. Raw commands, samples, and variance are unavailable.
+`
+	if matchesAllPatterns(patterns, withoutInference) {
+		t.Fatal("rubric accepted performance evidence without inference")
+	}
+}
+
+func TestDeepClockSemanticsRubricRequiresPinnedVersionAndReserveClock(t *testing.T) {
+	completeAnswers := []string{`
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. UTC strips monotonic data.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0, so Reserve()
+remains wall-clock based.
+`, `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. UTC strips monotonic data.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`, `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. Time.UTC delegates to
+setLoc; therefore UTC strips monotonic data.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`, `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. Time.UTC calls setLoc,
+setLoc calls stripMono, removing the monotonic reading.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`, `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. Time.UTC delegates to
+setLoc [time.go:217](/a/very/long/module/cache/path/that/represents/a/citation/to/the/standard/library/time/source/file/and/makes/the/evidence/chain/longer).
+setLoc calls stripMono [time.go:226](/another/very/long/module/cache/path/that/represents/a/citation/to/the/standard/library/time/source/file/and/makes/the/evidence/chain/longer),
+which removes the monotonic reading.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`}
+	for _, task := range []string{"deep-explain", "deep-review"} {
+		criterion := loadRubricCriterion(t, task, map[string]string{
+			"deep-explain": "clock_semantics",
+			"deep-review":  "semantic_matrix",
+		}[task])
+		for _, complete := range completeAnswers {
+			taskAnswer := complete
+			if task == "deep-review" {
+				taskAnswer += `
+OK Delay DelayFrom Cancel CancelAt.
+Rejected reservations return InfDuration and cancellation is a no-op.
+`
+			}
+			if !matchesCriterion(criterion, taskAnswer) {
+				t.Fatalf("%s clock semantics did not match complete evidence", task)
+			}
+			for name, incomplete := range map[string]string{
+				"wrong dependency": strings.ReplaceAll(taskAnswer, "v0.14.0", "v0.12.0"),
+				"missing manifest": strings.ReplaceAll(taskAnswer, "go.mod", "a cache path"),
+				"wrong method": strings.NewReplacer(
+					"Reserve()", "ReserveN(now, n)",
+					".Reserve ", ".ReserveN ",
+				).Replace(taskAnswer),
+			} {
+				if matchesCriterion(criterion, incomplete) {
+					t.Errorf("%s rubric accepted %s evidence", task, name)
+				}
+			}
+			soleTimestamp := taskAnswer + `
+Explicit DelayFrom and CancelAt depend solely on the supplied timestamp.
+`
+			if matchesCriterion(criterion, soleTimestamp) {
+				t.Errorf("%s rubric accepted sole-timestamp semantics", task)
+			}
+			correctNegation := taskAnswer + `
+Explicit DelayFrom and CancelAt do not depend solely on the supplied timestamp.
+`
+			if !matchesCriterion(criterion, correctNegation) {
+				t.Errorf("%s rubric rejected correct sole-timestamp negation", task)
+			}
+			wrongUTC := `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt.
+UTC changes location without removing monotonic data.
+The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`
+			if task == "deep-review" {
+				wrongUTC += `
+OK Delay DelayFrom Cancel CancelAt.
+Rejected reservations return InfDuration and cancellation is a no-op.
+`
+			}
+			if matchesCriterion(criterion, wrongUTC) {
+				t.Errorf("%s rubric accepted incorrect UTC monotonic semantics", task)
+			}
+		}
+	}
+}
+
+func TestDeepExplainReservationRubricRequiresRejectedBehavior(t *testing.T) {
+	criterion := loadRubricCriterion(
+		t,
+		"deep-explain",
+		"reservation_contract_matrix",
+	)
+	complete := `
+OK false makes Delay and DelayFrom return InfDuration. Cancel and CancelAt
+are a no-op for a rejected reservation.
+`
+	if !matchesCriterion(criterion, complete) {
+		t.Fatal("reservation rubric rejected complete rejected behavior")
+	}
+	for name, incomplete := range map[string]string{
+		"missing infinite delay": strings.ReplaceAll(
+			complete,
+			"InfDuration",
+			"a sentinel",
+		),
+		"missing no-op cancellation": strings.ReplaceAll(
+			complete,
+			"a no-op",
+			"handled",
+		),
+	} {
+		if matchesCriterion(criterion, incomplete) {
+			t.Errorf("reservation rubric accepted %s", name)
+		}
+	}
+}
+
+func TestDeepReviewBehaviorRubricRejectsFalseReaderCoverageNegative(t *testing.T) {
+	criterion := loadRubricCriterion(t, "deep-review", "behavior_test_matrix")
+	complete := `
+Immediate and rejected over-burst behavior, delayed behavior, cancellation
+refund, explicit time through DelayFrom and CancelAt, and upstream x/time
+rate_test.go coverage were reviewed.
+Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context
+cancellation, timer advancement, and recycle/no-recycle behavior.
+No changed-path test covers wall-clock jumps or the monotonic-time distinction.
+`
+	if !matchesCriterion(criterion, complete) {
+		t.Fatal("complete behavior matrix did not match")
+	}
+	falseNegative := complete + `
+The reader test path contained no Wait reference and no real affected adapter
+path is tested end-to-end.
+`
+	if matchesCriterion(criterion, falseNegative) {
+		t.Fatal("rubric accepted false reader affected-path coverage claim")
+	}
+	falseDynamic := complete + `
+No selected direct-scheduler or dynamic-worker caller test hit.
+`
+	if matchesCriterion(criterion, falseDynamic) {
+		t.Fatal("rubric accepted false dynamic-worker caller coverage claim")
+	}
+}
+
+func TestDeepBehaviorRubricsAcceptDistributedTestEvidence(t *testing.T) {
+	common := `
+Existing event-clock coverage includes an immediate Wait and a delayed Wait
+completed after EventTimeSource.Advance. A canceled Wait covers context
+interruption, and a separate test covers deadline rejection. Wait recycling is
+covered. WaitN is explicitly not recycling a single token and exits on cancellation.
+No repository test covers the wall-clock versus monotonic distinction.
+`
+	explain := common + `
+Zero delay and delayed behavior are covered, as are Cancel and refund paths.
+Allocation regression is measured but not enforced by an assertion.
+`
+	if criterion := loadRubricCriterion(t, "deep-explain", "test_coverage_matrix"); !matchesCriterion(criterion, explain) {
+		t.Fatal("deep-explain test matrix rejected distributed evidence")
+	}
+	review := common + `
+Immediate and rejected over-burst behavior, delayed behavior, cancellation and
+refund, and explicit time through DelayFrom and CancelAt were reviewed. The
+upstream x/time rate_test.go coverage was also reviewed.
+`
+	if criterion := loadRubricCriterion(t, "deep-review", "behavior_test_matrix"); !matchesCriterion(criterion, review) {
+		t.Fatal("deep-review behavior matrix rejected distributed evidence")
+	}
+}
+
+func TestDeepReviewSemanticRubricAcceptsNaturalRejectedAndUTCWording(t *testing.T) {
+	answer := `
+OK, Delay, DelayFrom, Cancel, and CancelAt are in the semantic matrix. A
+rejected reservation has InfDuration; Cancel and CancelAt do nothing. RealTimeSource is
+the time source and uses real time.Now().UTC() through the wrapper, stripping
+the monotonic component. Explicit time remains under DelayFrom and CancelAt.
+go.mod pins golang.org/x/time v0.14.0. Reserve() starts from wall-only time.
+`
+	criterion := loadRubricCriterion(t, "deep-review", "semantic_matrix")
+	if !matchesCriterion(criterion, answer) {
+		t.Fatal("semantic matrix rejected natural rejected/UTC wording")
+	}
+}
+
+func TestDeepRubricsRejectUnsupportedGoEnvFailure(t *testing.T) {
+	for task, criterionID := range map[string]string{
+		"deep-explain": "contract_sources",
+		"deep-review":  "source_references",
+	} {
+		criterion := loadRubricCriterion(t, task, criterionID)
+		claim := "One go env attempt tried toolchain verification and failed."
+		matched := false
+		for _, pattern := range criterion.NoneOf {
+			if regexp.MustCompile("(?is)" + pattern).MatchString(claim) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			t.Errorf("%s rubric did not reject unsupported go env failure", task)
+		}
+	}
+}
+
+func TestDeepReviewInterfaceRubricAcceptsMethodSetWording(t *testing.T) {
+	criterion := loadRubricCriterion(t, "deep-review", "interface_conformance")
+	complete := `
+The producer returns Reservation, whose method set still satisfies the interface.
+The concrete type changes to ClockedReservation, so external consumers using
+type assertions retain an unresolved risk.
+`
+	if !matchesCriterion(criterion, complete) {
+		t.Fatal("interface rubric rejected Go method-set wording")
+	}
+	withoutExternalRisk := strings.ReplaceAll(
+		complete,
+		"external consumers",
+		"repository callers",
+	)
+	if matchesCriterion(criterion, withoutExternalRisk) {
+		t.Fatal("interface rubric accepted evidence without external-consumer risk")
+	}
+}
+
+func TestBatchedNavigationPolicyRequiresConnectedProductionPaths(t *testing.T) {
+	policy, err := os.ReadFile(filepath.Join(
+		"..", "..", "scripts", "codex-with-repo-view",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, requirement := range []string{
+		"same-subsystem edge ledger",
+		"exactly these symbols: RateLimiter, Reservation, ClockedReservation, RateLimiterImpl, ClockedRateLimiter, DynamicRateLimiterImpl, TimeSource, and RealTimeSource",
+		"ClockedReservationImpl does not exist",
+		"including a sibling method",
+		"concrete production caller invocation",
+		"whether tests exercise real direct, dynamic, and adapter or health paths end to end",
+		"whether cancellation or refund tests assert restored quota or tokens",
+		"Search tests for the concrete production caller selected in every path",
+		"Never generalize from one subsystem test search",
+		"at 12 or less, freeze production-path selection",
+		"Target 26 or fewer repo-view invocations",
+		"phase ceilings",
+		"Do not use outline for test discovery",
+		"TestClockedRateLimiter_Wait_Ok, TestClockedRateLimiter_Wait_Canceled",
+		"TestClockedRateLimiter_Wait_DeadlineWouldExceed, TestClockedRateLimiter_Wait_Recycle, TestClockedRateLimiter_WaitN_NoRecycle",
+		"Then search DelayFrom and CancelAt together",
+		"Reserve two test-phase calls for reader_test.go",
+		"Use the sixth test-phase call for AllocsPerRun, ReportAllocs, and BenchmarkRateLimiterReserve",
+		"Never infer reader-path absence from a multi-path search",
+		"Never say no dynamic-worker caller test was hit",
+		"use this exact standalone sentence",
+		"time.Time.UTC strips the monotonic reading: UTC delegates to setLoc, and setLoc calls stripMono.",
+		"No changed-path test covers wall-clock jumps or the monotonic-time distinction.",
+		"Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context cancellation, timer advancement, and recycle/no-recycle behavior.",
+		"never use 0 as a sentinel",
+		"use --return locations instead of --max-code-lines 0",
+		"at most this exact six-call adapter sequence",
+		"Do not probe arbitrary line numbers",
+		"search common/quotas constructors after reader_quotas.go already shows the nested adapter/dynamic construction",
+		"do not defer either check",
+		"Never connect scheduler_quotas.go construction to queue_scheduled.go readerRateLimiter",
+		"Carry the manifest citation and exact selected version into the final answer",
+		"both explanation and review must state that go.mod pins golang.org/x/time v0.14.0",
+		"Never call evidence complete when a cited response still reports code_truncated or results_truncated",
+		"do not describe it as completely retrieved unless a later response clears both truncation flags",
+		"ReaderImpl.loadAndSubmitTasks -> ratelimiter.Wait -> MultiRequestRateLimiterImpl.Wait/Reserve",
+		"ReaderImpl has no Wait method",
+		"reject it immediately and switch paths",
+		"local priority and multi-reservation tests for DelayFrom aggregation and CancelAt delegation",
+		"never say their behavior depends solely on the supplied timestamp",
+		"Delay returns InfDuration, and cancellation is a no-op",
+		"Do not read or invoke Codex skills, plugins, hooks, or marketplace resources",
+	} {
+		if !strings.Contains(string(policy), requirement) {
+			t.Errorf("batched navigation policy missing %q", requirement)
+		}
+	}
+}
+
+func TestQualityCheckUsesCurrentJudgeFormat(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(
+		"..", "..", "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(content), "$criterion.none_of") {
+		t.Fatal("quality check does not enforce rubric none_of patterns")
+	}
+	for _, requirement := range []string{
+		"judge_attempt_limit=3",
+		"judge_output_valid",
+		"judge_input_digest",
+		"judge_cache_valid",
+		"retain_invalid_judge",
+		`stem="judge-${task}-${repeat}"`,
+		`"${parked_repeat}" =~ ^[1-9][0-9]*$`,
+		"inputs.sha256",
+		".task == $task",
+		"never emit zero placeholder scores",
+		"Never concatenate multiple evaluator inputs into one command output",
+		"Read each baseline and candidate answer through EOF before scoring",
+		"search the candidate answer directly for each supposedly missing concept",
+		"A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction",
+		"without equally strong substitute coverage",
+		"schema_version: 4",
+		"judge_cache_schema=6",
+		"result.sha256",
+		"aggregate-manifest.json",
+		"export LC_ALL=C",
+		"--ignore-user-config",
+		"--ignore-rules",
+		"project_doc_max_bytes=0",
+		"project_doc_fallback_filenames=[]",
+		"mcp_servers={}",
+		"apps._default.enabled=false",
+		"--disable hooks",
+		`default_permissions="quality-audit"`,
+		`":root"="deny"`,
+		`shell_environment_policy.inherit="none"`,
+		`GOMODCACHE`,
+		`canonical-auth>=deny`,
+	} {
+		if !strings.Contains(string(content), requirement) {
+			t.Errorf("quality check missing judge input requirement %q", requirement)
+		}
+	}
+	if strings.Contains(string(content), "mapfile -d") {
+		t.Fatal("quality check requires Bash 4.4 mapfile -d")
+	}
+	for _, staleGlob := range []string{
+		`-name "judge-*-*.json"`,
+		`/quality/judge-*-*.jsonl`,
+	} {
+		if strings.Contains(string(content), staleGlob) {
+			t.Errorf("quality check still aggregates stale judge artifacts with %q", staleGlob)
+		}
+	}
+	if strings.Contains(
+		string(content),
+		"and (if $judge == null then true else $judge.all_core_conclusion_match end)",
+	) {
+		t.Fatal("quality gate still rejects correct baseline conclusion fixes")
+	}
+}
+
+func TestDeepQualityRubricRequiresMonotonicTestGap(t *testing.T) {
+	answers := map[string]string{
+		"deep-explain": `
+Immediate reservations have zero delay. Delayed behavior and cancel/refund are
+covered upstream. WaitN indirectly calls Delay and Cancel. Allocation regression
+is not enforced by an assertion.
+Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context
+cancellation, timer advancement, and recycle/no-recycle behavior.
+No changed-path test covers wall-clock jumps or the monotonic-time distinction.
+`,
+		"deep-review": `
+Immediate and rejected over-burst behavior are covered. Delayed cancellation
+and refund behavior use explicit time through DelayFrom and CancelAt. Upstream
+x/time tests cover those operations.
+Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context
+cancellation, timer advancement, and recycle/no-recycle behavior.
+No changed-path test covers wall-clock jumps or the monotonic-time distinction.
+`,
+	}
+	criteria := map[string]string{
+		"deep-explain": "test_coverage_matrix",
+		"deep-review":  "behavior_test_matrix",
+	}
+	for task, answer := range answers {
+		criterion := loadRubricCriterion(t, task, criteria[task])
+		if !matchesCriterion(criterion, answer) {
+			t.Fatalf("%s rubric rejected explicit monotonic test gap", task)
+		}
+		withoutGap := strings.ReplaceAll(
+			answer,
+			"No changed-path test covers wall-clock jumps or the monotonic-time distinction.",
+			"",
+		)
+		if matchesCriterion(criterion, withoutGap) {
+			t.Fatalf("%s rubric accepted missing monotonic test gap", task)
+		}
+		withoutWrapperCoverage := strings.ReplaceAll(
+			answer,
+			"Local fake-clock Wait/WaitN tests cover delayed waits, deadline and context\ncancellation, timer advancement, and recycle/no-recycle behavior.",
+			"",
+		)
+		if matchesCriterion(criterion, withoutWrapperCoverage) {
+			t.Fatalf("%s rubric accepted missing local wrapper coverage", task)
+		}
+	}
+}
+
+func TestJudgeSchemaRejectsZeroPlaceholderScores(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join(
+		"..", "..", "experiments", "lsp-replacement", "quality-output-schema.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(content), `"minimum": 0`) {
+		t.Fatal("judge schema still accepts zero placeholder scores")
+	}
+	if got := strings.Count(string(content), `"minimum": 1`); got != 8 {
+		t.Fatalf("judge schema score minimum count = %d, want 8", got)
+	}
+}
+
+func TestExperimentCodexInvocationsForbidPluginReads(t *testing.T) {
+	requirement := "Do not read or invoke Codex skills, plugins, hooks, or marketplace resources"
+	for _, path := range []string{
+		filepath.Join("..", "..", "scripts", "codex-with-repo-view"),
+		filepath.Join("..", "..", "experiments", "lsp-replacement", "run.sh"),
+		filepath.Join("..", "..", "experiments", "lsp-replacement", "quality-check.sh"),
+	} {
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(content), requirement) {
+			t.Errorf("%s missing benchmark isolation requirement", path)
+		}
+	}
+}
+
+func TestValidateEvidence(t *testing.T) {
+	runDir := t.TempDir()
+	writeSourceChecksumFixture(t, runDir, "")
+	for _, directory := range []string{
+		"answers",
+		"commands",
+		"tool-stats",
+		"call-graphs",
+		"quality",
+	} {
+		if err := os.MkdirAll(filepath.Join(runDir, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for relative, content := range map[string]string{
+		"optimized-test.jsonl":        "{}\n",
+		"optimized-test.exit-code":    "0\n",
+		"answers/optimized-test.md":   "answer\n",
+		"commands/optimized-test.txt": "command\n",
+	} {
+		if err := os.WriteFile(
+			filepath.Join(runDir, filepath.FromSlash(relative)),
+			[]byte(content),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{
+		"call-graphs/case.dot",
+		"call-graphs/case.md",
+	} {
+		if err := os.WriteFile(filepath.Join(runDir, path), []byte("{}"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeJSON(t, filepath.Join(runDir, "tool-stats/case.json"), map[string]any{
+		"total_tool_calls":            3,
+		"temporal_edge_count":         2,
+		"output_reference_edge_count": 0,
+		"call_graph": map[string]any{
+			"nodes": []any{map[string]any{}, map[string]any{}, map[string]any{}},
+			"edges": []any{
+				map[string]any{"kind": "next_tool_call"},
+				map[string]any{"kind": "next_tool_call"},
+			},
+		},
+	})
+	writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+		"schema_version": 2,
+		"formula":        qualityMetricsFormula,
+		"cases": []any{map[string]any{
+			"name":                                     "optimized-test",
+			"answer_file":                              "answers/optimized-test.md",
+			"commands_file":                            "commands/optimized-test.txt",
+			"tool_call_count":                          3,
+			"repo_view_tool_call_count":                2,
+			"other_tool_call_count":                    1,
+			"temporal_tool_edge_count":                 2,
+			"output_reference_edge_count":              0,
+			"tool_call_accounting_valid":               true,
+			"repo_view_invocation_accounting_valid":    true,
+			"repo_view_tool_call_accounting_valid":     true,
+			"repo_view_budget_accounting_valid":        true,
+			"repo_view_command_shape_valid":            true,
+			"repo_view_first_invocation_changed":       false,
+			"repo_view_navigation_semantics_valid":     true,
+			"mechanical_navigation_semantics_enforced": true,
+			"repo_view_changed_invocation_count":       0,
+			"repo_view_invocation_cap":                 0,
+			"tool_stats_file":                          "tool-stats/case.json",
+			"call_graph_dot_file":                      "call-graphs/case.dot",
+			"call_graph_markdown_file":                 "call-graphs/case.md",
+		}},
+		"comparisons": []any{map[string]any{
+			"task":                        "explain",
+			"effective_reduction_percent": 25,
+		}},
+	})
+	writeQualityAggregateManifest(t, runDir)
+
+	checks := ValidateEvidence(runDir, []Assertion{{
+		Description: "tokens improve",
+		Source:      "metrics.comparison",
+		Selector:    map[string]any{"task": "explain"},
+		Field:       "effective_reduction_percent",
+		Operator:    "gt",
+		Value:       0,
+	}})
+	if !Passed(checks) {
+		t.Fatalf("checks failed: %+v", checks)
+	}
+
+	markerDigest := setQualityAggregateStrictEvidence(t, runDir, false)
+	checks = ValidateTrackedEvidence(runDir, nil, "", markerDigest)
+	if Passed(checks) ||
+		!checkResultsContainError(checks, `want "strict-current"`) {
+		t.Fatalf("promoted non-strict aggregate checks = %+v", checks)
+	}
+	checks = ValidateRejectedTrackedEvidence(runDir, nil, "", markerDigest)
+	if !Passed(checks) {
+		t.Fatalf("rejected fixture did not accept non-strict aggregate: %+v", checks)
+	}
+}
+
+func checkResultsContainError(checks []CheckResult, fragment string) bool {
+	for _, check := range checks {
+		if strings.Contains(check.Error, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestValidateEvidenceDetectsAccountingMismatch(t *testing.T) {
+	runDir := t.TempDir()
+	writeSourceChecksumFixture(t, runDir, "")
+	writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+		"cases": []any{map[string]any{
+			"name":                                     "bad",
+			"tool_call_count":                          3,
+			"repo_view_tool_call_count":                2,
+			"other_tool_call_count":                    2,
+			"temporal_tool_edge_count":                 2,
+			"output_reference_edge_count":              0,
+			"tool_call_accounting_valid":               false,
+			"repo_view_invocation_accounting_valid":    true,
+			"repo_view_tool_call_accounting_valid":     true,
+			"repo_view_budget_accounting_valid":        true,
+			"repo_view_command_shape_valid":            true,
+			"repo_view_first_invocation_changed":       false,
+			"repo_view_navigation_semantics_valid":     true,
+			"mechanical_navigation_semantics_enforced": true,
+			"repo_view_changed_invocation_count":       0,
+			"repo_view_invocation_cap":                 0,
+		}},
+	})
+	checks := validateToolAccounting(runDir)
+	for _, check := range checks {
+		if check.Description != "tool accounting and call graph: bad" {
+			continue
+		}
+		if check.Passed {
+			t.Fatalf("accounting mismatch check passed: %+v", check)
+		}
+		if !strings.Contains(check.Error, "total != repo-view + other") {
+			t.Fatalf("accounting mismatch error = %q", check.Error)
+		}
+		return
+	}
+	t.Fatal("validateToolAccounting did not report the accounting check")
+}
+
+func TestSelectCases(t *testing.T) {
+	manifest := Manifest{Cases: []Case{
+		{ID: "simple", Level: 1},
+		{ID: "deep", Level: 3},
+	}}
+	selected, err := SelectCases(manifest, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].ID != "simple" {
+		t.Fatalf("selected = %+v", selected)
+	}
+}
+
+func TestSelectResolutions(t *testing.T) {
+	cases := []Case{
+		{ID: "accepted", Outcome: "accepted"},
+		{ID: "rejected", Outcome: "rejected"},
+	}
+	manifest := ResolutionManifest{Cases: []ResolutionCase{
+		{ID: "rejected", Status: "resolved"},
+		{ID: "accepted", Status: "accepted"},
+	}}
+	selected, err := SelectResolutions(manifest, cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 2 ||
+		selected[0].ID != "accepted" ||
+		selected[1].ID != "rejected" {
+		t.Fatalf("selected = %+v", selected)
+	}
+
+	manifest.Cases = manifest.Cases[:1]
+	if _, err := SelectResolutions(manifest, cases); err == nil {
+		t.Fatal("expected missing resolution error")
+	}
+}
+
+func TestAnswerAndStaticCriterionSources(t *testing.T) {
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "answers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(runDir, "quality"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(runDir, "answers", "candidate.md"),
+		[]byte("pinned golang.org/x/time v0.14.0"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+		"cases": []any{map[string]any{
+			"name":        "candidate",
+			"task":        "deep-review",
+			"profile":     "verified",
+			"answer_file": "answers/candidate.md",
+		}},
+	})
+	writeJSON(t, filepath.Join(runDir, "quality", "static.json"), map[string]any{
+		"cases": []any{map[string]any{
+			"name":    "candidate",
+			"task":    "deep-review",
+			"profile": "verified",
+			"variant": "optimized",
+			"criteria": []any{map[string]any{
+				"id":     "contract_sources",
+				"passed": true,
+			}},
+		}},
+	})
+
+	answers, err := loadSource(runDir, "answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err := selectField(
+		answers,
+		map[string]any{"name": "candidate"},
+		"content",
+	)
+	if err != nil || actual != "pinned golang.org/x/time v0.14.0" {
+		t.Fatalf("answer = %v, err = %v", actual, err)
+	}
+
+	criteria, err := loadSource(runDir, "quality.static_criterion")
+	if err != nil {
+		t.Fatal(err)
+	}
+	actual, err = selectField(
+		criteria,
+		map[string]any{"name": "candidate", "id": "contract_sources"},
+		"passed",
+	)
+	if err != nil || actual != true {
+		t.Fatalf("criterion = %v, err = %v", actual, err)
+	}
+}
+
+func TestSummarizeEvidence(t *testing.T) {
+	runDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(runDir, "quality"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+		"schema_version": 2,
+		"formula":        qualityMetricsFormula,
+		"cases": []any{map[string]any{
+			"name":                        "candidate",
+			"task":                        "deep-review",
+			"variant":                     "optimized",
+			"profile":                     "verified",
+			"completed":                   true,
+			"regular_input_tokens":        100,
+			"cached_input_tokens":         200,
+			"output_tokens":               30,
+			"effective_tokens":            150,
+			"tool_call_count":             4,
+			"repo_view_tool_call_count":   3,
+			"other_tool_call_count":       1,
+			"repo_view_invocation_count":  3,
+			"temporal_tool_edge_count":    3,
+			"output_reference_edge_count": 2,
+			"answer_file":                 "answers/candidate.md",
+			"commands_file":               "commands/candidate.txt",
+			"tool_stats_file":             "tool-stats/candidate.json",
+			"call_graph_dot_file":         "call-graphs/candidate.dot",
+			"call_graph_markdown_file":    "call-graphs/candidate.md",
+			"tool_types": []any{map[string]any{
+				"name":              "command_execution",
+				"tool_calls":        4,
+				"invocations":       4,
+				"output_characters": 500,
+			}},
+			"operations": []any{map[string]any{
+				"name":              "repo-view.find",
+				"tool_calls":        3,
+				"invocations":       3,
+				"output_characters": 400,
+			}},
+		}},
+		"comparisons": []any{map[string]any{
+			"task":                        "deep-review",
+			"profile":                     "verified",
+			"baseline_effective_tokens":   300,
+			"effective_reduction_percent": 50,
+		}},
+	})
+	for relative, content := range map[string]string{
+		"answers/candidate.md":      "candidate answer\n",
+		"commands/candidate.txt":    "repo-view find symbol\n",
+		"tool-stats/candidate.json": "{}\n",
+		"call-graphs/candidate.dot": "digraph {}\n",
+		"call-graphs/candidate.md":  "# graph\n",
+		"candidate.jsonl":           "{}\n",
+		"candidate.exit-code":       "0\n",
+	} {
+		fullPath := filepath.Join(runDir, filepath.FromSlash(relative))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeJSON(t, filepath.Join(runDir, "quality", "static.json"), map[string]any{
+		"cases": []any{map[string]any{
+			"name":          "candidate",
+			"score_percent": 100,
+			"required_pass": true,
+		}},
+	})
+	writeJSON(t, filepath.Join(runDir, "quality", "judges.json"), map[string]any{
+		"candidates": []any{map[string]any{
+			"name":                      "candidate",
+			"judge_count":               2,
+			"all_not_worse":             true,
+			"all_core_conclusion_match": true,
+			"average_correctness":       5,
+			"average_completeness":      5,
+			"average_grounding":         5,
+			"average_task_adherence":    5,
+		}},
+	})
+	writeQualityAggregateManifest(t, runDir)
+
+	summaries, err := SummarizeEvidence(runDir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries) != 1 {
+		t.Fatalf("summaries = %+v", summaries)
+	}
+	got := summaries[0]
+	if got.TotalToolCalls != 4 ||
+		got.RepoViewToolCalls != 3 ||
+		got.OtherToolCalls != 1 ||
+		!got.HasComparison ||
+		got.EffectiveReductionPercent != 50 ||
+		got.StaticScorePercent != 100 ||
+		got.JudgeStatus != "not-worse" ||
+		!got.JudgeCoreConclusionMatch {
+		t.Fatalf("summary = %+v", got)
+	}
+
+	selected, err := SummarizeEvidence(runDir, []string{"candidate"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(selected) != 1 || selected[0].Name != "candidate" {
+		t.Fatalf("selected summaries = %+v", selected)
+	}
+
+	markerPath := filepath.Join(runDir, "quality", "aggregate-manifest.json")
+	trackedDigest, err := sha256File(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SummarizeTrackedEvidence(
+		runDir,
+		nil,
+		trackedDigest,
+	); err != nil {
+		t.Fatalf("tracked summary failed: %v", err)
+	}
+	metricsPath := filepath.Join(runDir, "metrics.json")
+	metricsContent, err := os.ReadFile(metricsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(metricsPath, append(metricsContent, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "does not match committed snapshot") {
+		t.Fatalf("mutated input error = %v", err)
+	}
+	if err := os.WriteFile(metricsPath, metricsContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	generatorPath := filepath.Join(
+		runDir,
+		filepath.FromSlash(
+			qualityGeneratorBundlePath(
+				"experiments/lsp-replacement/quality-check.sh",
+			),
+		),
+	)
+	generatorContent, err := os.ReadFile(generatorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(generatorPath, []byte("tampered\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "does not match committed snapshot") {
+		t.Fatalf("mutated evaluator source error = %v", err)
+	}
+	if err := os.WriteFile(generatorPath, generatorContent, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	markerContent, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, append(markerContent, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SummarizeTrackedEvidence(
+		runDir,
+		nil,
+		trackedDigest,
+	); err == nil || !strings.Contains(err.Error(), "tracked quality aggregate digest mismatch") {
+		t.Fatalf("rewritten marker error = %v", err)
+	}
+}
+
+func TestSummarizeEvidenceRejectsMixedQualityGeneration(t *testing.T) {
+	runDir := t.TempDir()
+	qualityDir := filepath.Join(runDir, "quality")
+	if err := os.MkdirAll(qualityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range qualityAggregateFiles {
+		if err := os.WriteFile(
+			filepath.Join(qualityDir, name),
+			[]byte("{}\n"),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeQualityAggregateManifest(t, runDir)
+	if err := os.WriteFile(
+		filepath.Join(qualityDir, "static.json"),
+		[]byte("{\"new\":true}\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "committed generation") {
+		t.Fatalf("SummarizeEvidence error = %v, want mixed-generation error", err)
+	}
+}
+
+func TestSummarizeEvidenceRequiresQualityAggregateMarker(t *testing.T) {
+	runDir := t.TempDir()
+	writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+		"schema_version": 2,
+		"formula":        qualityMetricsFormula,
+		"cases":          []any{},
+		"comparisons":    []any{},
+	})
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "quality aggregate commit marker is missing") {
+		t.Fatalf("missing aggregate marker error = %v", err)
+	}
+	checks := ValidateEvidence(runDir, nil)
+	for _, check := range checks {
+		if check.Description ==
+			"quality aggregate files match aggregate-manifest.json" {
+			if check.Passed ||
+				!strings.Contains(
+					check.Error,
+					"quality aggregate commit marker is missing",
+				) {
+				t.Fatalf("missing aggregate validation check = %+v", check)
+			}
+			return
+		}
+	}
+	t.Fatal("ValidateEvidence omitted quality aggregate check")
+}
+
+func TestValidatePromotion(t *testing.T) {
+	metrics := []EvidenceMetric{
+		{
+			Name:               "baseline",
+			Task:               "deep-review",
+			Variant:            "baseline",
+			StaticScorePercent: 100,
+		},
+		{
+			Name:                          "candidate",
+			Task:                          "deep-review",
+			Variant:                       "optimized",
+			Completed:                     true,
+			HasComparison:                 true,
+			EffectiveReductionPercent:     25,
+			StaticScorePercent:            100,
+			StaticRequiredPass:            true,
+			JudgeCount:                    2,
+			JudgeNotWorse:                 true,
+			JudgeCoreConclusionMatch:      true,
+			RepoViewInvocations:           20,
+			RepoViewChangedInvocations:    1,
+			RepoViewFirstChanged:          true,
+			RepoViewNavigationValid:       true,
+			MechanicalNavigationEnforced:  true,
+			RepoViewInvocationCap:         34,
+			RepoViewInvocationCapExceeded: false,
+		},
+	}
+	metrics[1].JudgeCount = 0
+	metrics[1].JudgeNotWorse = false
+	if checks := ValidatePromotion(metrics, 0); !Passed(checks) {
+		t.Fatalf("pre-judge promotion checks failed: %+v", checks)
+	}
+	metrics[1].JudgeCount = 2
+	metrics[1].JudgeNotWorse = true
+	metrics[1].JudgeCoreConclusionMatch = false
+	if checks := ValidatePromotion(metrics, 2); !Passed(checks) {
+		t.Fatalf("correct baseline conclusion fix failed promotion: %+v", checks)
+	}
+
+	metrics[1].EffectiveReductionPercent = -1
+	metrics[1].JudgeNotWorse = false
+	metrics[1].JudgeUnsupportedClaims = 1
+	checks := ValidatePromotion(metrics, 2)
+	if Passed(checks) {
+		t.Fatal("expected token and judge regressions to fail promotion")
+	}
+}
+
+func writeJSON(t *testing.T, path string, value any) {
+	t.Helper()
+	if root, ok := value.(map[string]any); ok {
+		normalizeQualityFixture(t, path, root)
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func normalizeQualityFixture(t *testing.T, filePath string, root map[string]any) {
+	t.Helper()
+	switch filepath.Base(filePath) {
+	case "manifest.json":
+		if _, ok := root["worktree"]; !ok {
+			return
+		}
+		runDir := filepath.Dir(filePath)
+		target, _ := root["target_commit"].(string)
+		if _, ok := root["prompt_commit"]; !ok {
+			root["prompt_commit"] = target
+		}
+		if _, ok := root["base_ref"]; !ok {
+			root["base_ref"] = "HEAD"
+		}
+		if _, ok := root["model"]; !ok {
+			root["model"] = "fixture-model"
+		}
+		if _, ok := root["codex_version"]; !ok {
+			root["codex_version"] = "fixture-codex"
+		}
+		if _, ok := root["generation_isolation"]; !ok {
+			root["generation_isolation"] = qualityGenerationIsolation
+		}
+		profilesSnapshot, err := os.ReadFile(filepath.Join(
+			"..", "..", "experiments", "lsp-replacement", "profiles.tsv",
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		profilesDigest := sha256Bytes(profilesSnapshot)
+		root["profiles_snapshot_path"] = "profiles-snapshot.tsv"
+		root["profiles_snapshot_sha256"] = profilesDigest
+		if err := os.WriteFile(
+			filepath.Join(runDir, "profiles-snapshot.tsv"),
+			profilesSnapshot,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		selectedTasks := make([]string, 0, 2)
+		switch root["task_selection"] {
+		case "all":
+			selectedTasks = append(selectedTasks, "explain", "review")
+		case "deep":
+			selectedTasks = append(
+				selectedTasks,
+				"deep-explain",
+				"deep-review",
+			)
+		default:
+			task, _ := root["task_selection"].(string)
+			selectedTasks = append(selectedTasks, task)
+		}
+		if err := os.MkdirAll(filepath.Join(runDir, "prompts"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		promptFiles := make(map[string]any, len(selectedTasks))
+		promptDigests := make(map[string]any, len(selectedTasks))
+		for _, task := range selectedTasks {
+			relative := "prompts/" + task + ".txt"
+			content := []byte("fixture rendered prompt for " + task)
+			if err := os.WriteFile(
+				filepath.Join(runDir, filepath.FromSlash(relative)),
+				content,
+				0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+			promptFiles[task] = relative
+			promptDigests[task] = sha256Bytes(content)
+		}
+		if _, ok := root["prompt_files"]; !ok {
+			root["prompt_files"] = promptFiles
+		}
+		if _, ok := root["prompt_digests"]; !ok {
+			root["prompt_digests"] = promptDigests
+		}
+		generationConfig, err := json.Marshal(map[string]any{
+			"generation_isolation":            qualityGenerationIsolation,
+			"baseline_developer_instructions": "Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark.",
+			"feature_flags": []any{
+				"--disable", "multi_agent",
+				"--disable", "multi_agent_v2",
+				"--disable", "enable_fanout",
+				"--disable", "collaboration_modes",
+				"--disable", "hooks",
+				"--disable", "tool_router",
+				"--disable", "workflows",
+				"--disable", "code_mode",
+				"--disable", "code_mode_host",
+				"--disable", "code_mode_only",
+			},
+			"codex_isolation_flags": []any{
+				"--ignore-user-config",
+				"--ignore-rules",
+			},
+			"codex_environment": []any{
+				"env",
+				"-i",
+				"GOENV=off",
+				"GOTOOLCHAIN=local",
+				"GOWORK=off",
+			},
+			"host_go_environment": []any{
+				"env",
+				"GOENV=off",
+				"GOTOOLCHAIN=local",
+				"GOWORK=off",
+			},
+			"profiles_snapshot_path":                   "profiles-snapshot.tsv",
+			"profiles_snapshot_sha256":                 profilesDigest,
+			"prompt_files":                             root["prompt_files"],
+			"prompt_digests":                           root["prompt_digests"],
+			"mechanical_navigation_semantics_enforced": true,
+			"mechanical_navigation_contract": map[string]any{
+				"required_root":                "<worktree>",
+				"required_base_commit":         "<resolved-base>",
+				"required_changed_return":      "<profile-return>",
+				"required_changed_context":     "<profile-context>",
+				"require_navigation_semantics": "1",
+			},
+			"auth_source_permission": "deny-if-present",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := root["mechanical_navigation_semantics_enforced"]; !ok {
+			root["mechanical_navigation_semantics_enforced"] = true
+		}
+		if _, ok := root["generation_config_sha256"]; !ok {
+			root["generation_config_sha256"] = sha256Bytes(generationConfig)
+		}
+		if err := os.WriteFile(
+			filepath.Join(runDir, "generation-config.json"),
+			generationConfig,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(runDir, "run-complete.json"),
+			[]byte(
+				`{"schema_version":1,"state":"complete","outcome":"success","exit_code":0,"completed_at":"2026-01-01T00:00:00Z"}`,
+			),
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := root["go_version"]; !ok {
+			root["go_version"] = "fixture-go"
+		}
+		metricsPath := filepath.Join(runDir, "metrics.json")
+		if metricsContent, readErr := os.ReadFile(metricsPath); readErr == nil {
+			var metrics map[string]any
+			if err := json.Unmarshal(metricsContent, &metrics); err != nil {
+				t.Fatal(err)
+			}
+			metrics["analysis_provenance"] = map[string]any{
+				"profiles_source": "run-snapshot",
+				"profiles_path":   "profiles-snapshot.tsv",
+				"profiles_sha256": profilesDigest,
+			}
+			metricsContent, err = json.Marshal(metrics)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(metricsPath, metricsContent, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else if !os.IsNotExist(readErr) {
+			t.Fatal(readErr)
+		}
+	case "metrics.json":
+		rawCases, ok := root["cases"].([]any)
+		if !ok || len(rawCases) == 0 {
+			return
+		}
+		first, ok := rawCases[0].(map[string]any)
+		if !ok {
+			return
+		}
+		if _, ok := first["answer_file"]; !ok {
+			return
+		}
+		if _, ok := root["schema_version"]; !ok {
+			root["schema_version"] = 2
+		}
+		if _, ok := root["formula"]; !ok {
+			root["formula"] = qualityMetricsFormula
+		}
+		if _, ok := root["analysis_provenance"]; !ok {
+			profilesContent, err := os.ReadFile(filepath.Join(
+				filepath.Dir(filePath),
+				"profiles-snapshot.tsv",
+			))
+			if err == nil {
+				root["analysis_provenance"] = map[string]any{
+					"profiles_source": "run-snapshot",
+					"profiles_path":   "profiles-snapshot.tsv",
+					"profiles_sha256": sha256Bytes(profilesContent),
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+		for _, rawCase := range rawCases {
+			current, ok := rawCase.(map[string]any)
+			if !ok {
+				continue
+			}
+			changed, _ := number(
+				current["repo_view_changed_invocation_count"],
+			)
+			if _, ok := current["repo_view_first_invocation_changed"]; !ok {
+				current["repo_view_first_invocation_changed"] = changed == 1
+			}
+			if _, ok := current["repo_view_navigation_semantics_valid"]; !ok {
+				current["repo_view_navigation_semantics_valid"] =
+					current["variant"] != "optimized" || changed == 1
+			}
+			if _, ok :=
+				current["mechanical_navigation_semantics_enforced"]; !ok {
+				current["mechanical_navigation_semantics_enforced"] =
+					current["variant"] == "optimized"
+			}
+		}
+		sort.SliceStable(rawCases, func(i, j int) bool {
+			left, _ := rawCases[i].(map[string]any)["name"].(string)
+			right, _ := rawCases[j].(map[string]any)["name"].(string)
+			return left < right
+		})
+		if _, ok := root["comparisons"]; !ok {
+			root["comparisons"] = qualityFixtureComparisons(rawCases)
+		}
+	}
+}
+
+func qualityFixtureComparisons(rawCases []any) []any {
+	comparisons := make([]any, 0)
+	for _, rawOptimized := range rawCases {
+		optimized, _ := rawOptimized.(map[string]any)
+		if optimized["variant"] != "optimized" || optimized["completed"] != true {
+			continue
+		}
+		for _, rawBaseline := range rawCases {
+			baseline, _ := rawBaseline.(map[string]any)
+			if baseline["variant"] != "baseline" ||
+				baseline["completed"] != true ||
+				baseline["task"] != optimized["task"] {
+				continue
+			}
+			baselineEffective, _ := number(baseline["effective_tokens"])
+			optimizedEffective, _ := number(optimized["effective_tokens"])
+			baselineRegular, _ := number(baseline["regular_input_tokens"])
+			optimizedRegular, _ := number(optimized["regular_input_tokens"])
+			comparisons = append(comparisons, map[string]any{
+				"task":                                        optimized["task"],
+				"profile":                                     optimized["profile"],
+				"baseline_effective_tokens":                   baseline["effective_tokens"],
+				"optimized_effective_tokens":                  optimized["effective_tokens"],
+				"effective_reduction_percent":                 (1 - optimizedEffective/baselineEffective) * 100,
+				"baseline_regular_input_tokens":               baseline["regular_input_tokens"],
+				"optimized_regular_input_tokens":              optimized["regular_input_tokens"],
+				"regular_input_reduction_percent":             (1 - optimizedRegular/baselineRegular) * 100,
+				"baseline_cached_input_tokens":                baseline["cached_input_tokens"],
+				"optimized_cached_input_tokens":               optimized["cached_input_tokens"],
+				"baseline_output_tokens":                      baseline["output_tokens"],
+				"optimized_output_tokens":                     optimized["output_tokens"],
+				"baseline_tool_calls":                         baseline["tool_call_count"],
+				"optimized_tool_calls":                        optimized["tool_call_count"],
+				"baseline_other_tool_calls":                   baseline["other_tool_call_count"],
+				"optimized_other_tool_calls":                  optimized["other_tool_call_count"],
+				"baseline_repo_view_tool_calls":               baseline["repo_view_tool_call_count"],
+				"optimized_repo_view_tool_calls":              optimized["repo_view_tool_call_count"],
+				"baseline_repo_view_invocations":              baseline["repo_view_invocation_count"],
+				"optimized_repo_view_invocations":             optimized["repo_view_invocation_count"],
+				"optimized_repo_view_bound_violations":        optimized["repo_view_bound_violation_count"],
+				"optimized_repo_view_invocation_cap":          optimized["repo_view_invocation_cap"],
+				"optimized_repo_view_invocation_cap_exceeded": optimized["repo_view_invocation_cap_exceeded"],
+				"optimized_repo_view_budget_tamper_commands":  optimized["repo_view_budget_tamper_command_count"],
+			})
+			break
+		}
+	}
+	return comparisons
+}
+
+func writeQualityAggregateManifest(t *testing.T, runDir string) {
+	t.Helper()
+	qualityDir := filepath.Join(runDir, "quality")
+	if err := os.MkdirAll(qualityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inputDigests := make(map[string]string)
+	metricsPath := filepath.Join(runDir, "metrics.json")
+	strictEvidence := false
+	generationConfigDigest := strings.Repeat("3", 64)
+	if metricsContent, err := os.ReadFile(metricsPath); err == nil {
+		strictEvidence = true
+		manifestPath := filepath.Join(runDir, "manifest.json")
+		if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+			writeJSON(t, manifestPath, map[string]any{
+				"schema_version":    1,
+				"worktree":          runDir,
+				"target_commit":     strings.Repeat("a", 40),
+				"base_commit":       strings.Repeat("a", 40),
+				"task_selection":    "explain",
+				"variant_selection": "baseline",
+				"profiles":          []any{"default"},
+				"baseline_from":     nil,
+			})
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		generationConfigPath := filepath.Join(runDir, "generation-config.json")
+		generationConfigContent, err := os.ReadFile(generationConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		generationConfigDigest = sha256Bytes(generationConfigContent)
+		var metrics struct {
+			Cases []struct {
+				Name                  string `json:"name"`
+				AnswerFile            string `json:"answer_file"`
+				CommandsFile          string `json:"commands_file"`
+				ToolStatsFile         string `json:"tool_stats_file"`
+				CallGraphDOTFile      string `json:"call_graph_dot_file"`
+				CallGraphMarkdownFile string `json:"call_graph_markdown_file"`
+			} `json:"cases"`
+		}
+		if err := json.Unmarshal(metricsContent, &metrics); err != nil {
+			t.Fatal(err)
+		}
+		inputPaths := []string{
+			"metrics.json",
+			"manifest.json",
+			"generation-config.json",
+			"run-complete.json",
+			"profiles-snapshot.tsv",
+		}
+		var manifest struct {
+			PromptFiles map[string]string `json:"prompt_files"`
+		}
+		manifestContent, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(manifestContent, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		for _, relative := range manifest.PromptFiles {
+			inputPaths = append(inputPaths, relative)
+		}
+		for _, current := range metrics.Cases {
+			inputPaths = append(inputPaths,
+				current.Name+".jsonl",
+				current.Name+".exit-code",
+				current.AnswerFile,
+				current.CommandsFile,
+				current.ToolStatsFile,
+				current.CallGraphDOTFile,
+				current.CallGraphMarkdownFile,
+			)
+		}
+		for _, relative := range inputPaths {
+			digest, err := sha256File(
+				filepath.Join(runDir, filepath.FromSlash(relative)),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			inputDigests[relative] = digest
+		}
+	} else if !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	snapshotDigests := make(map[string]string)
+	for relative, digest := range inputDigests {
+		snapshotDigests[qualitySnapshotName(relative)] = digest
+	}
+	for _, snapshotName := range []string{
+		"quality-rubric.json",
+		"quality-output-schema.json",
+	} {
+		bundlePath := qualityEvaluatorBundlePath(snapshotName)
+		content := []byte("fixture evaluator input: " + snapshotName + "\n")
+		fullPath := filepath.Join(runDir, filepath.FromSlash(bundlePath))
+		if err := os.WriteFile(fullPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256Bytes(content)
+		inputDigests[bundlePath] = digest
+		snapshotDigests[snapshotName] = digest
+	}
+	generatorDigests := make(map[string]string, len(qualityGeneratorFiles))
+	for _, name := range qualityGeneratorFiles {
+		snapshotName := qualityGeneratorSnapshotName(name)
+		bundlePath := qualityGeneratorBundlePath(name)
+		content := []byte("fixture evaluator source: " + name + "\n")
+		fullPath := filepath.Join(runDir, filepath.FromSlash(bundlePath))
+		if err := os.WriteFile(fullPath, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256Bytes(content)
+		inputDigests[bundlePath] = digest
+		snapshotDigests[snapshotName] = digest
+		generatorDigests[name] = digest
+	}
+	writeJSON(t, filepath.Join(qualityDir, "inputs.json"), map[string]any{
+		"schema_version": 1,
+		"validation": map[string]any{
+			"strict_evidence": strictEvidence,
+			"aggregate_status": func() string {
+				if strictEvidence {
+					return "strict-current"
+				}
+				return "non-strict"
+			}(),
+			"metrics_schema_version":   2,
+			"metrics_formula":          qualityMetricsFormula,
+			"generation_isolation":     qualityGenerationIsolation,
+			"generation_config_sha256": generationConfigDigest,
+			"judge_cache_schema":       6,
+		},
+		"inputs":     inputDigests,
+		"snapshots":  snapshotDigests,
+		"generators": generatorDigests,
+		"analysis_environment": map[string]any{
+			"go_version": "go version go1.26.5 fixture/fixture",
+			"GOENV":      "off",
+			"GOWORK":     "off",
+			"GOFLAGS":    "-mod=readonly",
+		},
+		"judge_environment_semantics": []any{
+			"go-version=go version go1.26.5 fixture/fixture",
+			"outer-environment=inherit-none;fixture=true",
+		},
+	})
+	digests := make(map[string]string, len(qualityAggregateFiles))
+	for _, name := range qualityAggregateFiles {
+		path := filepath.Join(qualityDir, name)
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digests[name] = digest
+	}
+	writeJSON(t, filepath.Join(qualityDir, "aggregate-manifest.json"), map[string]any{
+		"schema_version": 2,
+		"files":          digests,
+	})
+}
+
+func setQualityAggregateStrictEvidence(
+	t *testing.T,
+	runDir string,
+	strict bool,
+) string {
+	t.Helper()
+	inputsPath := filepath.Join(runDir, "quality", "inputs.json")
+	var inputs map[string]any
+	content, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &inputs); err != nil {
+		t.Fatal(err)
+	}
+	validation, ok := inputs["validation"].(map[string]any)
+	if !ok {
+		t.Fatal("quality input fixture has no validation object")
+	}
+	validation["strict_evidence"] = strict
+	if strict {
+		validation["aggregate_status"] = "strict-current"
+	} else {
+		validation["aggregate_status"] = "non-strict"
+	}
+	writeJSON(t, inputsPath, inputs)
+
+	markerPath := filepath.Join(runDir, "quality", "aggregate-manifest.json")
+	var marker map[string]any
+	content, err = os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &marker); err != nil {
+		t.Fatal(err)
+	}
+	files, ok := marker["files"].(map[string]any)
+	if !ok {
+		t.Fatal("quality aggregate fixture has no files object")
+	}
+	digest, err := sha256File(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files["inputs.json"] = digest
+	writeJSON(t, markerPath, marker)
+	digest, err = sha256File(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func TestValidateSourceChecksumsAcceptsRelocatableManifests(t *testing.T) {
+	tests := []struct {
+		name         string
+		recordedRoot string
+	}{
+		{name: "bundle-local"},
+		{name: "legacy-absolute", recordedRoot: "/stale/evidence/run"},
+		{name: "legacy-relative", recordedRoot: "stale/evidence/run"},
+		{name: "legacy-relative-dot", recordedRoot: "./stale/evidence/run"},
+		{name: "legacy-parent-relative", recordedRoot: "../outside/run"},
+		{name: "legacy-normalized-parent", recordedRoot: "stale/../outside/run"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			writeSourceChecksumFixture(t, runDir, test.recordedRoot)
+			check := validateSourceChecksums(runDir)
+			if !check.Passed {
+				t.Fatalf("checksum validation failed: %+v", check)
+			}
+		})
+	}
+}
+
+func TestValidateEvidenceDetectsTamperedSourceArtifact(t *testing.T) {
+	runDir := t.TempDir()
+	writeSourceChecksumFixture(t, runDir, "")
+	if err := os.WriteFile(
+		filepath.Join(runDir, "repo-view.bin"),
+		[]byte("tampered"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := ValidateEvidence(runDir, nil)
+	for _, check := range checks {
+		if check.Description != "source artifacts match source-SHA256SUMS" {
+			continue
+		}
+		if check.Passed || !strings.Contains(check.Error, "checksum mismatch") {
+			t.Fatalf("tampered artifact check = %+v", check)
+		}
+		return
+	}
+	t.Fatal("ValidateEvidence did not report a source checksum check")
+}
+
+func TestValidateTrackedEvidenceDetectsRewrittenArtifactAndChecksum(t *testing.T) {
+	runDir := t.TempDir()
+	writeSourceChecksumFixture(t, runDir, "")
+	checksumPath := filepath.Join(runDir, "source-SHA256SUMS")
+	trackedDigest, err := sha256File(checksumPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	artifactPath := filepath.Join(runDir, "repo-view.bin")
+	if err := os.WriteFile(artifactPath, []byte("coordinated tamper"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	artifactDigest, err := sha256File(artifactPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(checksumPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(content), "\n")
+	for index, line := range lines {
+		if strings.HasSuffix(line, "  repo-view.bin") {
+			lines[index] = artifactDigest + "  repo-view.bin"
+		}
+	}
+	if err := os.WriteFile(
+		checksumPath,
+		[]byte(strings.Join(lines, "\n")),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	checks := ValidateTrackedEvidence(runDir, nil, trackedDigest)
+	for _, check := range checks {
+		if check.Description != "source artifacts match source-SHA256SUMS" {
+			continue
+		}
+		if check.Passed ||
+			!strings.Contains(check.Error, "tracked source-SHA256SUMS digest mismatch") {
+			t.Fatalf("coordinated tamper check = %+v", check)
+		}
+		return
+	}
+	t.Fatal("ValidateTrackedEvidence did not report a source checksum check")
+}
+
+func TestValidateSourceChecksumsRejectsUnexpectedArtifactNames(t *testing.T) {
+	for _, recordedPath := range []string{
+		"../unexpected.bin",
+		"stale/evidence/../unexpected.tar.gz",
+	} {
+		t.Run(recordedPath, func(t *testing.T) {
+			runDir := t.TempDir()
+			writeSourceChecksumFixture(t, runDir, "")
+			checksumPath := filepath.Join(runDir, "source-SHA256SUMS")
+			content, err := os.ReadFile(checksumPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			content = []byte(strings.Replace(
+				string(content),
+				"  repo-view.bin\n",
+				"  "+recordedPath+"\n",
+				1,
+			))
+			if err := os.WriteFile(checksumPath, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			check := validateSourceChecksums(runDir)
+			if check.Passed || !strings.Contains(check.Error, "unexpected source artifact") {
+				t.Fatalf("unexpected checksum artifact check = %+v", check)
+			}
+		})
+	}
+}
+
+func writeSourceChecksumFixture(t *testing.T, runDir, recordedRoot string) {
+	t.Helper()
+	var checksum string
+	for _, name := range sourceChecksumArtifacts {
+		path := filepath.Join(runDir, name)
+		if err := os.WriteFile(path, []byte("contents of "+name), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recordedPath := name
+		if recordedRoot != "" {
+			recordedPath = recordedRoot + "/" + name
+		}
+		checksum += digest + "  " + recordedPath + "\n"
+	}
+	if err := os.WriteFile(
+		filepath.Join(runDir, "source-SHA256SUMS"),
+		[]byte(checksum),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+}

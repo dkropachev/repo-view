@@ -1,0 +1,1 @@
+Review commit {{COMMIT_SHORT}} compared with {{BASE}} for correctness regressions and missing tests. Report findings ordered by severity with file and line references. If no findings, state that clearly and identify residual risks. Read only; do not modify files.

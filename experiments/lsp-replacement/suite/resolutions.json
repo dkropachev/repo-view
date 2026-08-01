@@ -1,0 +1,1320 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {
+      "id": "01-simple-explain-accepted",
+      "status": "accepted",
+      "root_cause": "No failure; this is the accepted one-packet explanation control.",
+      "fix": "Retain the bounded changed packet, one repo-view call, positive token saving, and source-judged quality.",
+      "evidence": "runs/router-no-model-config-simple-explain-v2-20260731",
+      "source_checksum_sha256": "e339f331279b986efd73eee9f244e10702a622ac7ffae7ebf805d63a7b12c375",
+    "quality_aggregate_sha256": "89b0e002d02e4a798a1faef72dd936e66abe6b414afa18191c78075a94400eaf",
+      "quality_provenance": "strict-current",
+      "fixture_metric_cases": [
+        "baseline-explain",
+        "optimized-guarded-high-explain"
+      ],
+      "metric_cases": [
+        "baseline-explain",
+        "optimized-guarded-high-explain"
+      ],
+      "assertions": [
+        {
+          "description": "simple explanation completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "simple explanation uses exactly one repo-view tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple explanation saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "explain",
+            "profile": "guarded-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "simple explanation keeps complete static quality",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "simple explanation is not worse according to judges",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-guarded-high-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "02-simple-review-accepted",
+      "status": "accepted",
+      "root_cause": "No failure; this is the accepted one-packet review control.",
+      "fix": "Retain the bounded changed packet, one repo-view call, positive token saving, and source-judged quality.",
+      "evidence": "runs/router-no-model-config-simple-review-final-20260731",
+      "source_checksum_sha256": "e339f331279b986efd73eee9f244e10702a622ac7ffae7ebf805d63a7b12c375",
+    "quality_aggregate_sha256": "7c0f0a1d3c17d595e82969d57a1a22df97f4b11af385a68328a690560939ab1c",
+      "quality_provenance": "strict-current",
+      "fixture_metric_cases": [
+        "baseline-review",
+        "optimized-guarded-high-review"
+      ],
+      "metric_cases": [
+        "baseline-review",
+        "optimized-guarded-high-review"
+      ],
+      "assertions": [
+        {
+          "description": "simple review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "simple review uses exactly one repo-view tool call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "repo_view_tool_call_count",
+          "operator": "eq",
+          "value": 1
+        },
+        {
+          "description": "simple review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "review",
+            "profile": "guarded-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "simple review keeps complete static quality",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "simple review is not worse according to judges",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-guarded-high-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "03-rejected-incomplete-deep-run",
+      "status": "resolved",
+      "root_cause": "The deep workload was unbounded; baseline review timed out and optimized review never produced evidence.",
+      "fix": "Use exact phased batches under a mechanically enforced 34-repo-view-invocation ceiling, and require both tasks to complete with positive savings, complete static criteria, valid navigation accounting, and two not-worse judges.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "assertions": [
+        {
+          "description": "verified deep explanation completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified deep review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation stays inside hard budget",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified review stays inside hard budget",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified explanation budget accounting is valid",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_budget_accounting_valid",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review budget accounting is valid",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_budget_accounting_valid",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-explain",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "verified review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-review",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "verified explanation static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified review static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "04-rejected-tool-contract-defects",
+      "status": "resolved",
+      "root_cause": "The CLI lost repeatable filters, rejected useful batches, starved later symbols, selected assignment target _, truncated before deduplication, and allowed oversized responses.",
+      "fix": "Preserve repeatable filters, accept batched symbols/locations/files, allocate limits fairly, select member calls, deduplicate before limiting, expose truncation, and compile hard option caps into wrapper binaries.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "CLI filters, batches, and fair limits",
+          "package": "./cmd/repo-view",
+          "run": "TestCommonFlagsPreserveRepeatablePathFilters|TestFindHonorsPathFilterAndUsesEmptyArrays|TestFindFairLimitReturnsEveryRequestedSymbol|TestInspectAcceptsMultipleLocations|TestOutlineAcceptsMultiplePaths"
+        },
+        {
+          "description": "selection, deduplication, truncation, and path matching",
+          "package": "./repoview",
+          "run": "TestInspectSelectsMemberCallInsteadOfAssignmentTarget|TestFindDeduplicatesBeforeLimitAndReportsTruncation|TestGlobMatchSupportsDocumentedPathForms"
+        },
+        {
+          "description": "hard per-command bounds",
+          "package": "./cmd/repo-view",
+          "run": "TestNavigationCapsRejectOversizedOptions|TestEnforcedOptionCapsCannotBeDisabledByEnvironment|TestCompiledOptionCapSurvivesUnsetEnvironment|TestOptionCapRejectsZeroValueBypasses"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "05-rejected-bounded-cost-regression",
+      "status": "resolved",
+      "root_cause": "Navigation remained too chatty and Go scope extraction stopped at an inner block, forcing retries while omitting later reservation consumption.",
+      "fix": "Return the full enclosing Go declaration, center truncated code on the requested hit, batch selectors, and require positive effective-token savings for both tasks.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "full and hit-centered Go scopes",
+          "package": "./repoview",
+          "run": "TestInspectGoScopeIncludesCodeAfterNestedBlock|TestInspectTruncatedScopeIncludesRequestedLine"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-explain",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "verified review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-review",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "verified explanation retains complete static quality",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified review retains complete static quality",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        }
+      ]
+    },
+    {
+      "id": "06-rejected-soft-cap-and-quality",
+      "status": "resolved",
+      "root_cause": "A prose-only 20-repo-view-invocation ceiling was ignored and the cheaper explanation omitted required semantic evidence.",
+      "fix": "Mechanically enforce the cumulative cap from the live transcript and gate promotion on complete static criteria plus two source-grounded judges.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "live transcript budget and hard option caps",
+          "package": "./cmd/repo-view",
+          "run": "TestNavigationBudgetCountsLiveTranscript|TestEnforcedOptionCapsCannotBeDisabledByEnvironment"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified review obeys the hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified explanation static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "07-rejected-environment-budget-bypass",
+      "status": "resolved",
+      "root_cause": "The cumulative budget existed only in mutable REPO_VIEW_* environment variables, so env -u disabled it.",
+      "fix": "Embed the cumulative cap, transcript path, and all per-command bounds in the wrapper-built binary; environment values are now fallback-only.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "compiled budget survives unset environment and read-only state",
+          "package": "./cmd/repo-view",
+          "run": "TestEnforcedNavigationBudgetUsesReadOnlyTranscriptWithoutEnvironment"
+        },
+        {
+          "description": "compiled option caps override mutable environment",
+          "package": "./cmd/repo-view",
+          "run": "TestEnforcedOptionCapsCannotBeDisabledByEnvironment|TestCompiledOptionCapSurvivesUnsetEnvironment"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation has no budget tampering",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_budget_tamper_command_count",
+          "operator": "eq",
+          "value": 0
+        },
+        {
+          "description": "verified review has no budget tampering",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_budget_tamper_command_count",
+          "operator": "eq",
+          "value": 0
+        },
+        {
+          "description": "verified explanation obeys compiled cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified review obeys compiled cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        }
+      ]
+    },
+    {
+      "id": "08-rejected-repo-view-not-used",
+      "status": "resolved",
+      "root_cause": "The attempted mandatory policy did not make repo-view the repository navigation path, so both candidate tasks used zero repo-view calls.",
+      "fix": "Require changed first, prohibit repository shell reads in the verified profile, reject navigation-missing runs, and retain only runs with substantial repo-view traces.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation uses substantial repo-view navigation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gte",
+          "value": 8
+        },
+        {
+          "description": "verified review uses substantial repo-view navigation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gte",
+          "value": 8
+        }
+      ]
+    },
+    {
+      "id": "09-rejected-read-only-budget-file",
+      "status": "resolved",
+      "root_cause": "The budget counter required a writable state file inside a read-only model sandbox, so navigation failed before the first useful call.",
+      "fix": "Count started and completed invocations from a wrapper-owned live JSON transcript; repo-view only reads that file and writes no sandbox state.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "compiled budget reads a read-only transcript without state writes",
+          "package": "./cmd/repo-view",
+          "run": "TestEnforcedNavigationBudgetUsesReadOnlyTranscriptWithoutEnvironment"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation proceeds past the first call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gt",
+          "value": 1
+        },
+        {
+          "description": "verified review proceeds past the first call",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gt",
+          "value": 1
+        },
+        {
+          "description": "verified explanation completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "10-rejected-wrong-dependency-semantics",
+      "status": "resolved",
+      "root_cause": "The run inspected an arbitrary cached x/time version and inferred monotonic behavior without verifying the pinned manifest version or both timestamps.",
+      "fix": "Search go.mod through repo-view first, inspect x/time v0.14.0 specifically, require separate reservation-anchor and no-argument clock-source analysis, and carry the manifest citation into the final answer.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "exact Go module dependency-version search",
+          "package": "./repoview",
+          "run": "TestFindSearchesGoModuleManifest"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation names pinned x/time v0.14.0",
+          "source": "answer",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "content",
+          "operator": "contains",
+          "value": "golang.org/x/time v0.14.0"
+        },
+        {
+          "description": "verified explanation passes clock semantics criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain",
+            "id": "clock_semantics"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "11-rejected-confirmed-soft-cap",
+      "status": "resolved",
+      "root_cause": "Dependency semantics were corrected, but a prose-only 26-repo-view-invocation ceiling was still exceeded and explain omitted external concrete-type assertion risk.",
+      "fix": "Use the transcript-enforced ceiling, require explicit out-of-repository dynamic-type risk and an affected adapter chain, and evaluate complete answers with source-grounded judges.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "transcript-enforced cumulative budget",
+          "package": "./cmd/repo-view",
+          "run": "TestNavigationBudgetCountsLiveTranscript|TestNavigationBudgetWaitsForCurrentStartedEvent"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation stays inside its hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified review stays inside its hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified explanation passes concrete-type risk criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain",
+            "id": "concrete_type_risk"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation judges preserve concrete-type risk",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "12-rejected-instruction-only-cap",
+      "status": "resolved",
+      "root_cause": "Static answer content reached 100 percent, but instruction-only limits still allowed 49 and 40 repo-view invocations.",
+      "fix": "Compile the cap and transcript path into repo-view, count live started invocations, reject calls beyond the ceiling independently of model compliance, and use phase ceilings plus batched searches to finish below it.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "transcript cap rejects excess invocations",
+          "package": "./cmd/repo-view",
+          "run": "TestNavigationBudgetCountsLiveTranscript|TestEnforcedNavigationBudgetUsesReadOnlyTranscriptWithoutEnvironment"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation stays inside hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified review stays inside hard cap",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_cap_exceeded",
+          "operator": "eq",
+          "value": false
+        },
+        {
+          "description": "verified explanation static quality remains complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified review static quality remains complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "13-rejected-inherited-fd-budget",
+      "status": "resolved",
+      "root_cause": "The inherited file descriptor was closed or reused across the Codex execution boundary, so first calls falsely observed an exhausted budget.",
+      "fix": "Remove inherited-descriptor accounting, use the wrapper-owned transcript path embedded in each repo-view binary, and validate that the maximum observed budget use equals parsed invocations without imposing a wasteful minimum call count.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "go_tests": [
+        {
+          "description": "embedded transcript path works without environment or writable descriptor state",
+          "package": "./cmd/repo-view",
+          "run": "TestEnforcedNavigationBudgetUsesReadOnlyTranscriptWithoutEnvironment|TestNavigationBudgetWaitsForCurrentStartedEvent"
+        }
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation proceeds beyond first invocation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gt",
+          "value": 1
+        },
+        {
+          "description": "verified review proceeds beyond first invocation",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_invocation_count",
+          "operator": "gt",
+          "value": 1
+        },
+        {
+          "description": "verified explanation budget observations match parsed invocations",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "repo_view_budget_accounting_valid",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review budget observations match parsed invocations",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "repo_view_budget_accounting_valid",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "14-rejected-semantic-call-chain",
+      "status": "resolved",
+      "root_cause": "Transcript enforcement worked, but broad and truncated discovery let the answer merge unrelated construction and consumption paths, miss real reader and local wrapper tests, and imply required clock facts instead of stating them.",
+      "fix": "Require same-subsystem edge ledgers, complete reader injection, exact batched production-test and wrapper-test symbols, explicit UTC and monotonic-test-gap conclusions, positive CLI bounds, and source-grounded judges that distinguish baseline fixes from regressions.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "assertions": [
+        {
+          "description": "verified explanation passes production path criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain",
+            "id": "production_paths"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation passes test coverage criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain",
+            "id": "test_coverage_matrix"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review passes production impact criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review",
+            "id": "production_impact"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review passes behavior test criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review",
+            "id": "behavior_test_matrix"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "15-rejected-incomplete-review-path",
+      "status": "resolved",
+      "root_cause": "The review omitted explicit producer and return-contract proof, then emphasized pinned upstream behavior without closing local wrapper tests or representative production paths.",
+      "fix": "Require separate contract citations, an exact six-call adapter chain, and distinct changed-native, local fake-clock wrapper, production-path, and pinned-upstream test matrices before review acceptance.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "repair": {
+        "task": "deep-review",
+        "profile": "investigative-verified-high",
+        "baseline_from": "",
+        "source": ".cache/experiments/lsp-replacement/source.git",
+        "commit": "74c8455d4338c131d021b5d77799237b2c3dcf1e",
+        "prompt_commit": "74c8455d4",
+        "base": "d682c10e7420867124fef9f029c48f0611b653ec",
+        "model_mode": "router"
+      },
+      "metric_cases": [
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "assertions": [
+        {
+          "description": "verified review passes interface conformance criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review",
+            "id": "interface_conformance"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review passes source reference criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review",
+            "id": "source_references"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review passes behavior test criterion",
+          "source": "quality.static_criterion",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review",
+            "id": "behavior_test_matrix"
+          },
+          "field": "passed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "verified review static quality is complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "verified review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    },
+    {
+      "id": "16-deep-verified-accepted",
+      "status": "accepted",
+      "root_cause": "No unresolved failure; this is the accepted verified deep-navigation control.",
+      "fix": "Retain hard transcript and option caps, complete evidence policy, positive savings, full static criteria, and two source-grounded judges per task.",
+    "evidence": "runs/router-deep-eight-command-v5-20260801",
+    "source_checksum_sha256": "8705be939845c5aa2402c94bc4bb91d6b72a9823e12a2dd9e3c2fa02948ed514",
+    "quality_aggregate_sha256": "04dcba37ee791616f39036ed8fb7fe3bbf1b16f0f7231ecafe2f34d455ce4c46",
+      "quality_provenance": "strict-current",
+      "metric_cases": [
+        "baseline-deep-explain",
+        "optimized-investigative-verified-high-deep-explain",
+        "baseline-deep-review",
+        "optimized-investigative-verified-high-deep-review"
+      ],
+      "assertions": [
+        {
+          "description": "accepted explanation completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "accepted review completes",
+          "source": "metrics.case",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "completed",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "accepted explanation saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-explain",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "accepted review saves effective tokens",
+          "source": "metrics.comparison",
+          "selector": {
+            "task": "deep-review",
+            "profile": "investigative-verified-high"
+          },
+          "field": "effective_reduction_percent",
+          "operator": "gt",
+          "value": 0
+        },
+        {
+          "description": "accepted explanation remains static complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "accepted review remains static complete",
+          "source": "quality.static",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "score_percent",
+          "operator": "eq",
+          "value": 100
+        },
+        {
+          "description": "accepted explanation judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-explain"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        },
+        {
+          "description": "accepted review judges find no regression",
+          "source": "quality.judge",
+          "selector": {
+            "name": "optimized-investigative-verified-high-deep-review"
+          },
+          "field": "all_not_worse",
+          "operator": "eq",
+          "value": true
+        }
+      ]
+    }
+  ]
+}

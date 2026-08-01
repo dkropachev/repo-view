@@ -1,0 +1,10 @@
+Perform a repository-wide correctness review of commit {{COMMIT_SHORT}} compared with {{BASE}}. Do not stop at the changed diff: inspect unchanged contracts, implementations, production callers, and tests before reaching a conclusion.
+
+Required audit:
+1. Build a semantic matrix for the old `ClockedReservation` and new native reservation covering `OK`, `Delay`, `DelayFrom`, `Cancel`, and `CancelAt`, including real-time versus explicit-time behavior and any wall-clock versus monotonic-time distinction.
+2. Verify interface conformance and search for concrete-type assumptions, assertions, field access, or callers that require `ClockedReservation`.
+3. Trace exactly three representative production paths outside the changed files that can reach `RateLimiterImpl.Reserve` or `ReserveN`: one direct path, one `DynamicRateLimiterImpl` path, and one request-rate-limiter adapter or health-limiter path. Assess observable behavior, then stop; do not enumerate additional callers.
+4. Audit changed and pre-existing tests for immediate, rejected, delayed, cancellation/refund, explicit-time, and allocation-regression coverage.
+5. Check whether the benchmark and documented performance claims support the stated conclusion without being mistaken for enforced correctness.
+
+Report findings first, ordered by severity, with exact file:line references. Then give the semantic matrix, three-path summary, test-coverage matrix, and an explicit correctness-regression conclusion. Use representative evidence rather than an exhaustive repository inventory. State unresolved or truncated evidence. Do not claim that a test or command ran unless the transcript contains its completed execution; otherwise state that it was not run. Read only; do not modify files.
