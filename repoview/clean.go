@@ -98,7 +98,7 @@ func stripSlashComment(line string) string {
 	inSingle := false
 	inDouble := false
 	escaped := false
-	for i := 0; i < len(line)-1; i++ {
+	for i := range len(line) - 1 {
 		char := rune(line[i])
 		next := rune(line[i+1])
 		if escaped {

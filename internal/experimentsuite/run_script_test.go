@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -3546,12 +3547,13 @@ func runScriptBaselineManifest(
 		}
 		environment = append(environment, variable)
 	}
-	command.Env = append(
+	environment = append(
 		environment,
 		"GOENV=off",
 		"GOWORK=off",
 		"GOFLAGS=-mod=readonly",
 	)
+	command.Env = environment
 	output, err := command.Output()
 	if err != nil {
 		t.Fatal(err)
@@ -3892,7 +3894,8 @@ func stringPointer(value string) *string {
 
 func assertRunScriptExit(t *testing.T, err error, want int, output []byte) {
 	t.Helper()
-	exitError, ok := err.(*exec.ExitError)
+	exitError := &exec.ExitError{}
+	ok := errors.As(err, &exitError)
 	if !ok {
 		t.Fatalf("run.sh exit = %v, want %d\n%s", err, want, output)
 	}

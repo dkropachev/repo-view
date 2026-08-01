@@ -61,21 +61,21 @@ type RepoViewInvocation struct {
 }
 
 type Call struct {
-	Index                int                  `json:"index"`
+	ExitCode             *int                 `json:"exit_code,omitempty"`
+	OperationInvocations map[string]int       `json:"operation_invocations"`
+	Status               string               `json:"status,omitempty"`
 	ID                   string               `json:"id"`
 	ToolType             string               `json:"tool_type"`
-	StartedEvent         int                  `json:"started_event"`
-	CompletedEvent       int                  `json:"completed_event"`
-	PrimaryOperation     string               `json:"primary_operation"`
-	Operations           []string             `json:"operations"`
-	OperationInvocations map[string]int       `json:"operation_invocations"`
-	Command              string               `json:"command,omitempty"`
-	Status               string               `json:"status,omitempty"`
-	ExitCode             *int                 `json:"exit_code,omitempty"`
-	OutputCharacters     int                  `json:"output_characters"`
-	OutputSHA256         string               `json:"output_sha256,omitempty"`
-	RepoViewInvocations  []RepoViewInvocation `json:"repo_view_invocations,omitempty"`
 	RepoViewShapeError   string               `json:"repo_view_command_shape_error,omitempty"`
+	OutputSHA256         string               `json:"output_sha256,omitempty"`
+	PrimaryOperation     string               `json:"primary_operation"`
+	Command              string               `json:"command,omitempty"`
+	Operations           []string             `json:"operations"`
+	RepoViewInvocations  []RepoViewInvocation `json:"repo_view_invocations,omitempty"`
+	Index                int                  `json:"index"`
+	OutputCharacters     int                  `json:"output_characters"`
+	CompletedEvent       int                  `json:"completed_event"`
+	StartedEvent         int                  `json:"started_event"`
 }
 
 type Edge struct {
@@ -94,20 +94,20 @@ type CallGraph struct {
 }
 
 type Stats struct {
-	SchemaVersion             int       `json:"schema_version"`
-	TotalToolCalls            int       `json:"total_tool_calls"`
-	CommandExecutionToolCalls int       `json:"command_execution_tool_calls"`
-	RepoViewToolCalls         int       `json:"repo_view_tool_calls"`
-	OtherToolCalls            int       `json:"other_tool_calls"`
-	RepoViewInvocations       int       `json:"repo_view_invocations"`
-	RepoViewCommandShapeValid bool      `json:"repo_view_command_shape_valid"`
+	CallGraph                 CallGraph `json:"call_graph"`
 	RepoViewShapeViolations   []string  `json:"repo_view_command_shape_violations"`
-	ToolTypes                 []Count   `json:"tool_types"`
+	Calls                     []Call    `json:"calls"`
 	Operations                []Count   `json:"operations"`
+	ToolTypes                 []Count   `json:"tool_types"`
+	RepoViewToolCalls         int       `json:"repo_view_tool_calls"`
+	RepoViewInvocations       int       `json:"repo_view_invocations"`
+	OtherToolCalls            int       `json:"other_tool_calls"`
+	SchemaVersion             int       `json:"schema_version"`
 	TemporalEdgeCount         int       `json:"temporal_edge_count"`
 	OutputReferenceEdgeCount  int       `json:"output_reference_edge_count"`
-	Calls                     []Call    `json:"calls"`
-	CallGraph                 CallGraph `json:"call_graph"`
+	CommandExecutionToolCalls int       `json:"command_execution_tool_calls"`
+	TotalToolCalls            int       `json:"total_tool_calls"`
+	RepoViewCommandShapeValid bool      `json:"repo_view_command_shape_valid"`
 }
 
 type event struct {
@@ -116,17 +116,17 @@ type event struct {
 }
 
 type item struct {
+	ExitCode         *int            `json:"exit_code"`
 	ID               string          `json:"id"`
 	Type             string          `json:"type"`
 	Command          string          `json:"command"`
-	AggregatedOutput json.RawMessage `json:"aggregated_output"`
-	Output           json.RawMessage `json:"output"`
-	Result           json.RawMessage `json:"result"`
 	Status           string          `json:"status"`
-	ExitCode         *int            `json:"exit_code"`
 	Name             string          `json:"name"`
 	Server           string          `json:"server"`
 	Tool             string          `json:"tool"`
+	AggregatedOutput json.RawMessage `json:"aggregated_output"`
+	Output           json.RawMessage `json:"output"`
+	Result           json.RawMessage `json:"result"`
 }
 
 type operationHit struct {
@@ -140,8 +140,8 @@ type reference struct {
 }
 
 type completedCall struct {
-	call   Call
 	output string
+	call   Call
 }
 
 func Analyze(r io.Reader) (Stats, error) {

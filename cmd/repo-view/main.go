@@ -511,13 +511,13 @@ func (c commonFlags) buildOptions(include repoview.Include) (repoview.Options, e
 	}
 	for _, cap := range []struct {
 		option string
-		value  int
 		env    string
+		value  int
 	}{
-		{"--limit", options.Limit, "REPO_VIEW_LIMIT_CAP"},
-		{"--context", options.Context, "REPO_VIEW_CONTEXT_CAP"},
-		{"--max-code-lines", options.MaxCodeLines, "REPO_VIEW_MAX_CODE_LINES_CAP"},
-		{"--max-patch-lines", options.MaxPatchLines, "REPO_VIEW_MAX_PATCH_LINES_CAP"},
+		{option: "--limit", env: "REPO_VIEW_LIMIT_CAP", value: options.Limit},
+		{option: "--context", env: "REPO_VIEW_CONTEXT_CAP", value: options.Context},
+		{option: "--max-code-lines", env: "REPO_VIEW_MAX_CODE_LINES_CAP", value: options.MaxCodeLines},
+		{option: "--max-patch-lines", env: "REPO_VIEW_MAX_PATCH_LINES_CAP", value: options.MaxPatchLines},
 	} {
 		if cap.option == "--max-code-lines" &&
 			options.Return == repoview.ReturnLocations &&
@@ -637,12 +637,12 @@ func (c commonFlags) enforceNavigationSemantics(
 	}
 	for _, required := range []struct {
 		option      string
-		value       int
 		environment string
+		value       int
 	}{
-		{"--limit", options.Limit, "REPO_VIEW_LIMIT_CAP"},
-		{"--max-code-lines", options.MaxCodeLines, "REPO_VIEW_MAX_CODE_LINES_CAP"},
-		{"--max-patch-lines", options.MaxPatchLines, "REPO_VIEW_MAX_PATCH_LINES_CAP"},
+		{option: "--limit", environment: "REPO_VIEW_LIMIT_CAP", value: options.Limit},
+		{option: "--max-code-lines", environment: "REPO_VIEW_MAX_CODE_LINES_CAP", value: options.MaxCodeLines},
+		{option: "--max-patch-lines", environment: "REPO_VIEW_MAX_PATCH_LINES_CAP", value: options.MaxPatchLines},
 	} {
 		raw, ok := enforcedOptionCap(required.environment)
 		if !ok {
@@ -750,8 +750,8 @@ func enforceOptionCap(option string, value int, environment string) error {
 	if !ok {
 		return nil
 	}
-	cap, err := strconv.Atoi(raw)
-	if err != nil || cap < 0 {
+	limitCap, err := strconv.Atoi(raw)
+	if err != nil || limitCap < 0 {
 		return fmt.Errorf("%s must be a non-negative integer: %s", environment, raw)
 	}
 	if value == 0 {
@@ -766,8 +766,8 @@ func enforceOptionCap(option string, value int, environment string) error {
 			return fmt.Errorf("%s must be positive", option)
 		}
 	}
-	if value > cap {
-		return fmt.Errorf("%s %d exceeds %s %d", option, value, environment, cap)
+	if value > limitCap {
+		return fmt.Errorf("%s %d exceeds %s %d", option, value, environment, limitCap)
 	}
 	return nil
 }
@@ -1001,7 +1001,7 @@ func consumeNavigationTranscriptBudgetFor(
 	limit int,
 	subcommand string,
 ) (*repoview.NavigationBudget, error) {
-	for attempt := 0; attempt < 100; attempt++ {
+	for range 100 {
 		state, err := navigationTranscriptStateFor(path)
 		if err != nil {
 			return nil, err
@@ -1038,9 +1038,9 @@ func consumeNavigationTranscriptBudgetFor(
 }
 
 type navigationTranscriptState struct {
+	subcommands []string
 	started     int
 	completed   int
-	subcommands []string
 }
 
 func navigationTranscriptStateFor(
@@ -1287,11 +1287,12 @@ func printChangedResponse(response repoview.ChangedResponse, returnMode repoview
 func printResults(results []repoview.Result, returnMode repoview.Return) {
 	for _, result := range results {
 		if returnMode == repoview.ReturnLocations {
-			if result.Line > 0 {
+			switch {
+			case result.Line > 0:
 				fmt.Printf("%s:%d\n", result.Path, result.Line)
-			} else if result.StartLine > 0 && result.EndLine > 0 {
+			case result.StartLine > 0 && result.EndLine > 0:
 				fmt.Printf("%s:%d\n", result.Path, result.StartLine)
-			} else {
+			default:
 				fmt.Println(result.Path)
 			}
 			continue

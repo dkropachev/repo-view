@@ -19,18 +19,18 @@ import (
 )
 
 type Manifest struct {
-	SchemaVersion int    `json:"schema_version"`
 	Cases         []Case `json:"cases"`
+	SchemaVersion int    `json:"schema_version"`
 }
 
 type ResolutionManifest struct {
-	SchemaVersion int              `json:"schema_version"`
 	Cases         []ResolutionCase `json:"cases"`
+	SchemaVersion int              `json:"schema_version"`
 }
 
 type Case struct {
+	Live                   *LiveConfig `json:"live,omitempty"`
 	ID                     string      `json:"id"`
-	Level                  int         `json:"level"`
 	Complexity             string      `json:"complexity"`
 	Outcome                string      `json:"outcome"`
 	Evidence               string      `json:"evidence"`
@@ -38,8 +38,8 @@ type Case struct {
 	QualityAggregateSHA256 string      `json:"quality_aggregate_sha256"`
 	QualityProvenance      string      `json:"quality_provenance,omitempty"`
 	Description            string      `json:"description"`
-	Live                   *LiveConfig `json:"live,omitempty"`
 	Assertions             []Assertion `json:"assertions"`
+	Level                  int         `json:"level"`
 }
 
 type ResolutionCase struct {
@@ -76,20 +76,20 @@ type LiveConfig struct {
 }
 
 type Assertion struct {
+	Value       any            `json:"value"`
+	Selector    map[string]any `json:"selector,omitempty"`
 	Description string         `json:"description"`
 	Source      string         `json:"source"`
-	Selector    map[string]any `json:"selector,omitempty"`
 	Field       string         `json:"field"`
 	Operator    string         `json:"operator"`
-	Value       any            `json:"value"`
 }
 
 type CheckResult struct {
-	Description string `json:"description"`
-	Passed      bool   `json:"passed"`
 	Actual      any    `json:"actual,omitempty"`
 	Expected    any    `json:"expected,omitempty"`
+	Description string `json:"description"`
 	Error       string `json:"error,omitempty"`
+	Passed      bool   `json:"passed"`
 }
 
 type ToolStat struct {
@@ -100,53 +100,53 @@ type ToolStat struct {
 }
 
 type EvidenceMetric struct {
-	Name                          string     `json:"name"`
 	Task                          string     `json:"task"`
 	Variant                       string     `json:"variant"`
 	Profile                       string     `json:"profile"`
-	Completed                     bool       `json:"completed"`
-	RegularInputTokens            int64      `json:"regular_input_tokens"`
-	CachedInputTokens             int64      `json:"cached_input_tokens"`
-	OutputTokens                  int64      `json:"output_tokens"`
-	EffectiveTokens               float64    `json:"effective_tokens"`
-	TotalToolCalls                int        `json:"total_tool_calls"`
-	RepoViewToolCalls             int        `json:"repo_view_tool_calls"`
-	OtherToolCalls                int        `json:"other_tool_calls"`
+	JudgeStatus                   string     `json:"judge_status"`
+	Name                          string     `json:"name"`
+	CallGraphMarkdownFile         string     `json:"call_graph_markdown_file"`
+	CallGraphDOTFile              string     `json:"call_graph_dot_file"`
+	ToolStatsFile                 string     `json:"tool_stats_file"`
+	ToolTypes                     []ToolStat `json:"tool_types"`
+	Operations                    []ToolStat `json:"operations"`
+	StaticScorePercent            float64    `json:"static_score_percent"`
+	RepoViewFindInvocations       int        `json:"repo_view_find_invocations"`
 	RepoViewInvocations           int        `json:"repo_view_invocations"`
 	TemporalEdges                 int        `json:"temporal_edges"`
 	OutputReferenceEdges          int        `json:"output_reference_edges"`
 	RepoViewInvocationCap         int        `json:"repo_view_invocation_cap"`
-	RepoViewInvocationCapExceeded bool       `json:"repo_view_invocation_cap_exceeded"`
+	AverageTaskAdherence          float64    `json:"average_task_adherence"`
 	RepoViewBoundViolations       int        `json:"repo_view_bound_violations"`
 	RepoViewBudgetTamperCommands  int        `json:"repo_view_budget_tamper_commands"`
 	RepoViewChangedInvocations    int        `json:"repo_view_changed_invocations"`
-	RepoViewFirstChanged          bool       `json:"repo_view_first_invocation_changed"`
-	RepoViewNavigationValid       bool       `json:"repo_view_navigation_semantics_valid"`
-	MechanicalNavigationEnforced  bool       `json:"mechanical_navigation_semantics_enforced"`
-	RepoViewFindInvocations       int        `json:"repo_view_find_invocations"`
+	OtherToolCalls                int        `json:"other_tool_calls"`
+	AverageGrounding              float64    `json:"average_grounding"`
+	AverageCompleteness           float64    `json:"average_completeness"`
+	JudgeCriticalOmissions        int        `json:"judge_critical_omissions"`
 	RepoViewInspectInvocations    int        `json:"repo_view_inspect_invocations"`
 	RepoViewOutlineInvocations    int        `json:"repo_view_outline_invocations"`
-	ToolTypes                     []ToolStat `json:"tool_types"`
-	Operations                    []ToolStat `json:"operations"`
-	ToolStatsFile                 string     `json:"tool_stats_file"`
-	CallGraphDOTFile              string     `json:"call_graph_dot_file"`
-	CallGraphMarkdownFile         string     `json:"call_graph_markdown_file"`
-	HasComparison                 bool       `json:"has_comparison"`
-	EffectiveReductionPercent     float64    `json:"effective_reduction_percent"`
-	StaticScorePercent            float64    `json:"static_score_percent"`
-	StaticRequiredPass            bool       `json:"static_required_pass"`
-	JudgeCount                    int        `json:"judge_count"`
-	JudgeStatus                   string     `json:"judge_status"`
-	JudgeNotWorse                 bool       `json:"judge_not_worse"`
-	JudgeCoreConclusionMatch      bool       `json:"judge_core_conclusion_match"`
-	JudgeCriticalOmissions        int        `json:"judge_critical_omissions"`
-	JudgeUnsupportedClaims        int        `json:"judge_unsupported_claims"`
-	JudgeBaselinePointsOmitted    int        `json:"judge_baseline_points_omitted"`
-	JudgeMaterialContradictions   int        `json:"judge_material_contradictions"`
+	RepoViewToolCalls             int        `json:"repo_view_tool_calls"`
+	TotalToolCalls                int        `json:"total_tool_calls"`
+	EffectiveTokens               float64    `json:"effective_tokens"`
+	OutputTokens                  int64      `json:"output_tokens"`
+	CachedInputTokens             int64      `json:"cached_input_tokens"`
 	AverageCorrectness            float64    `json:"average_correctness"`
-	AverageCompleteness           float64    `json:"average_completeness"`
-	AverageGrounding              float64    `json:"average_grounding"`
-	AverageTaskAdherence          float64    `json:"average_task_adherence"`
+	EffectiveReductionPercent     float64    `json:"effective_reduction_percent"`
+	RegularInputTokens            int64      `json:"regular_input_tokens"`
+	JudgeMaterialContradictions   int        `json:"judge_material_contradictions"`
+	JudgeCount                    int        `json:"judge_count"`
+	JudgeBaselinePointsOmitted    int        `json:"judge_baseline_points_omitted"`
+	JudgeUnsupportedClaims        int        `json:"judge_unsupported_claims"`
+	RepoViewFirstChanged          bool       `json:"repo_view_first_invocation_changed"`
+	JudgeCoreConclusionMatch      bool       `json:"judge_core_conclusion_match"`
+	JudgeNotWorse                 bool       `json:"judge_not_worse"`
+	Completed                     bool       `json:"completed"`
+	StaticRequiredPass            bool       `json:"static_required_pass"`
+	HasComparison                 bool       `json:"has_comparison"`
+	MechanicalNavigationEnforced  bool       `json:"mechanical_navigation_semantics_enforced"`
+	RepoViewNavigationValid       bool       `json:"repo_view_navigation_semantics_valid"`
+	RepoViewInvocationCapExceeded bool       `json:"repo_view_invocation_cap_exceeded"`
 }
 
 func LoadManifest(path string) (Manifest, error) {
@@ -868,27 +868,27 @@ type qualityAggregateSnapshot struct {
 }
 
 type qualityInputCommitment struct {
-	SchemaVersion             int                        `json:"schema_version"`
-	Validation                qualityValidation          `json:"validation"`
 	Inputs                    map[string]string          `json:"inputs"`
 	Snapshots                 map[string]string          `json:"snapshots"`
 	Generators                map[string]string          `json:"generators"`
 	AnalysisEnvironment       qualityAnalysisEnvironment `json:"analysis_environment"`
 	JudgeEnvironmentSemantics []string                   `json:"judge_environment_semantics"`
+	Validation                qualityValidation          `json:"validation"`
+	SchemaVersion             int                        `json:"schema_version"`
 }
 
 type qualityValidation struct {
-	StrictEvidence         bool   `json:"strict_evidence"`
 	AggregateStatus        string `json:"aggregate_status"`
-	Enforce                bool   `json:"enforce"`
-	BindLegacyJudges       bool   `json:"bind_legacy_judges"`
-	SkipAnalyze            bool   `json:"skip_analyze"`
-	JudgeRepeats           int    `json:"judge_repeats"`
-	MetricsSchemaVersion   int    `json:"metrics_schema_version"`
 	MetricsFormula         string `json:"metrics_formula"`
 	GenerationIsolation    string `json:"generation_isolation"`
 	GenerationConfigSHA256 string `json:"generation_config_sha256"`
+	JudgeRepeats           int    `json:"judge_repeats"`
+	MetricsSchemaVersion   int    `json:"metrics_schema_version"`
 	JudgeCacheSchema       int    `json:"judge_cache_schema"`
+	StrictEvidence         bool   `json:"strict_evidence"`
+	Enforce                bool   `json:"enforce"`
+	BindLegacyJudges       bool   `json:"bind_legacy_judges"`
+	SkipAnalyze            bool   `json:"skip_analyze"`
 }
 
 type qualityAnalysisEnvironment struct {
@@ -899,17 +899,8 @@ type qualityAnalysisEnvironment struct {
 }
 
 type qualityGenerationConfig struct {
-	GenerationIsolation          string            `json:"generation_isolation"`
-	DeveloperInstructions        string            `json:"baseline_developer_instructions"`
-	FeatureFlags                 []string          `json:"feature_flags"`
-	CodexIsolationFlags          []string          `json:"codex_isolation_flags"`
-	CodexEnvironment             []string          `json:"codex_environment"`
-	HostGoEnvironment            []string          `json:"host_go_environment"`
-	ProfilesSnapshotPath         string            `json:"profiles_snapshot_path"`
-	ProfilesSnapshotSHA256       string            `json:"profiles_snapshot_sha256"`
 	PromptFiles                  map[string]string `json:"prompt_files"`
 	PromptDigests                map[string]string `json:"prompt_digests"`
-	MechanicalNavigationEnforced bool              `json:"mechanical_navigation_semantics_enforced"`
 	MechanicalNavigationContract struct {
 		RequiredRoot           string `json:"required_root"`
 		RequiredBaseCommit     string `json:"required_base_commit"`
@@ -917,12 +908,16 @@ type qualityGenerationConfig struct {
 		RequiredChangedContext string `json:"required_changed_context"`
 		RequireNavigation      string `json:"require_navigation_semantics"`
 	} `json:"mechanical_navigation_contract"`
-	AuthSourcePermission string `json:"auth_source_permission"`
-}
-
-func validateQualityAggregate(runDir string) error {
-	_, err := readQualityAggregate(runDir, "")
-	return err
+	ProfilesSnapshotPath         string   `json:"profiles_snapshot_path"`
+	GenerationIsolation          string   `json:"generation_isolation"`
+	ProfilesSnapshotSHA256       string   `json:"profiles_snapshot_sha256"`
+	DeveloperInstructions        string   `json:"baseline_developer_instructions"`
+	AuthSourcePermission         string   `json:"auth_source_permission"`
+	CodexEnvironment             []string `json:"codex_environment"`
+	HostGoEnvironment            []string `json:"host_go_environment"`
+	CodexIsolationFlags          []string `json:"codex_isolation_flags"`
+	FeatureFlags                 []string `json:"feature_flags"`
+	MechanicalNavigationEnforced bool     `json:"mechanical_navigation_semantics_enforced"`
 }
 
 func readQualityAggregate(
@@ -971,8 +966,8 @@ func readQualityAggregate(
 		)
 	}
 	var manifest struct {
-		SchemaVersion int               `json:"schema_version"`
 		Files         map[string]string `json:"files"`
+		SchemaVersion int               `json:"schema_version"`
 	}
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 		return nil, fmt.Errorf("decode quality aggregate commit marker: %w", err)
@@ -1361,14 +1356,13 @@ func validateMaterialQualityInputs(
 		return fmt.Errorf("quality input commitment omits metrics.json")
 	}
 	var metrics struct {
-		SchemaVersion      int    `json:"schema_version"`
-		Formula            string `json:"formula"`
 		AnalysisProvenance struct {
 			ProfilesSource string `json:"profiles_source"`
 			ProfilesPath   string `json:"profiles_path"`
 			ProfilesSHA256 string `json:"profiles_sha256"`
 		} `json:"analysis_provenance"`
-		Cases []struct {
+		Formula string `json:"formula"`
+		Cases   []struct {
 			Name                  string `json:"name"`
 			AnswerFile            string `json:"answer_file"`
 			CommandsFile          string `json:"commands_file"`
@@ -1376,6 +1370,7 @@ func validateMaterialQualityInputs(
 			CallGraphDOTFile      string `json:"call_graph_dot_file"`
 			CallGraphMarkdownFile string `json:"call_graph_markdown_file"`
 		} `json:"cases"`
+		SchemaVersion int `json:"schema_version"`
 	}
 	if err := json.Unmarshal(metricsBytes, &metrics); err != nil {
 		return fmt.Errorf("decode snapshotted metrics: %w", err)
@@ -1572,11 +1567,11 @@ func validateMaterialQualityInputs(
 			)
 		}
 		var completion struct {
-			SchemaVersion int    `json:"schema_version"`
 			State         string `json:"state"`
 			Outcome       string `json:"outcome"`
-			ExitCode      int    `json:"exit_code"`
 			CompletedAt   string `json:"completed_at"`
+			SchemaVersion int    `json:"schema_version"`
+			ExitCode      int    `json:"exit_code"`
 		}
 		if err := json.Unmarshal(runCompleteBytes, &completion); err != nil {
 			return fmt.Errorf("decode run-complete.json: %w", err)
@@ -1593,25 +1588,25 @@ func validateMaterialQualityInputs(
 	}
 	if hasManifest {
 		var manifest struct {
-			SchemaVersion          int               `json:"schema_version"`
-			TaskSelection          string            `json:"task_selection"`
-			VariantSelection       string            `json:"variant_selection"`
-			Profiles               []string          `json:"profiles"`
 			BaselineFrom           *string           `json:"baseline_from"`
+			PromptDigests          map[string]string `json:"prompt_digests"`
+			PromptFiles            map[string]string `json:"prompt_files"`
+			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
+			VariantSelection       string            `json:"variant_selection"`
 			GenerationIsolation    string            `json:"generation_isolation"`
 			GenerationConfigSHA256 string            `json:"generation_config_sha256"`
 			ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
-			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
-			MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
-			PromptFiles            map[string]string `json:"prompt_files"`
-			PromptDigests          map[string]string `json:"prompt_digests"`
+			GoVersion              string            `json:"go_version"`
+			CodexVersion           string            `json:"codex_version"`
+			Model                  string            `json:"model"`
+			TaskSelection          string            `json:"task_selection"`
 			TargetCommit           string            `json:"target_commit"`
 			PromptCommit           string            `json:"prompt_commit"`
 			BaseCommit             string            `json:"base_commit"`
 			BaseRef                string            `json:"base_ref"`
-			Model                  string            `json:"model"`
-			CodexVersion           string            `json:"codex_version"`
-			GoVersion              string            `json:"go_version"`
+			Profiles               []string          `json:"profiles"`
+			SchemaVersion          int               `json:"schema_version"`
+			MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
 		}
 		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 			return fmt.Errorf("decode snapshotted manifest: %w", err)
@@ -1723,14 +1718,12 @@ func validateMaterialQualityInputs(
 				)
 			}
 			var baselineManifest struct {
-				SchemaVersion          int               `json:"schema_version"`
-				GenerationIsolation    string            `json:"generation_isolation"`
-				GenerationConfigSHA256 string            `json:"generation_config_sha256"`
-				ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
-				ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
-				MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
 				PromptFiles            map[string]string `json:"prompt_files"`
 				PromptDigests          map[string]string `json:"prompt_digests"`
+				ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
+				ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
+				GenerationConfigSHA256 string            `json:"generation_config_sha256"`
+				GenerationIsolation    string            `json:"generation_isolation"`
 				TargetCommit           string            `json:"target_commit"`
 				PromptCommit           string            `json:"prompt_commit"`
 				BaseCommit             string            `json:"base_commit"`
@@ -1738,6 +1731,8 @@ func validateMaterialQualityInputs(
 				Model                  string            `json:"model"`
 				CodexVersion           string            `json:"codex_version"`
 				GoVersion              string            `json:"go_version"`
+				SchemaVersion          int               `json:"schema_version"`
+				MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
 			}
 			if err := json.Unmarshal(
 				baselineManifestBytes,
@@ -1992,33 +1987,33 @@ func summarizeEvidenceWithProvenance(
 			Task                             string     `json:"task"`
 			Variant                          string     `json:"variant"`
 			Profile                          string     `json:"profile"`
-			Completed                        bool       `json:"completed"`
-			RegularInputTokens               int64      `json:"regular_input_tokens"`
-			CachedInputTokens                int64      `json:"cached_input_tokens"`
-			OutputTokens                     int64      `json:"output_tokens"`
-			EffectiveTokens                  float64    `json:"effective_tokens"`
-			ToolCallCount                    int        `json:"tool_call_count"`
-			RepoViewToolCallCount            int        `json:"repo_view_tool_call_count"`
+			CallGraphMarkdownFile            string     `json:"call_graph_markdown_file"`
+			CallGraphDOTFile                 string     `json:"call_graph_dot_file"`
+			ToolStatsFile                    string     `json:"tool_stats_file"`
+			Operations                       []ToolStat `json:"operations"`
+			ToolTypes                        []ToolStat `json:"tool_types"`
+			OutputReferenceEdgeCount         int        `json:"output_reference_edge_count"`
+			RepoViewOutlineInvocationCount   int        `json:"repo_view_outline_invocation_count"`
 			OtherToolCallCount               int        `json:"other_tool_call_count"`
 			RepoViewInvocationCount          int        `json:"repo_view_invocation_count"`
 			TemporalToolEdgeCount            int        `json:"temporal_tool_edge_count"`
-			OutputReferenceEdgeCount         int        `json:"output_reference_edge_count"`
+			ToolCallCount                    int        `json:"tool_call_count"`
 			RepoViewInvocationCap            int        `json:"repo_view_invocation_cap"`
-			RepoViewInvocationCapExceeded    bool       `json:"repo_view_invocation_cap_exceeded"`
+			RegularInputTokens               int64      `json:"regular_input_tokens"`
 			RepoViewBoundViolationCount      int        `json:"repo_view_bound_violation_count"`
 			RepoViewBudgetTamperCommandCount int        `json:"repo_view_budget_tamper_command_count"`
 			RepoViewChangedInvocationCount   int        `json:"repo_view_changed_invocation_count"`
-			RepoViewFirstInvocationChanged   bool       `json:"repo_view_first_invocation_changed"`
-			RepoViewNavigationSemanticsValid bool       `json:"repo_view_navigation_semantics_valid"`
-			MechanicalNavigationEnforced     bool       `json:"mechanical_navigation_semantics_enforced"`
+			CachedInputTokens                int64      `json:"cached_input_tokens"`
+			OutputTokens                     int64      `json:"output_tokens"`
+			EffectiveTokens                  float64    `json:"effective_tokens"`
 			RepoViewFindInvocationCount      int        `json:"repo_view_find_invocation_count"`
 			RepoViewInspectInvocationCount   int        `json:"repo_view_inspect_invocation_count"`
-			RepoViewOutlineInvocationCount   int        `json:"repo_view_outline_invocation_count"`
-			ToolTypes                        []ToolStat `json:"tool_types"`
-			Operations                       []ToolStat `json:"operations"`
-			ToolStatsFile                    string     `json:"tool_stats_file"`
-			CallGraphDOTFile                 string     `json:"call_graph_dot_file"`
-			CallGraphMarkdownFile            string     `json:"call_graph_markdown_file"`
+			RepoViewToolCallCount            int        `json:"repo_view_tool_call_count"`
+			MechanicalNavigationEnforced     bool       `json:"mechanical_navigation_semantics_enforced"`
+			RepoViewNavigationSemanticsValid bool       `json:"repo_view_navigation_semantics_valid"`
+			RepoViewFirstInvocationChanged   bool       `json:"repo_view_first_invocation_changed"`
+			RepoViewInvocationCapExceeded    bool       `json:"repo_view_invocation_cap_exceeded"`
+			Completed                        bool       `json:"completed"`
 		} `json:"cases"`
 		Comparisons []struct {
 			Task                      string  `json:"task"`
@@ -2062,17 +2057,17 @@ func summarizeEvidenceWithProvenance(
 		} `json:"baselines"`
 		Candidates []struct {
 			Name                          string   `json:"name"`
-			JudgeCount                    int      `json:"judge_count"`
-			AllNotWorse                   bool     `json:"all_not_worse"`
-			AllCoreConclusionMatch        bool     `json:"all_core_conclusion_match"`
 			CriticalOmissions             []string `json:"critical_omissions"`
 			UnsupportedClaims             []string `json:"unsupported_claims"`
 			BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
 			MaterialContradictions        []string `json:"material_contradictions"`
+			JudgeCount                    int      `json:"judge_count"`
 			AverageCorrectness            float64  `json:"average_correctness"`
 			AverageCompleteness           float64  `json:"average_completeness"`
 			AverageGrounding              float64  `json:"average_grounding"`
 			AverageTaskAdherence          float64  `json:"average_task_adherence"`
+			AllNotWorse                   bool     `json:"all_not_worse"`
+			AllCoreConclusionMatch        bool     `json:"all_core_conclusion_match"`
 		} `json:"candidates"`
 	}
 	if err := decodeAggregateOutputJSON(

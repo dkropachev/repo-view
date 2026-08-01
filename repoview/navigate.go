@@ -35,35 +35,35 @@ const (
 )
 
 type Options struct {
-	Include        Include
 	Return         Return
-	Context        int
-	Limit          int
+	Include        Include
+	Base           string
 	PathGlobs      []string
 	ExcludeGlobs   []string
+	MaxCodeLines   int
+	Context        int
+	Limit          int
+	MaxPatchLines  int
 	ChangedOnly    bool
-	Base           string
-	DropComments   bool
-	DropDocstrings bool
 	NoComments     bool
 	NoStrings      bool
-	MaxCodeLines   int
-	MaxPatchLines  int
+	DropDocstrings bool
+	DropComments   bool
 }
 
 type Result struct {
-	Kind          string   `json:"kind"`
+	Scope         string   `json:"scope,omitempty"`
 	Symbol        string   `json:"symbol,omitempty"`
 	Path          string   `json:"path"`
-	Line          int      `json:"line,omitempty"`
-	StartLine     int      `json:"start_line,omitempty"`
-	EndLine       int      `json:"end_line,omitempty"`
-	Language      string   `json:"language,omitempty"`
-	Scope         string   `json:"scope,omitempty"`
-	Scopes        []string `json:"scopes,omitempty"`
-	ChangedLines  []int    `json:"changed_lines,omitempty"`
-	Signature     string   `json:"signature,omitempty"`
 	Code          string   `json:"code,omitempty"`
+	Signature     string   `json:"signature,omitempty"`
+	Kind          string   `json:"kind"`
+	Language      string   `json:"language,omitempty"`
+	ChangedLines  []int    `json:"changed_lines,omitempty"`
+	Scopes        []string `json:"scopes,omitempty"`
+	EndLine       int      `json:"end_line,omitempty"`
+	StartLine     int      `json:"start_line,omitempty"`
+	Line          int      `json:"line,omitempty"`
 	CodeStartLine int      `json:"code_start_line,omitempty"`
 	CodeEndLine   int      `json:"code_end_line,omitempty"`
 	CodeTruncated bool     `json:"code_truncated"`
@@ -76,43 +76,43 @@ type NavigationBudget struct {
 }
 
 type FindResponse struct {
+	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 	Symbol           string            `json:"symbol"`
 	Root             string            `json:"root"`
 	Results          []Result          `json:"results"`
 	ResultsTruncated bool              `json:"results_truncated"`
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 }
 
 type InspectResponse struct {
+	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 	Location         string            `json:"location"`
 	Root             string            `json:"root"`
 	Symbol           string            `json:"symbol,omitempty"`
+	Error            string            `json:"error,omitempty"`
 	Results          []Result          `json:"results"`
 	ResultsTruncated bool              `json:"results_truncated"`
-	Error            string            `json:"error,omitempty"`
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 }
 
 type OutlineResponse struct {
+	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 	Path             string            `json:"path"`
 	Root             string            `json:"root"`
+	Error            string            `json:"error,omitempty"`
 	Results          []Result          `json:"results"`
 	ResultsTruncated bool              `json:"results_truncated"`
-	Error            string            `json:"error,omitempty"`
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 }
 
 type ChangedResponse struct {
+	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 	Root             string            `json:"root"`
 	Base             string            `json:"base,omitempty"`
 	BaseCommit       string            `json:"base_commit,omitempty"`
 	HeadCommit       string            `json:"head_commit"`
 	HeadSubject      string            `json:"head_subject,omitempty"`
 	Patch            string            `json:"patch,omitempty"`
-	PatchTruncated   bool              `json:"patch_truncated"`
 	Results          []Result          `json:"results"`
+	PatchTruncated   bool              `json:"patch_truncated"`
 	ResultsTruncated bool              `json:"results_truncated"`
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 }
 
 func (r *RepoView) Find(symbol string, opts Options) (FindResponse, error) {
@@ -153,9 +153,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 	}
 
 	type symbolState struct {
+		seen    map[string]bool
 		symbol  string
 		results []Result
-		seen    map[string]bool
 	}
 	states := make([]symbolState, len(symbols))
 	for index, symbol := range symbols {
@@ -586,7 +586,7 @@ func includeKind(include Include, isDef bool) bool {
 		return isDef
 	case IncludeRefs:
 		return !isDef
-	case IncludeBoth, IncludeAll, "":
+	case IncludeBoth, IncludeSymbol, IncludeScope, IncludeImports, IncludeAll, "":
 		return true
 	default:
 		return true
@@ -647,9 +647,7 @@ func globMatch(pattern, path string) bool {
 			return true
 		}
 	}
-	if strings.HasPrefix(pattern, "**/") {
-		pattern = strings.TrimPrefix(pattern, "**/")
-	}
+	pattern = strings.TrimPrefix(pattern, "**/")
 	if !strings.Contains(pattern, "/") {
 		if ok, _ := pathpkg.Match(pattern, pathpkg.Base(path)); ok {
 			return true
@@ -759,7 +757,7 @@ func parseLocation(location string) (string, int, error) {
 
 func definitionSymbol(line, ext string) (string, bool) {
 	stripped := strings.TrimSpace(line)
-	patterns := []string{}
+	var patterns []string
 	switch ext {
 	case ".go":
 		patterns = []string{
@@ -1144,7 +1142,7 @@ func (r *RepoView) resolveBase(base string) (string, error) {
 	}
 	resolved := strings.TrimSpace(string(output))
 	if !regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`).MatchString(resolved) {
-		return "", fmt.Errorf("Git base revision %q did not resolve canonically", base)
+		return "", fmt.Errorf("git base revision %q did not resolve canonically", base)
 	}
 	return resolved, nil
 }
