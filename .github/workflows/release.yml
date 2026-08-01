@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./... -count=1
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          version="${version//\//-}"
+          mkdir -p build dist
+
+          targets=(
+            linux/amd64
+            linux/arm64
+            darwin/amd64
+            darwin/arm64
+            windows/amd64
+          )
+
+          for target in "${targets[@]}"; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            archive="repo-view_${version}_${os}_${arch}"
+            binary="repo-view"
+            if [[ "$os" == "windows" ]]; then
+              binary="repo-view.exe"
+            fi
+
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -trimpath -ldflags='-s -w' \
+              -o "build/$binary" ./cmd/repo-view
+
+            if [[ "$os" == "windows" ]]; then
+              (cd build && zip -q "../dist/$archive.zip" "$binary")
+            else
+              tar -C build -czf "dist/$archive.tar.gz" "$binary"
+            fi
+            rm "build/$binary"
+          done
+
+          (cd dist && sha256sum repo-view_* > SHA256SUMS)
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --generate-notes \
+            --title "repo-view $GITHUB_REF_NAME" \
+            --verify-tag
