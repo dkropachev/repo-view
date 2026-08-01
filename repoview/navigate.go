@@ -176,18 +176,26 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		if err != nil {
 			continue
 		}
-		language := languageForExtension(filepath.Ext(path))
+		language := prepareLanguageBackend(
+			languageForExtension(filepath.Ext(path)),
+			lines,
+		)
 		definitions := language.sourceDefinitions(lines)
 		skipLines := language.ignoredSearchLines(
 			lines,
 			opts.DropComments || opts.NoComments,
 			opts.DropDocstrings,
 		)
-		searchLines := language.searchLines(
-			lines,
-			opts.DropComments || opts.NoComments,
-			opts.NoStrings,
-		)
+		noComments := opts.DropComments || opts.NoComments
+		searchLines := language.searchLines(lines, noComments, opts.NoStrings)
+		if cleaner, ok := language.(optionAwareSearchCleaner); ok {
+			searchLines = cleaner.searchSourceLines(
+				lines,
+				noComments,
+				opts.NoStrings,
+				opts.DropDocstrings,
+			)
+		}
 		for idx, line := range searchLines {
 			lineNo := idx + 1
 			if skipLines[lineNo] {
@@ -286,7 +294,7 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 	if lineNo < 1 || lineNo > len(lines) {
 		return InspectResponse{}, fmt.Errorf("line %d out of range for %s", lineNo, path)
 	}
-	language := languageForExtension(filepath.Ext(path))
+	language := prepareLanguageBackend(languageForExtension(filepath.Ext(path)), lines)
 	symbol := bestSymbolOnLine(lines, lineNo, language)
 	results := []Result{
 		r.resultForHit(symbol, "scope", filepath.ToSlash(path), language, lines, lineNo, opts),
@@ -372,7 +380,7 @@ func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
 	if err != nil {
 		return OutlineResponse{}, err
 	}
-	language := languageForExtension(filepath.Ext(path))
+	language := prepareLanguageBackend(languageForExtension(filepath.Ext(path)), lines)
 	definitions := language.sourceDefinitions(lines)
 	results := make([]Result, 0, len(definitions))
 	for _, definition := range definitions {
@@ -435,6 +443,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 			results = append(results, Result{Kind: "file", Path: rel, Language: language.name()})
 			continue
 		}
+		language = prepareLanguageBackend(language, lines)
 		rel = cleanRel
 		lineNumbers, err := r.changedLines(rel, baseCommit)
 		if err != nil {
@@ -528,11 +537,21 @@ func (r *RepoView) resultForHit(
 	start, end := lineNo, lineNo
 	switch opts.Return {
 	case ReturnScope:
-		start, end = language.enclosingScope(lines, lineNo)
+		if resolver, ok := language.(navigationScopeResolver); ok {
+			start, end = resolver.navigationScope(lines, lineNo)
+		} else {
+			start, end = language.enclosingScope(lines, lineNo)
+		}
 	case ReturnContext:
 		start, end = contextRange(len(lines), lineNo, opts.Context)
 	case ReturnLine, ReturnLocations:
 		start, end = lineNo, lineNo
+	}
+	var scope string
+	if kind == "def" {
+		scope = symbol
+	} else {
+		scope = scopeName(lines, lineNo, language)
 	}
 	result := Result{
 		Kind:      kind,
@@ -542,10 +561,7 @@ func (r *RepoView) resultForHit(
 		StartLine: start,
 		EndLine:   end,
 		Language:  language.name(),
-		Scope:     scopeName(lines, lineNo, language),
-	}
-	if kind == "def" {
-		result.Scope = symbol
+		Scope:     scope,
 	}
 	if opts.Return != ReturnLocations {
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
@@ -579,6 +595,13 @@ func resultSnippet(
 	)
 	if !cleanedWholeSource {
 		code = language.cleanSource(code, opts.DropComments, opts.DropDocstrings)
+	}
+	if finalizer, ok := language.(sourceSnippetFinalizer); ok {
+		code = finalizer.finalizeSourceSnippet(
+			code,
+			opts.DropComments,
+			opts.DropDocstrings,
+		)
 	}
 	return strings.TrimRight(code, "\n"), codeStart, codeEnd, truncated
 }
@@ -814,7 +837,6 @@ func bestSymbolOnLine(lines []string, lineNo int, language languageBackend) stri
 }
 
 func scopeName(lines []string, lineNo int, language languageBackend) string {
-	start, end := language.enclosingScope(lines, lineNo)
 	definitions := language.sourceDefinitions(lines)
 	bestSymbol := ""
 	bestSize := 0
@@ -834,6 +856,7 @@ func scopeName(lines []string, lineNo int, language languageBackend) string {
 	if bestSymbol != "" {
 		return bestSymbol
 	}
+	start, end := language.enclosingScope(lines, lineNo)
 	for pos := min(lineNo, end); pos >= start; pos-- {
 		for _, definition := range definitions {
 			if definition.ownsScope && definition.line == pos {

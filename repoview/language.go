@@ -17,7 +17,8 @@ const (
 )
 
 // languageBackend contains every language-dependent navigation decision.
-// Backends are stateless and shared by all RepoView instances.
+// Registry backends are stateless and shared by all RepoView instances. A
+// sourceBackendPreparer may return an immutable, source-specific backend copy.
 type languageBackend interface {
 	name() string
 	definitionSymbol(line string) (string, bool)
@@ -32,6 +33,32 @@ type languageBackend interface {
 
 type linePreservingSourceCleaner interface {
 	cleanSourceLines(lines []string, dropComments, dropDocstrings bool) []string
+}
+
+type sourceSnippetFinalizer interface {
+	finalizeSourceSnippet(source string, dropComments, dropDocstrings bool) string
+}
+
+type sourceBackendPreparer interface {
+	prepareSource(lines []string) languageBackend
+}
+
+// optionAwareSearchCleaner lets a backend mask constructs, such as Python
+// docstrings, that cannot be represented by the languageBackend's two search
+// flags without hiding executable code on the same physical line.
+type optionAwareSearchCleaner interface {
+	searchSourceLines(
+		lines []string,
+		noComments, noStrings, dropDocstrings bool,
+	) []string
+}
+
+// navigationScopeResolver separates the smallest syntactic suite from the
+// named definition shown for a ReturnScope result. Python needs both: an if
+// suite is its enclosingScope, while navigation should return its whole
+// decorated function when one owns the selected line.
+type navigationScopeResolver interface {
+	navigationScope(lines []string, lineNo int) (int, int)
 }
 
 type sourceDefinition struct {
@@ -241,6 +268,13 @@ func languageForExtension(extension string) languageBackend {
 		return backend
 	}
 	return newBraceLanguage(strings.TrimPrefix(extension, "."))
+}
+
+func prepareLanguageBackend(backend languageBackend, lines []string) languageBackend {
+	if preparer, ok := backend.(sourceBackendPreparer); ok {
+		return preparer.prepareSource(lines)
+	}
+	return backend
 }
 
 func supportedExtensions() []string {

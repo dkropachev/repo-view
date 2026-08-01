@@ -80,49 +80,6 @@ func signatureStart(lines []string, braceLine int) int {
 	return start
 }
 
-func indentScope(lines []string, lineNo int) (int, int) {
-	idx := lineNo - 1
-	indent := leadingSpaces(lines[idx])
-
-	start := idx
-	for pos := idx; pos >= 0; pos-- {
-		if strings.TrimSpace(lines[pos]) == "" {
-			continue
-		}
-		current := leadingSpaces(lines[pos])
-		if pos != idx && current < indent {
-			start = pos
-			break
-		}
-		start = pos
-	}
-
-	end := idx
-	for pos := idx + 1; pos < len(lines); pos++ {
-		if strings.TrimSpace(lines[pos]) == "" {
-			end = pos
-			continue
-		}
-		current := leadingSpaces(lines[pos])
-		if current <= indent {
-			break
-		}
-		end = pos
-	}
-	return start + 1, end + 1
-}
-
-func leadingSpaces(line string) int {
-	count := 0
-	for _, char := range line {
-		if char != ' ' && char != '\t' {
-			break
-		}
-		count++
-	}
-	return count
-}
-
 func withoutStrings(line string) string {
 	var out strings.Builder
 	inSingle := false
