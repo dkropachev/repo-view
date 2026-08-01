@@ -3,14 +3,5 @@
 /path/to/repositories/python-driver
 /path/to/repositories/scylla-rust-driver
 /path/to/repositories/scylladb
-/path/to/repositories/scylladb-2
-/path/to/repositories/scylladb-beast
-/path/to/repositories/scylladb-cqlx
-/path/to/repositories/scylladb-dpdk
-/path/to/repositories/scylladb-master-port
-/path/to/repositories/scylladb-mtls-example
-/path/to/repositories/scylladb-spdk
 /path/to/repositories/seastar
 /path/to/repositories/temporal
-/path/to/repositories/temporal-2
-/path/to/repositories/temporal-loop-bench
