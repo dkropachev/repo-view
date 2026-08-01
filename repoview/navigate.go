@@ -209,6 +209,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 					continue
 				}
 				occurrences := countSymbolOccurrences(line, state.symbol)
+				if counter, ok := language.(symbolOccurrenceCounter); ok {
+					occurrences = counter.countSymbolOccurrences(line, state.symbol)
+				}
 				if occurrences == 0 {
 					continue
 				}
