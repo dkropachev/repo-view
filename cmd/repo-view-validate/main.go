@@ -16,6 +16,10 @@ import (
 	"github.com/dkropachev/repo-view/repoview"
 )
 
+// Match the JavaScript backend's 8 MiB source budget, with one Scanner-sized
+// margin for a line terminator and read-ahead.
+const maximumSourceLineBytes = (8 << 20) + bufio.MaxScanTokenSize
+
 type fileData struct {
 	path string
 	rel  string
@@ -320,7 +324,7 @@ func validateRepo(root string, cases int) (int, error) {
 
 func readSourceFiles(root string) ([]fileData, error) {
 	extensions := map[string]bool{
-		".c": true, ".cc": true, ".cpp": true, ".cs": true, ".go": true,
+		".c": true, ".cc": true, ".cjs": true, ".cpp": true, ".cs": true, ".go": true,
 		".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
 		".kt": true, ".mjs": true, ".py": true, ".rs": true, ".swift": true,
 		".ts": true, ".tsx": true,
@@ -372,7 +376,7 @@ func readLines(path string) ([]string, error) {
 	}
 	defer file.Close()
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024), maximumSourceLineBytes)
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
@@ -440,8 +444,14 @@ func locationsFor(locs []location) []string {
 
 func compareLocationResults(got []repoview.Result, want []string) string {
 	gotLocs := make([]string, 0, len(got))
+	seen := make(map[string]bool, len(got))
 	for _, result := range got {
-		gotLocs = append(gotLocs, fmt.Sprintf("%s:%d", result.Path, result.Line))
+		location := fmt.Sprintf("%s:%d", result.Path, result.Line)
+		if seen[location] {
+			continue
+		}
+		seen[location] = true
+		gotLocs = append(gotLocs, location)
 	}
 	sort.Strings(gotLocs)
 	if len(gotLocs) != len(want) {

@@ -1325,7 +1325,7 @@ func fenceLanguage(path string) string {
 		return "rust"
 	case ".py":
 		return "python"
-	case ".js":
+	case ".js", ".mjs", ".cjs":
 		return "javascript"
 	case ".jsx":
 		return "jsx"

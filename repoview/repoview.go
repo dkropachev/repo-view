@@ -13,6 +13,10 @@ import (
 	"unicode/utf8"
 )
 
+// Match the JavaScript backend's 8 MiB source budget, with one Scanner-sized
+// margin for a line terminator and read-ahead.
+const maximumSourceLineBytes = (8 << 20) + bufio.MaxScanTokenSize
+
 type RepoView struct {
 	root string
 }
@@ -161,7 +165,7 @@ func readLines(path string) ([]string, error) {
 	}
 
 	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024), maximumSourceLineBytes)
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())

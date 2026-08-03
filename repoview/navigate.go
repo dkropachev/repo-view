@@ -843,6 +843,8 @@ func scopeName(lines []string, lineNo int, language languageBackend) string {
 	definitions := language.sourceDefinitions(lines)
 	bestSymbol := ""
 	bestSize := 0
+	bestLine := 0
+	bestBefore := false
 	for _, definition := range definitions {
 		if !definition.ownsScope {
 			continue
@@ -851,9 +853,14 @@ func scopeName(lines []string, lineNo int, language languageBackend) string {
 			continue
 		}
 		size := definition.scopeEnd - definition.scopeStart
-		if bestSymbol == "" || size < bestSize {
+		before := definition.line <= lineNo
+		if bestSymbol == "" || before && !bestBefore || before == bestBefore &&
+			(size < bestSize || size == bestSize &&
+				(before && definition.line > bestLine || !before && definition.line < bestLine)) {
 			bestSymbol = definition.symbol
 			bestSize = size
+			bestLine = definition.line
+			bestBefore = before
 		}
 	}
 	if bestSymbol != "" {
