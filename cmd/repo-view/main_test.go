@@ -49,6 +49,24 @@ func TestReturnLocationsMapsToNoEmbeddedCode(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversJavaScriptExtensions(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		path string
+		want string
+	}{
+		{path: "script.js", want: "javascript"},
+		{path: "module.mjs", want: "javascript"},
+		{path: "common.cjs", want: "javascript"},
+		{path: "view.jsx", want: "jsx"},
+	} {
+		if got := fenceLanguage(test.path); got != test.want {
+			t.Fatalf("fenceLanguage(%q) = %q, want %q", test.path, got, test.want)
+		}
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{

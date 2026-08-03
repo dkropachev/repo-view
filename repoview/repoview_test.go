@@ -21,6 +21,21 @@ func TestFindReturnsLocations(t *testing.T) {
 	assertLocations(t, response.Results, []string{"found.rs:1", "found.rs:4"})
 }
 
+func TestFindAcceptsMinifiedJavaScriptLineOverOneMiB(t *testing.T) {
+	root := t.TempDir()
+	body := `const payload = "` + strings.Repeat("x", 1300<<10) +
+		`"; const longLineNeedle = 1;` + "\n"
+	writeFile(t, root, "minified.js", body)
+
+	view := mustView(t, root)
+	response, err := view.Find("longLineNeedle", Options{Return: ReturnLocations})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assertLocations(t, response.Results, []string{"minified.js:1"})
+}
+
 func TestFindReturnsEnclosingRustFunction(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "found.rs", "fn helper() {}\n\nfn caller() {\n    helper();\n}\n")

@@ -225,9 +225,10 @@ for _, result := range response.Results {
 ```
 
 Go uses the standard library parser and scanner, with a conservative fallback
-for incomplete source. Python and Rust use pure-Go Tree-sitter concrete parsers
-with language-specific lexical recovery. JavaScript, TypeScript, Java, C/C++,
-and similar brace languages use a shared brace scanner.
+for incomplete source. Python, Rust, JavaScript, and JSX use pure-Go Tree-sitter
+concrete parsers with language-specific lexical recovery. The JavaScript backend
+covers `.js`, `.mjs`, `.cjs`, and `.jsx`. TypeScript, Java, C/C++, and similar
+brace languages use a shared brace scanner.
 
 ## Language backends
 
@@ -235,10 +236,11 @@ Language-dependent navigation is isolated behind a backend interface. Each
 backend owns its language name, definition recognition, scope selection,
 import extraction, comment syntax, and docstring behavior. The Go backend uses
 `go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
-comment/string handling. Python and Rust have dedicated concrete parsers,
-coordinate-preserving lexical masks, and bounded recovery for malformed or
-newer syntax. Other brace-based languages are registered as distinct language
-backends while sharing the common brace scanner and generic definition matcher.
+comment/string handling. Python, Rust, JavaScript, and JSX have dedicated
+concrete parsers, coordinate-preserving lexical masks, and bounded recovery for
+malformed or newer syntax. Other brace-based languages are registered as
+distinct language backends while sharing the common brace scanner and generic
+definition matcher.
 
 The searchable-extension list is derived from the backend registry, so adding
 a language requires registering its extensions in one place. Shared scanning,

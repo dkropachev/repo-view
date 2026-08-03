@@ -144,6 +144,71 @@ func TestRunRejectsConflictingExistingRepositoryInputs(t *testing.T) {
 	}
 }
 
+func TestReadSourceFilesIncludesCommonJS(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"common.cjs":  "exports.value = 1;\n",
+		"module.mjs":  "export const value = 1;\n",
+		"ignored.txt": "const value = 1;\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := readSourceFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, file.rel)
+	}
+	if strings.Join(got, ",") != "common.cjs,module.mjs" {
+		t.Fatalf("source files = %#v, want cjs and mjs", got)
+	}
+}
+
+func TestReadLinesAcceptsMinifiedJavaScriptLineOverOneMiB(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "minified.js")
+	body := `const payload = "` + strings.Repeat("x", 1300<<10) + `";` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	lines, err := readLines(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || len(lines[0]) != len(body)-1 {
+		t.Fatalf("lines = %d with first length %d, want one line of length %d", len(lines), len(lines[0]), len(body)-1)
+	}
+}
+
+func TestValidateRepoAcceptsJavaScriptDefinitionAndReferenceOnSameLine(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "fixture.js"),
+		[]byte("const shared = shared || 1;\nconsole.log(shared);\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	validated, err := validateRepo(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validated != 1 {
+		t.Fatalf("validated symbols = %d, want 1", validated)
+	}
+}
+
 func initializeValidationRepository(t *testing.T, name string) string {
 	t.Helper()
 	repository := filepath.Join(t.TempDir(), name)

@@ -19,9 +19,6 @@ func newBraceLanguage(name string) braceLanguage {
 }
 
 func registerBraceLanguages(registry map[string]languageBackend) {
-	registerLanguage(registry, newBraceLanguage("javascript"), ".js")
-	registerLanguage(registry, newBraceLanguage("mjs"), ".mjs")
-	registerLanguage(registry, newBraceLanguage("jsx"), ".jsx")
 	registerLanguage(registry, newBraceLanguage("typescript"), ".ts")
 	registerLanguage(registry, newBraceLanguage("tsx"), ".tsx")
 	registerLanguage(registry, newBraceLanguage("c"), ".c", ".h")
