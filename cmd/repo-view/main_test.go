@@ -49,7 +49,7 @@ func TestReturnLocationsMapsToNoEmbeddedCode(t *testing.T) {
 	}
 }
 
-func TestFenceLanguageCoversJavaScriptExtensions(t *testing.T) {
+func TestFenceLanguageCoversJavaScriptAndTypeScriptExtensions(t *testing.T) {
 	t.Parallel()
 
 	for _, test := range []struct {
@@ -60,6 +60,10 @@ func TestFenceLanguageCoversJavaScriptExtensions(t *testing.T) {
 		{path: "module.mjs", want: "javascript"},
 		{path: "common.cjs", want: "javascript"},
 		{path: "view.jsx", want: "jsx"},
+		{path: "source.ts", want: "typescript"},
+		{path: "view.tsx", want: "tsx"},
+		{path: "module.mts", want: "typescript"},
+		{path: "common.cts", want: "typescript"},
 	} {
 		if got := fenceLanguage(test.path); got != test.want {
 			t.Fatalf("fenceLanguage(%q) = %q, want %q", test.path, got, test.want)

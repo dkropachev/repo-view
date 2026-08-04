@@ -10,6 +10,7 @@ import (
 type javascriptLanguage struct {
 	analysis *javascriptSourceAnalysis
 	languageDefinition
+	flavor javascriptSyntaxFlavor
 }
 
 type javascriptSourceAnalysis struct {
@@ -57,6 +58,7 @@ const javascriptMaximumSyntaxUnwrapDepth = 64
 
 func newJavaScriptLanguage(name string) javascriptLanguage {
 	return javascriptLanguage{
+		flavor: javascriptSyntaxFlavorJavaScript,
 		languageDefinition: newLanguageDefinition(
 			name,
 			nil,
@@ -80,7 +82,7 @@ func (j javascriptLanguage) prepareSource(lines []string) languageBackend {
 		j.analysis = nil
 		return j
 	}
-	j.analysis = analyzeJavaScriptSource(strings.Join(lines, "\n"), len(lines))
+	j.analysis = j.analyzeSource(strings.Join(lines, "\n"), len(lines))
 	j.analysis.lines = lines
 	j.analysis.lineSnapshot = append([]string(nil), lines...)
 	return j
@@ -120,27 +122,50 @@ func (j javascriptLanguage) analysisForSource(
 	if j.analysis != nil && j.analysis.source == source && j.analysis.lineCount == lineCount {
 		return j.analysis
 	}
-	return analyzeJavaScriptSource(source, lineCount)
+	return j.analyzeSource(source, lineCount)
 }
 
 func analyzeJavaScriptSource(source string, lineCount int) *javascriptSourceAnalysis {
+	return analyzeJavaScriptSourceFlavor(
+		source, lineCount, javascriptSyntaxFlavorJavaScript,
+	)
+}
+
+func (j javascriptLanguage) analyzeSource(
+	source string,
+	lineCount int,
+) *javascriptSourceAnalysis {
+	return analyzeJavaScriptSourceFlavor(source, lineCount, j.flavor)
+}
+
+func analyzeJavaScriptSourceFlavor(
+	source string,
+	lineCount int,
+	flavor javascriptSyntaxFlavor,
+) *javascriptSourceAnalysis {
 	analysis := &javascriptSourceAnalysis{
 		source:     source,
 		lineStarts: javascriptLineStarts(source),
 		lineCount:  lineCount,
 	}
-	analysis.tree, _ = parseJavaScriptSyntax(source)
+	analysis.tree, _ = parseJavaScriptSyntaxFlavor(source, flavor)
 	analysis.commentSpans, analysis.stringSpans = javascriptSyntaxMasks(source, analysis.tree)
 	semanticLiterals := javascriptSyntaxSemanticLiterals(source, analysis.tree)
 	analysis.recoverySpans = javascriptSyntaxErrorSpans(analysis.tree, len(source))
+	if flavor.isTypeScript() {
+		analysis.recoverySpans = normalizeJavaScriptSpans(append(
+			analysis.recoverySpans,
+			typeScriptSyntaxMissingTokenSpans(analysis.tree, len(source))...,
+		))
+	}
 	var fallback javascriptFallbackResult
 	if analysis.tree == nil {
-		fallback = scanJavaScriptFallback(source)
+		fallback = scanJavaScriptFallbackFlavor(source, flavor)
 		analysis.commentSpans = fallback.comments
 		analysis.stringSpans = fallback.literals
 		semanticLiterals = fallback.literals
 	} else if len(analysis.recoverySpans) > 0 || javascriptSyntaxRootIsError(analysis.tree) {
-		fallback = scanJavaScriptFallback(source)
+		fallback = scanJavaScriptFallbackFlavor(source, flavor)
 		analysis.commentSpans = append(
 			analysis.commentSpans,
 			javascriptRecoveryMaskSpans(fallback.comments, analysis.recoverySpans)...,
@@ -171,13 +196,14 @@ func analyzeJavaScriptSource(source string, lineCount int) *javascriptSourceAnal
 	if analysis.tree != nil && !javascriptSyntaxRootIsError(analysis.tree) {
 		lexicalRecoveryLines = analysis.recoveryLines
 	}
-	analysis.lexed = lexJavaScriptWithHints(
+	analysis.lexed = lexJavaScriptWithHintsFlavor(
 		source,
 		analysis.commentSpans,
 		analysis.stringSpans,
 		needsLexicalRecovery,
 		lexicalRecoveryLines,
 		fallback,
+		flavor,
 	)
 	attachedStarts := javascriptSyntaxAttachedStarts(source, analysis.tree)
 	errorContext := javascriptSyntaxErrorContexts(analysis.tree)
@@ -189,6 +215,14 @@ func analyzeJavaScriptSource(source string, lineCount int) *javascriptSourceAnal
 		attachedStarts,
 		errorContext,
 	)
+	if flavor.isTypeScript() {
+		analysis.definitions = filterTypeScriptRecoveryDefinitions(
+			source,
+			analysis.definitions,
+			analysis.recoveryLines,
+			analysis.lineStarts,
+		)
+	}
 	analysis.definitions = mergeJavaScriptDefinitions(
 		lineCount,
 		analysis.tree,
@@ -212,14 +246,29 @@ func analyzeJavaScriptSource(source string, lineCount int) *javascriptSourceAnal
 		analysis.tree == nil,
 		analysis.recoveryLines,
 	)
-	analysis.imports = javascriptTreeImportsFromSyntax(
+	analysis.imports = javascriptTreeImportsFromSyntaxFlavor(
 		source,
 		lineCount,
 		analysis.tree,
 		analysis.semanticSpans,
 		attachedStarts,
 		errorContext,
+		flavor.isTypeScript(),
 	)
+	if flavor.isTypeScript() {
+		genericCallImports := typeScriptLexGenericCallTypeImports(
+			source, analysis.lexed.tokens, analysis.lexed.delimiters,
+		)
+		if len(analysis.lexed.tokens) == 0 {
+			genericCallImports = typeScriptLexGenericCallImportsFromSource(
+				source, analysis.commentSpans, analysis.stringSpans,
+			)
+		}
+		analysis.imports = normalizeJavaScriptLineSpans(append(
+			analysis.imports,
+			genericCallImports...,
+		))
+	}
 	analysis.imports = mergeJavaScriptImports(
 		lineCount,
 		analysis.imports,
@@ -344,12 +393,20 @@ func javascriptSyntaxMasks(
 		switch node.kind {
 		case "comment", "html_comment", "hash_bang_line":
 			comments = append(comments, javascriptByteSpan{start: node.startByte, end: node.endByte})
-		case "string", "regex", "jsx_text":
+		case "string":
+			if !javascriptSyntaxQuotedString(source, node) {
+				continue
+			}
 			stringsAndRegex = append(
 				stringsAndRegex,
 				javascriptByteSpan{start: node.startByte, end: node.endByte},
 			)
-		case "template_string":
+		case "regex", "jsx_text":
+			stringsAndRegex = append(
+				stringsAndRegex,
+				javascriptByteSpan{start: node.startByte, end: node.endByte},
+			)
+		case "template_string", "template_literal_type":
 			stringsAndRegex = append(
 				stringsAndRegex,
 				javascriptTemplateLiteralSpans(source, tree, nodeIndex)...,
@@ -379,9 +436,13 @@ func javascriptSyntaxSemanticLiterals(
 	spans := make([]javascriptByteSpan, 0)
 	for nodeIndex, node := range tree.nodes {
 		switch node.kind {
-		case "string", "regex", "jsx_text":
+		case "string":
+			if javascriptSyntaxQuotedString(source, node) {
+				spans = append(spans, javascriptByteSpan{start: node.startByte, end: node.endByte})
+			}
+		case "regex", "jsx_text":
 			spans = append(spans, javascriptByteSpan{start: node.startByte, end: node.endByte})
-		case "template_string":
+		case "template_string", "template_literal_type":
 			spans = append(spans, javascriptTemplateLiteralSpans(source, tree, nodeIndex)...)
 		case "jsx_attribute":
 			spans = append(spans, javascriptJSXAttributeSemanticSpans(
@@ -390,6 +451,13 @@ func javascriptSyntaxSemanticLiterals(
 		}
 	}
 	return normalizeJavaScriptSpans(spans)
+}
+
+func javascriptSyntaxQuotedString(source string, node javascriptSyntaxNode) bool {
+	if node.startByte < 0 || node.endByte > len(source) || node.startByte >= node.endByte {
+		return false
+	}
+	return source[node.startByte] == '\'' || source[node.startByte] == '"'
 }
 
 func javascriptJSXAttributeSpans(
@@ -552,7 +620,8 @@ func javascriptTemplateLiteralSpans(
 	spans := make([]javascriptByteSpan, 0)
 	for _, childIndex := range template.children {
 		child := tree.nodes[childIndex]
-		if child.kind != "template_substitution" || child.startByte < cursor ||
+		if child.kind != "template_substitution" && child.kind != "template_type" ||
+			child.startByte < cursor ||
 			child.endByte > template.endByte {
 			continue
 		}

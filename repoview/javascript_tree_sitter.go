@@ -1,7 +1,5 @@
 package repoview
 
-import javascriptlanguage "github.com/dcosson/treesitter-go/languages/javascript"
-
 type javascriptSyntaxNode = treeSitterSyntaxNode
 type javascriptSyntaxTree = treeSitterSyntaxTree
 
@@ -18,13 +16,17 @@ const (
 // parseJavaScriptSyntax parses JavaScript and JSX with the pinned pure-Go
 // grammar and exposes only the adapter's validated, position-safe tree copy.
 func parseJavaScriptSyntax(source string) (*javascriptSyntaxTree, bool) {
-	if !javascriptConcreteSyntaxAllowed(source) {
-		return nil, false
-	}
-	return parseTreeSitterSyntax(source, javascriptlanguage.Language())
+	return parseJavaScriptSyntaxFlavor(source, javascriptSyntaxFlavorJavaScript)
 }
 
 func javascriptConcreteSyntaxAllowed(source string) bool {
+	return javascriptConcreteSyntaxAllowedFlavor(source, javascriptSyntaxFlavorJavaScript)
+}
+
+func javascriptConcreteSyntaxAllowedFlavor(
+	source string,
+	flavor javascriptSyntaxFlavor,
+) bool {
 	if len(source) > javascriptMaximumConcreteParseBytes {
 		return false
 	}
@@ -36,6 +38,7 @@ func javascriptConcreteSyntaxAllowed(source string) bool {
 		expressionAllowed:     true,
 		logicalLineWhitespace: true,
 		concreteUnitLimit:     javascriptMaximumConcreteParseLexicalUnits,
+		jsxDisabled:           !flavor.permitsJSX(),
 	}
 	scanner.scan()
 	return !scanner.concreteBudgetExceeded
