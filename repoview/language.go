@@ -256,6 +256,7 @@ func buildLanguageRegistry() map[string]languageBackend {
 	registerLanguage(registry, newPythonLanguage(), ".py")
 	registerLanguage(registry, newRustLanguage(), ".rs")
 	registerJavaScriptLanguages(registry)
+	registerTypeScriptLanguages(registry)
 	registerBraceLanguages(registry)
 	return registry
 }

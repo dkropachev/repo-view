@@ -37,18 +37,26 @@ func parseTreeSitterSyntax(
 	source string,
 	language *treesitter.Language,
 ) (syntaxTree *treeSitterSyntaxTree, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), treeSitterSyntaxParseTimeout)
+	defer cancel()
+	return parseTreeSitterSyntaxContext(ctx, source, language)
+}
+
+func parseTreeSitterSyntaxContext(
+	ctx context.Context,
+	source string,
+	language *treesitter.Language,
+) (syntaxTree *treeSitterSyntaxTree, ok bool) {
 	defer func() {
 		if recover() != nil {
 			syntaxTree = nil
 			ok = false
 		}
 	}()
-	if language == nil || uint64(len(source)) > uint64(^uint32(0)) {
+	if ctx == nil || ctx.Err() != nil || language == nil ||
+		uint64(len(source)) > uint64(^uint32(0)) {
 		return nil, false
 	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), treeSitterSyntaxParseTimeout)
-	defer cancel()
 
 	parser := treesitterparser.NewParser()
 	parser.SetLanguage(language)

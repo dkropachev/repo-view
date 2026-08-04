@@ -1329,7 +1329,7 @@ func fenceLanguage(path string) string {
 		return "javascript"
 	case ".jsx":
 		return "jsx"
-	case ".ts":
+	case ".ts", ".mts", ".cts":
 		return "typescript"
 	case ".tsx":
 		return "tsx"

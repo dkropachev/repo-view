@@ -144,13 +144,17 @@ func TestRunRejectsConflictingExistingRepositoryInputs(t *testing.T) {
 	}
 }
 
-func TestReadSourceFilesIncludesCommonJS(t *testing.T) {
+func TestReadSourceFilesIncludesJavaScriptAndTypeScriptModuleExtensions(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
 	for name, content := range map[string]string{
 		"common.cjs":  "exports.value = 1;\n",
+		"common.cts":  "export = { value: 1 };\n",
 		"module.mjs":  "export const value = 1;\n",
+		"module.mts":  "export const value: number = 1;\n",
+		"source.ts":   "export const value: number = 1;\n",
+		"view.tsx":    "export const View = () => <div />;\n",
 		"ignored.txt": "const value = 1;\n",
 	} {
 		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
@@ -165,8 +169,9 @@ func TestReadSourceFilesIncludesCommonJS(t *testing.T) {
 	for _, file := range files {
 		got = append(got, file.rel)
 	}
-	if strings.Join(got, ",") != "common.cjs,module.mjs" {
-		t.Fatalf("source files = %#v, want cjs and mjs", got)
+	const want = "common.cjs,common.cts,module.mjs,module.mts,source.ts,view.tsx"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("source files = %#v, want %s", got, want)
 	}
 }
 

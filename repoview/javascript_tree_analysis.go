@@ -22,7 +22,10 @@ func javascriptTreeDefinitionsFromSyntax(
 	earlierSiblingErrors := javascriptEarlierSiblingErrors(tree)
 	definitions := make([]sourceDefinition, 0)
 	for nodeIndex, node := range tree.nodes {
-		if nodeIndex < len(errorContext) && errorContext[nodeIndex] {
+		if nodeIndex < len(errorContext) && errorContext[nodeIndex] &&
+			!javascriptTypeScriptAnonymousDefaultSignatureDefinition(
+				source, tree, nodeIndex,
+			) {
 			continue
 		}
 		nameNodes := make([]int, 0, 2)
@@ -31,18 +34,32 @@ func javascriptTreeDefinitionsFromSyntax(
 		scopeIndex := javascriptDefinitionScopeNode(tree, nodeIndex)
 		switch node.kind {
 		case "function_declaration", "generator_function_declaration", "class_declaration",
-			"function_expression", "generator_function", "class":
+			"abstract_class_declaration", "function_expression", "generator_function", "class":
 			if nameIndex := javascriptDirectNameNode(tree, nodeIndex); nameIndex >= 0 {
 				nameNodes = append(nameNodes, nameIndex)
 			}
 			ownsScope = true
-		case "method_definition":
+		case "function_signature":
+			if nameIndex := javascriptDirectNameNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+			}
+			ownsScope = true
+		case "interface_declaration", "type_alias_declaration", "enum_declaration":
+			if nameIndex := javascriptDirectTypeNameNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+			}
+			ownsScope = true
+		case "internal_module", "module":
+			nameNodes = append(nameNodes, javascriptTypeScriptModuleNameNodes(tree, nodeIndex)...)
+			ownsScope = true
+		case "method_definition", "method_signature", "abstract_method_signature":
 			if nameIndex := javascriptDirectPropertyNameNode(tree, nodeIndex); nameIndex >= 0 {
 				nameNodes = append(nameNodes, nameIndex)
 			}
 			ownsScope = true
 		case "variable_declarator":
-			if nodeIndex < len(earlierSiblingErrors) && earlierSiblingErrors[nodeIndex] {
+			if nodeIndex < len(earlierSiblingErrors) && earlierSiblingErrors[nodeIndex] ||
+				!javascriptVariableDeclaratorHasDeclarationBoundary(tree, nodeIndex) {
 				continue
 			}
 			if patternIndex := javascriptDeclaratorPatternNode(tree, nodeIndex); patternIndex >= 0 {
@@ -58,6 +75,38 @@ func javascriptTreeDefinitionsFromSyntax(
 				nameNodes = append(nameNodes, nameIndex)
 			}
 			ownsScope = javascriptDefinitionHasScopedValue(tree, nodeIndex, scopedSubtree)
+		case "public_field_definition":
+			if nameIndex := javascriptTypeScriptPublicFieldNameNode(
+				source, tree, nodeIndex,
+			); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+			}
+			ownsScope = javascriptDefinitionHasScopedValue(tree, nodeIndex, scopedSubtree)
+		case "property_signature":
+			if nameIndex := javascriptDirectPropertyNameNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+			}
+			ownsScope = javascriptDefinitionHasScopedValue(tree, nodeIndex, scopedSubtree)
+		case "required_parameter", "optional_parameter":
+			if javascriptTypeScriptParameterProperty(source, tree, nodeIndex) {
+				if nameIndex := javascriptDirectNameNode(tree, nodeIndex); nameIndex >= 0 {
+					nameNodes = append(nameNodes, nameIndex)
+				}
+			}
+		case "enum_assignment":
+			if nameIndex := javascriptDirectPropertyNameNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+			}
+		case "property_identifier":
+			if javascriptDirectChildOfKind(tree, nodeIndex, "enum_body") {
+				nameNodes = append(nameNodes, nodeIndex)
+			}
+		case "string":
+			if javascriptDirectChildOfKind(tree, nodeIndex, "enum_body") {
+				if nameIndex := javascriptStaticStringFragmentNode(tree, nodeIndex); nameIndex >= 0 {
+					nameNodes = append(nameNodes, nameIndex)
+				}
+			}
 		case "pair":
 			if javascriptDefinitionHasDirectScopedValue(tree, nodeIndex) {
 				if nameIndex := javascriptDirectPropertyNameNode(tree, nodeIndex); nameIndex >= 0 {
@@ -66,14 +115,19 @@ func javascriptTreeDefinitionsFromSyntax(
 				ownsScope = true
 			}
 		case "assignment_expression":
-			if javascriptDefinitionHasDirectScopedValue(tree, nodeIndex) {
+			if nameIndex := javascriptTypeScriptUsingBindingNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+				ownsScope = javascriptDefinitionHasScopedValue(tree, nodeIndex, scopedSubtree)
+			} else if javascriptDefinitionHasDirectScopedValue(tree, nodeIndex) {
 				if nameIndex := javascriptCommonJSExportNameNode(source, tree, nodeIndex); nameIndex >= 0 {
 					nameNodes = append(nameNodes, nameIndex)
-					if tree.nodes[nameIndex].kind == "string_fragment" {
-						opaqueNameNode = nameIndex
-					}
 					ownsScope = true
 				}
+			}
+		case "export_statement":
+			if nameIndex := javascriptTypeScriptNamespaceExportNameNode(tree, nodeIndex); nameIndex >= 0 {
+				nameNodes = append(nameNodes, nameIndex)
+				ownsScope = true
 			}
 		}
 		if len(nameNodes) == 0 || scopeIndex < 0 || scopeIndex >= len(tree.nodes) {
@@ -87,6 +141,9 @@ func javascriptTreeDefinitionsFromSyntax(
 				continue
 			}
 			nameNode := tree.nodes[nameIndex]
+			if nameNode.kind == "string_fragment" {
+				opaqueNameNode = nameIndex
+			}
 			if nameNode.startByte < 0 || nameNode.endByte > len(source) ||
 				nameNode.startByte >= nameNode.endByte ||
 				nameIndex != opaqueNameNode &&
@@ -116,6 +173,359 @@ func javascriptTreeDefinitionsFromSyntax(
 		}
 	}
 	return sortUniqueJavaScriptDefinitions(definitions)
+}
+
+func javascriptVariableDeclaratorHasDeclarationBoundary(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	parentIndex := tree.nodes[nodeIndex].parent
+	if parentIndex < 0 || parentIndex >= len(tree.nodes) {
+		return false
+	}
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		if tree.nodes[childIndex].kind == "type_annotation" &&
+			!javascriptTypeScriptValidTypeAnnotation(tree, childIndex) {
+			return false
+		}
+	}
+	switch tree.nodes[parentIndex].kind {
+	case "lexical_declaration", "variable_declaration", "using_declaration":
+	default:
+		return false
+	}
+	previousKind := ""
+	for _, childIndex := range tree.nodes[parentIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		if childIndex == nodeIndex {
+			switch previousKind {
+			case "const", "let", "var", "using", ",":
+				return true
+			default:
+				return false
+			}
+		}
+		if tree.nodes[childIndex].kind != "comment" {
+			previousKind = tree.nodes[childIndex].kind
+		}
+	}
+	return false
+}
+
+func javascriptTypeScriptValidTypeAnnotation(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		tree.nodes[nodeIndex].kind != "type_annotation" {
+		return false
+	}
+	typeSeen := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		switch tree.nodes[childIndex].kind {
+		case ":", "comment":
+		case "predefined_type", "type_identifier", "nested_type_identifier", "generic_type",
+			"object_type", "tuple_type", "array_type", "readonly_type", "union_type",
+			"intersection_type", "lookup_type", "index_type_query", "conditional_type",
+			"infer_type", "literal_type", "template_literal_type", "function_type",
+			"constructor_type", "parenthesized_type", "type_query", "this_type",
+			"unique_type", "optional_type", "rest_type":
+			if typeSeen {
+				return false
+			}
+			typeSeen = true
+		default:
+			return false
+		}
+	}
+	return typeSeen
+}
+
+func javascriptTypeScriptAnonymousDefaultSignatureDefinition(
+	source string,
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	switch tree.nodes[nodeIndex].kind {
+	case "property_signature", "method_signature", "abstract_method_signature":
+	default:
+		return false
+	}
+	errorIndex := -1
+	for ancestor, depth := tree.nodes[nodeIndex].parent, 0; ancestor >= 0 &&
+		depth < javascriptMaximumSyntaxUnwrapDepth; depth++ {
+		if ancestor >= len(tree.nodes) {
+			return false
+		}
+		switch tree.nodes[ancestor].kind {
+		case "ERROR":
+			errorIndex = ancestor
+			ancestor = -1
+		case "statement_block", "class_body", "interface_body":
+			return false
+		default:
+			ancestor = tree.nodes[ancestor].parent
+		}
+	}
+	if errorIndex < 0 {
+		return false
+	}
+	errorNode := tree.nodes[errorIndex]
+	if errorNode.parent < 0 || errorNode.parent >= len(tree.nodes) ||
+		tree.nodes[errorNode.parent].kind != "expression_statement" ||
+		errorNode.startByte < 0 || errorNode.endByte > len(source) {
+		return false
+	}
+	defaultSeen, functionSeen, parametersSeen, returnTypeSeen := false, false, false, false
+	for _, childIndex := range errorNode.children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		switch tree.nodes[childIndex].kind {
+		case "comment":
+		case "default":
+			defaultSeen = true
+		case "function":
+			functionSeen = true
+		case "formal_parameters":
+			parametersSeen = true
+		case "type_annotation":
+			returnTypeSeen = true
+		default:
+			return false
+		}
+	}
+	if !defaultSeen || !functionSeen || !parametersSeen || !returnTypeSeen {
+		return false
+	}
+	statement := tree.nodes[errorNode.parent]
+	for _, childIndex := range statement.children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		child := tree.nodes[childIndex]
+		if childIndex == errorIndex || child.kind == ";" || child.kind == "comment" {
+			continue
+		}
+		if child.kind != "identifier" || child.startByte < 0 || child.endByte > len(source) ||
+			source[child.startByte:child.endByte] != "export" {
+			return false
+		}
+	}
+	return true
+}
+
+func javascriptTypeScriptPublicFieldNameNode(
+	source string,
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) int {
+	nameIndex := javascriptDirectPropertyNameNode(tree, nodeIndex)
+	if nameIndex < 0 || javascriptNodeText(source, tree, nameIndex) != "accessor" {
+		return nameIndex
+	}
+	equalSeen := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		child := tree.nodes[childIndex]
+		if child.kind == "=" {
+			equalSeen = true
+		}
+		if equalSeen || child.kind != "ERROR" {
+			continue
+		}
+		for _, errorChildIndex := range child.children {
+			if tree.nodes[errorChildIndex].kind == "identifier" {
+				return errorChildIndex
+			}
+		}
+	}
+	return nameIndex
+}
+
+func javascriptTypeScriptUsingBindingNode(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) int {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		tree.nodes[nodeIndex].kind != "assignment_expression" {
+		return -1
+	}
+	if bindingIndex, using := javascriptTypeScriptAssignmentBindingNode(
+		tree, nodeIndex,
+	); using {
+		return bindingIndex
+	}
+	parentIndex := tree.nodes[nodeIndex].parent
+	if parentIndex < 0 || parentIndex >= len(tree.nodes) ||
+		tree.nodes[parentIndex].kind != "sequence_expression" ||
+		tree.nodes[parentIndex].parent < 0 ||
+		tree.nodes[parentIndex].parent >= len(tree.nodes) ||
+		tree.nodes[tree.nodes[parentIndex].parent].kind != "expression_statement" {
+		return -1
+	}
+	usingFirst := false
+	commaSeen := false
+	for _, childIndex := range tree.nodes[parentIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return -1
+		}
+		if childIndex == nodeIndex {
+			if !usingFirst || !commaSeen {
+				return -1
+			}
+			bindingIndex, using := javascriptTypeScriptAssignmentBindingNode(tree, nodeIndex)
+			if using {
+				return -1
+			}
+			return bindingIndex
+		}
+		switch tree.nodes[childIndex].kind {
+		case "comment":
+		case ",":
+			commaSeen = usingFirst
+		default:
+			if !usingFirst {
+				usingFirst = javascriptTypeScriptUsingAssignmentNode(tree, childIndex)
+				commaSeen = false
+			} else {
+				commaSeen = false
+			}
+		}
+	}
+	return -1
+}
+
+func javascriptTypeScriptAssignmentBindingNode(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) (int, bool) {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		tree.nodes[nodeIndex].kind != "assignment_expression" {
+		return -1, false
+	}
+	usingSeen := false
+	bindingIndex := -1
+	equalSeen := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return -1, false
+		}
+		if equalSeen {
+			continue
+		}
+		switch tree.nodes[childIndex].kind {
+		case "comment":
+		case "using":
+			if usingSeen || bindingIndex >= 0 {
+				return -1, false
+			}
+			usingSeen = true
+		case "identifier":
+			if bindingIndex >= 0 {
+				return -1, false
+			}
+			bindingIndex = childIndex
+		case "=":
+			if bindingIndex < 0 {
+				return -1, false
+			}
+			equalSeen = true
+		default:
+			return -1, false
+		}
+	}
+	if bindingIndex < 0 || !equalSeen {
+		return -1, false
+	}
+	return bindingIndex, usingSeen
+}
+
+func javascriptTypeScriptUsingAssignmentNode(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	if _, using := javascriptTypeScriptAssignmentBindingNode(tree, nodeIndex); using {
+		return true
+	}
+	if tree.nodes[nodeIndex].kind != "await_expression" {
+		return false
+	}
+	assignmentSeen := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			return false
+		}
+		switch tree.nodes[childIndex].kind {
+		case "await", "comment":
+		case "assignment_expression":
+			if assignmentSeen {
+				return false
+			}
+			_, using := javascriptTypeScriptAssignmentBindingNode(tree, childIndex)
+			if !using {
+				return false
+			}
+			assignmentSeen = true
+		default:
+			return false
+		}
+	}
+	return assignmentSeen
+}
+
+func javascriptTypeScriptNamespaceExportNameNode(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) int {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		tree.nodes[nodeIndex].kind != "export_statement" {
+		return -1
+	}
+	asSeen, namespaceSeen := false, false
+	nameIndex := -1
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		switch tree.nodes[childIndex].kind {
+		case "export", ";", "comment":
+		case "as":
+			if asSeen || namespaceSeen || nameIndex >= 0 {
+				return -1
+			}
+			asSeen = true
+		case "namespace":
+			if !asSeen || namespaceSeen || nameIndex >= 0 {
+				return -1
+			}
+			namespaceSeen = true
+		case "identifier":
+			if !namespaceSeen || nameIndex >= 0 {
+				return -1
+			}
+			nameIndex = childIndex
+		default:
+			return -1
+		}
+	}
+	if !asSeen || !namespaceSeen {
+		return -1
+	}
+	return nameIndex
 }
 
 func normalizeJavaScriptDefinition(
@@ -173,11 +583,123 @@ func javascriptDirectNameNode(tree *javascriptSyntaxTree, nodeIndex int) int {
 		return -1
 	}
 	for _, childIndex := range tree.nodes[nodeIndex].children {
-		if tree.nodes[childIndex].kind == "identifier" {
+		if tree.nodes[childIndex].kind == "identifier" ||
+			tree.nodes[childIndex].kind == "type_identifier" {
 			return childIndex
 		}
 	}
 	return -1
+}
+
+func javascriptDirectTypeNameNode(tree *javascriptSyntaxTree, nodeIndex int) int {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return -1
+	}
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		switch tree.nodes[childIndex].kind {
+		case "type_identifier", "identifier":
+			return childIndex
+		}
+	}
+	return -1
+}
+
+func javascriptTypeScriptModuleNameNodes(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) []int {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return nil
+	}
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		child := tree.nodes[childIndex]
+		switch child.kind {
+		case "identifier", "type_identifier":
+			return []int{childIndex}
+		case "nested_identifier", "nested_type_identifier":
+			names := javascriptTypeScriptNestedNameNodes(tree, childIndex)
+			return names
+		}
+	}
+	return nil
+}
+
+func javascriptTypeScriptNestedNameNodes(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) []int {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return nil
+	}
+	pending := []int{nodeIndex}
+	names := make([]int, 0, 3)
+	for len(pending) > 0 {
+		last := len(pending) - 1
+		current := pending[last]
+		pending = pending[:last]
+		if current < 0 || current >= len(tree.nodes) {
+			continue
+		}
+		for _, childIndex := range tree.nodes[current].children {
+			switch tree.nodes[childIndex].kind {
+			case "identifier", "type_identifier", "property_identifier":
+				names = append(names, childIndex)
+			default:
+				pending = append(pending, childIndex)
+			}
+		}
+	}
+	sort.Slice(names, func(first, second int) bool {
+		return tree.nodes[names[first]].startByte < tree.nodes[names[second]].startByte
+	})
+	return names
+}
+
+func javascriptTypeScriptParameterProperty(
+	source string,
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	modifier := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		switch tree.nodes[childIndex].kind {
+		case "accessibility_modifier", "readonly", "override":
+			modifier = true
+		}
+	}
+	if !modifier {
+		return false
+	}
+	parametersIndex := tree.nodes[nodeIndex].parent
+	if parametersIndex < 0 || parametersIndex >= len(tree.nodes) ||
+		tree.nodes[parametersIndex].kind != "formal_parameters" {
+		return false
+	}
+	ownerIndex := tree.nodes[parametersIndex].parent
+	if ownerIndex < 0 || ownerIndex >= len(tree.nodes) ||
+		(tree.nodes[ownerIndex].kind != "method_definition" &&
+			tree.nodes[ownerIndex].kind != "method_signature") {
+		return false
+	}
+	nameIndex := javascriptDirectPropertyNameNode(tree, ownerIndex)
+	return nameIndex >= 0 && tree.nodes[nameIndex].kind == "property_identifier" &&
+		javascriptNodeText(source, tree, nameIndex) == "constructor"
+}
+
+func javascriptDirectChildOfKind(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+	parentKind string,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	parentIndex := tree.nodes[nodeIndex].parent
+	return parentIndex >= 0 && parentIndex < len(tree.nodes) &&
+		tree.nodes[parentIndex].kind == parentKind
 }
 
 func javascriptDirectPropertyNameNode(tree *javascriptSyntaxTree, nodeIndex int) int {
@@ -189,6 +711,8 @@ func javascriptDirectPropertyNameNode(tree *javascriptSyntaxTree, nodeIndex int)
 		case "identifier", "property_identifier", "private_property_identifier",
 			"shorthand_property_identifier", "shorthand_property_identifier_pattern":
 			return childIndex
+		case "string":
+			return javascriptStaticStringFragmentNode(tree, childIndex)
 		case "computed_property_name", "=", "formal_parameters", "statement_block":
 			return -1
 		}
@@ -325,8 +849,11 @@ func javascriptScopedSubtrees(tree *javascriptSyntaxTree) []bool {
 func javascriptDirectScopeKind(kind string) bool {
 	switch kind {
 	case "function_declaration", "generator_function_declaration", "function_expression",
-		"generator_function", "arrow_function", "class_declaration", "class",
-		"method_definition", "class_static_block":
+		"generator_function", "arrow_function", "class_declaration",
+		"abstract_class_declaration", "class", "method_definition", "class_static_block",
+		"function_signature", "method_signature", "abstract_method_signature",
+		"interface_declaration", "enum_declaration", "type_alias_declaration",
+		"internal_module", "module":
 		return true
 	default:
 		return false
@@ -430,18 +957,41 @@ func javascriptDefinitionScopeNode(tree *javascriptSyntaxTree, nodeIndex int) in
 			scopeIndex = node.parent
 		}
 	}
-	if node.kind == "assignment_expression" && node.parent >= 0 &&
-		tree.nodes[node.parent].kind == "expression_statement" {
-		scopeIndex = node.parent
+	if node.kind == "assignment_expression" {
+		if statementIndex := javascriptTypeScriptUsingStatementNode(
+			tree, nodeIndex,
+		); statementIndex >= 0 {
+			scopeIndex = statementIndex
+		} else if node.parent >= 0 && tree.nodes[node.parent].kind == "expression_statement" {
+			scopeIndex = node.parent
+		}
 	}
 	for tree.nodes[scopeIndex].parent >= 0 {
 		parentIndex := tree.nodes[scopeIndex].parent
-		if tree.nodes[parentIndex].kind != "export_statement" {
+		if tree.nodes[parentIndex].kind != "export_statement" &&
+			tree.nodes[parentIndex].kind != "ambient_declaration" {
 			break
 		}
 		scopeIndex = parentIndex
 	}
 	return scopeIndex
+}
+
+func javascriptTypeScriptUsingStatementNode(
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) int {
+	if javascriptTypeScriptUsingBindingNode(tree, nodeIndex) < 0 {
+		return -1
+	}
+	for candidate, depth := nodeIndex, 0; candidate >= 0 &&
+		candidate < len(tree.nodes) && depth < 4; depth++ {
+		if tree.nodes[candidate].kind == "expression_statement" {
+			return candidate
+		}
+		candidate = tree.nodes[candidate].parent
+	}
+	return -1
 }
 
 func javascriptCommonJSExportNameNode(
@@ -626,7 +1176,8 @@ func javascriptTreeScopeKind(kind string) bool {
 	case "if_statement", "else_clause", "switch_statement", "switch_case",
 		"switch_default", "for_statement", "for_in_statement", "while_statement",
 		"do_statement", "try_statement", "catch_clause", "finally_clause",
-		"with_statement", "labeled_statement", "statement_block":
+		"with_statement", "labeled_statement", "statement_block", "ambient_declaration",
+		"property_signature", "call_signature", "construct_signature", "index_signature":
 		return true
 	default:
 		return false
@@ -636,7 +1187,10 @@ func javascriptTreeScopeKind(kind string) bool {
 func javascriptTreeDefinitionOwnerKind(kind string) bool {
 	switch kind {
 	case "function_declaration", "generator_function_declaration", "class_declaration",
-		"function_expression", "generator_function", "class", "method_definition":
+		"abstract_class_declaration", "function_expression", "generator_function", "class",
+		"method_definition", "function_signature", "method_signature",
+		"abstract_method_signature", "interface_declaration", "enum_declaration",
+		"type_alias_declaration", "internal_module", "module":
 		return true
 	default:
 		return false
@@ -726,20 +1280,32 @@ func (j javascriptLanguage) navigationScope(lines []string, lineNo int) (int, in
 	return j.enclosingScope(lines, lineNo)
 }
 
-func javascriptTreeImportsFromSyntax(
+func javascriptTreeImportsFromSyntaxFlavor(
 	source string,
 	lineCount int,
 	tree *javascriptSyntaxTree,
 	excluded []javascriptByteSpan,
 	attachedStarts []int,
 	errorContext []bool,
+	typeScript bool,
 ) []javascriptLineSpan {
 	if tree == nil {
 		return nil
 	}
 	positions := javascriptSourcePositions{source: source, lineStarts: javascriptLineStarts(source)}
 	imports := make([]javascriptLineSpan, 0)
+	var typeScriptReferences map[int]bool
+	if typeScript {
+		typeScriptReferences = javascriptTypeScriptLeadingReferenceNodes(source, tree, true)
+	}
 	for nodeIndex, node := range tree.nodes {
+		if typeScript && typeScriptReferences[nodeIndex] {
+			start, end := positions.lineSpan(node.startByte, node.endByte)
+			if start >= 1 && end >= start && end <= lineCount {
+				imports = append(imports, javascriptLineSpan{start: start, end: end})
+			}
+			continue
+		}
 		if nodeIndex < len(errorContext) && errorContext[nodeIndex] ||
 			javascriptByteRangeExcluded(node.startByte, node.endByte, excluded) {
 			continue
@@ -751,10 +1317,23 @@ func javascriptTreeImportsFromSyntax(
 		case "export_statement":
 			if javascriptExportHasSource(tree, nodeIndex) {
 				spanNode = nodeIndex
+			} else if typeScript {
+				if endOffset, ok := javascriptTypeScriptExportImportRequireEnd(
+					source, tree, nodeIndex,
+				); ok {
+					startOffset := javascriptSyntaxAttachedStart(tree, nodeIndex, attachedStarts)
+					start, end := positions.lineSpan(startOffset, endOffset)
+					if start >= 1 && end >= start && end <= lineCount {
+						imports = append(imports, javascriptLineSpan{start: start, end: end})
+					}
+					continue
+				}
 			}
 		case "call_expression":
 			if javascriptRequireCall(source, tree, nodeIndex) {
 				spanNode = javascriptTopLevelStatementNode(tree, nodeIndex)
+			} else if typeScript && javascriptTypeScriptImportTypeCall(source, tree, nodeIndex) {
+				spanNode = nodeIndex
 			}
 		}
 		if spanNode < 0 || spanNode >= len(tree.nodes) {
@@ -768,6 +1347,304 @@ func javascriptTreeImportsFromSyntax(
 		}
 	}
 	return normalizeJavaScriptLineSpans(imports)
+}
+
+func javascriptTypeScriptExportImportRequireEnd(
+	source string,
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) (int, bool) {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		tree.nodes[nodeIndex].kind != "export_statement" {
+		return 0, false
+	}
+	requireEnd := -1
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		if tree.nodes[childIndex].kind != "import_alias" {
+			continue
+		}
+		equalSeen := false
+		for _, aliasChildIndex := range tree.nodes[childIndex].children {
+			aliasChild := tree.nodes[aliasChildIndex]
+			switch aliasChild.kind {
+			case "=":
+				equalSeen = true
+			case "identifier":
+				if equalSeen && javascriptNodeText(source, tree, aliasChildIndex) == "require" {
+					requireEnd = aliasChild.endByte
+				}
+			}
+		}
+	}
+	if requireEnd < 0 || requireEnd != tree.nodes[nodeIndex].endByte {
+		return 0, false
+	}
+	offset := javascriptTypeScriptSkipSpaceAndComments(source, requireEnd)
+	if offset >= len(source) || source[offset] != '(' {
+		return 0, false
+	}
+	offset = javascriptTypeScriptSkipSpaceAndComments(source, offset+1)
+	if offset >= len(source) || source[offset] != '\'' && source[offset] != '"' {
+		return 0, false
+	}
+	quote := source[offset]
+	literalEnd := javascriptQuotedLiteralEnd(source, offset, quote)
+	if literalEnd <= offset+1 || literalEnd > len(source) || source[literalEnd-1] != quote {
+		return 0, false
+	}
+	offset = javascriptTypeScriptSkipSpaceAndComments(source, literalEnd)
+	if offset >= len(source) || source[offset] != ')' {
+		return 0, false
+	}
+	offset++
+	for offset < len(source) && (source[offset] == ' ' || source[offset] == '\t') {
+		offset++
+	}
+	if offset < len(source) && source[offset] == ';' {
+		offset++
+	}
+	return offset, true
+}
+
+func javascriptTypeScriptSkipSpaceAndComments(source string, offset int) int {
+	for offset >= 0 && offset < len(source) {
+		if size := javascriptWhitespaceSize(source, offset); size > 0 {
+			offset += size
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "//") {
+			offset = javascriptLineTerminatorOffset(source, offset+2)
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "/*") {
+			end := strings.Index(source[offset+2:], "*/")
+			if end < 0 {
+				return len(source)
+			}
+			offset += end + 4
+			continue
+		}
+		break
+	}
+	return max(offset, 0)
+}
+
+func javascriptTypeScriptLeadingReferenceNodes(
+	source string,
+	tree *javascriptSyntaxTree,
+	typeScript bool,
+) map[int]bool {
+	references := make(map[int]bool)
+	if !typeScript || tree == nil || tree.root < 0 || tree.root >= len(tree.nodes) {
+		return references
+	}
+	for _, childIndex := range tree.nodes[tree.root].children {
+		if childIndex < 0 || childIndex >= len(tree.nodes) {
+			break
+		}
+		child := tree.nodes[childIndex]
+		switch child.kind {
+		case "comment":
+			comment := javascriptNodeText(source, tree, childIndex)
+			if javascriptTypeScriptReferenceDirective(comment) ||
+				javascriptTypeScriptAMDDependencyDirective(comment) {
+				references[childIndex] = true
+			}
+		case "hash_bang_line":
+		default:
+			return references
+		}
+	}
+	return references
+}
+
+func javascriptTypeScriptReferenceDirective(comment string) bool {
+	attributes, ok := javascriptTypeScriptDirectiveAttributes(comment, "reference")
+	if !ok {
+		return false
+	}
+	for _, attribute := range []string{"path", "types", "lib"} {
+		if attributes[attribute] != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func javascriptTypeScriptAMDDependencyDirective(comment string) bool {
+	attributes, ok := javascriptTypeScriptDirectiveAttributes(comment, "amd-dependency")
+	return ok && attributes["path"] != ""
+}
+
+func javascriptTypeScriptDirectiveAttributes(
+	comment string,
+	tag string,
+) (map[string]string, bool) {
+	comment = strings.TrimSpace(comment)
+	if !strings.HasPrefix(comment, "///") {
+		return nil, false
+	}
+	directive := strings.TrimSpace(strings.TrimPrefix(comment, "///"))
+	prefix := "<" + tag
+	if !strings.HasPrefix(directive, prefix) || !strings.HasSuffix(directive, "/>") {
+		return nil, false
+	}
+	if len(directive) > len(prefix) {
+		next := directive[len(prefix)]
+		if next != ' ' && next != '\t' && next != '\r' && next != '\n' {
+			return nil, false
+		}
+	}
+	attributeSource := strings.TrimSpace(directive[len(prefix) : len(directive)-len("/>")])
+	if attributeSource == "" {
+		return nil, false
+	}
+	attributes := make(map[string]string)
+	for offset := 0; offset < len(attributeSource); {
+		for offset < len(attributeSource) && (attributeSource[offset] == ' ' ||
+			attributeSource[offset] == '\t' || attributeSource[offset] == '\r' ||
+			attributeSource[offset] == '\n') {
+			offset++
+		}
+		if offset == len(attributeSource) {
+			break
+		}
+		nameStart := offset
+		for offset < len(attributeSource) && (attributeSource[offset] == '-' ||
+			attributeSource[offset] >= 'a' && attributeSource[offset] <= 'z') {
+			offset++
+		}
+		if nameStart == offset {
+			return nil, false
+		}
+		name := attributeSource[nameStart:offset]
+		if _, exists := attributes[name]; exists {
+			return nil, false
+		}
+		for offset < len(attributeSource) && (attributeSource[offset] == ' ' ||
+			attributeSource[offset] == '\t') {
+			offset++
+		}
+		if offset >= len(attributeSource) || attributeSource[offset] != '=' {
+			return nil, false
+		}
+		offset++
+		for offset < len(attributeSource) && (attributeSource[offset] == ' ' ||
+			attributeSource[offset] == '\t') {
+			offset++
+		}
+		if offset >= len(attributeSource) ||
+			attributeSource[offset] != '\'' && attributeSource[offset] != '"' {
+			return nil, false
+		}
+		quote := attributeSource[offset]
+		offset++
+		valueStart := offset
+		for offset < len(attributeSource) && attributeSource[offset] != quote {
+			offset++
+		}
+		if offset >= len(attributeSource) {
+			return nil, false
+		}
+		value := attributeSource[valueStart:offset]
+		offset++
+		if value == "" {
+			return nil, false
+		}
+		attributes[name] = value
+	}
+	return attributes, len(attributes) > 0
+}
+
+func javascriptTypeScriptImportTypeCall(
+	source string,
+	tree *javascriptSyntaxTree,
+	nodeIndex int,
+) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) ||
+		!javascriptTypeScriptTypePosition(tree, nodeIndex) {
+		return false
+	}
+	calleeSeen := false
+	for _, childIndex := range tree.nodes[nodeIndex].children {
+		child := tree.nodes[childIndex]
+		if child.kind == "comment" {
+			continue
+		}
+		if !calleeSeen {
+			if child.kind != "import" || javascriptNodeText(source, tree, childIndex) != "import" {
+				return false
+			}
+			calleeSeen = true
+			continue
+		}
+		if child.kind != "arguments" {
+			return false
+		}
+		arguments := make([]string, 0, 2)
+		for _, argumentIndex := range child.children {
+			switch tree.nodes[argumentIndex].kind {
+			case "(", ")", ",", "comment":
+				continue
+			default:
+				arguments = append(arguments, tree.nodes[argumentIndex].kind)
+			}
+		}
+		return len(arguments) == 1 && arguments[0] == "string" ||
+			len(arguments) == 2 && arguments[0] == "string" && arguments[1] == "object"
+	}
+	return false
+}
+
+func javascriptTypeScriptTypePosition(tree *javascriptSyntaxTree, nodeIndex int) bool {
+	if tree == nil || nodeIndex < 0 || nodeIndex >= len(tree.nodes) {
+		return false
+	}
+	childIndex := nodeIndex
+	for parentIndex := tree.nodes[nodeIndex].parent; parentIndex >= 0; {
+		if parentIndex >= len(tree.nodes) || parentIndex >= childIndex {
+			return false
+		}
+		switch tree.nodes[parentIndex].kind {
+		case "type_query", "type_alias_declaration", "type_annotation", "type_arguments",
+			"extends_type_clause", "implements_clause", "constraint", "default_type",
+			"optional_type", "rest_type", "constructor_type", "function_type",
+			"conditional_type", "generic_type", "mapped_type_clause", "literal_type",
+			"template_literal_type", "object_type", "tuple_type", "array_type",
+			"readonly_type", "union_type", "intersection_type", "lookup_type",
+			"index_type_query", "infer_type", "type_predicate",
+			"type_predicate_annotation", "asserts_annotation", "parenthesized_type":
+			return true
+		case "as_expression", "satisfies_expression":
+			return javascriptChildFollowsTypeOperator(tree, parentIndex, childIndex)
+		}
+		childIndex = parentIndex
+		nodeIndex = parentIndex
+		parentIndex = tree.nodes[nodeIndex].parent
+	}
+	return false
+}
+
+func javascriptChildFollowsTypeOperator(
+	tree *javascriptSyntaxTree,
+	parentIndex int,
+	childIndex int,
+) bool {
+	if tree == nil || parentIndex < 0 || parentIndex >= len(tree.nodes) ||
+		childIndex < 0 || childIndex >= len(tree.nodes) {
+		return false
+	}
+	operatorSeen := false
+	for _, siblingIndex := range tree.nodes[parentIndex].children {
+		if siblingIndex == childIndex {
+			return operatorSeen
+		}
+		switch tree.nodes[siblingIndex].kind {
+		case "as", "satisfies":
+			operatorSeen = true
+		}
+	}
+	return false
 }
 
 func javascriptExportHasSource(tree *javascriptSyntaxTree, nodeIndex int) bool {
@@ -829,7 +1706,7 @@ func javascriptTopLevelStatementNode(tree *javascriptSyntaxTree, nodeIndex int) 
 		if tree.nodes[parentIndex].kind == "program" {
 			return candidate
 		}
-		if javascriptDeferredExecutionBoundary(tree, parentIndex, candidate) {
+		if javascriptDeferredExecutionBoundary(tree, parentIndex, candidate, nodeIndex) {
 			return -1
 		}
 		candidate = parentIndex
@@ -839,7 +1716,7 @@ func javascriptTopLevelStatementNode(tree *javascriptSyntaxTree, nodeIndex int) 
 
 func javascriptDeferredExecutionBoundary(
 	tree *javascriptSyntaxTree,
-	parentIndex, childIndex int,
+	parentIndex, childIndex, descendantIndex int,
 ) bool {
 	if tree == nil || parentIndex < 0 || parentIndex >= len(tree.nodes) ||
 		childIndex < 0 || childIndex >= len(tree.nodes) {
@@ -851,15 +1728,20 @@ func javascriptDeferredExecutionBoundary(
 		return true
 	case "method_definition":
 		// Decorators and computed property names run while their containing
-		// object or class is evaluated. Parameters and the method body wait
-		// until the method is called.
+		// object or class is evaluated. A legacy parameter decorator is likewise
+		// evaluated with the class; other parameter expressions and the method
+		// body wait until the method is called.
 		switch tree.nodes[childIndex].kind {
-		case "formal_parameters", "statement_block":
+		case "formal_parameters":
+			return !javascriptTypeScriptParameterDecoratorDescendant(
+				tree, descendantIndex, childIndex,
+			)
+		case "statement_block":
 			return true
 		default:
 			return false
 		}
-	case "field_definition":
+	case "field_definition", "public_field_definition":
 		// Computed names and decorators are eager for every field. Initializers
 		// are eager only for static fields; instance initializers run later for
 		// each constructed object.
@@ -883,6 +1765,35 @@ func javascriptDeferredExecutionBoundary(
 	default:
 		return false
 	}
+}
+
+func javascriptTypeScriptParameterDecoratorDescendant(
+	tree *javascriptSyntaxTree,
+	descendantIndex int,
+	parametersIndex int,
+) bool {
+	if tree == nil || descendantIndex < 0 || descendantIndex >= len(tree.nodes) ||
+		parametersIndex < 0 || parametersIndex >= len(tree.nodes) ||
+		tree.nodes[parametersIndex].kind != "formal_parameters" {
+		return false
+	}
+	for candidate, depth := descendantIndex, 0; candidate >= 0 &&
+		candidate < len(tree.nodes) && depth < javascriptMaximumSyntaxUnwrapDepth; depth++ {
+		if candidate == parametersIndex {
+			return false
+		}
+		if tree.nodes[candidate].kind == "decorator" {
+			parameterIndex := tree.nodes[candidate].parent
+			if parameterIndex >= 0 && parameterIndex < len(tree.nodes) &&
+				(tree.nodes[parameterIndex].kind == "required_parameter" ||
+					tree.nodes[parameterIndex].kind == "optional_parameter") &&
+				tree.nodes[parameterIndex].parent == parametersIndex {
+				return true
+			}
+		}
+		candidate = tree.nodes[candidate].parent
+	}
+	return false
 }
 
 func normalizeJavaScriptLineSpans(spans []javascriptLineSpan) []javascriptLineSpan {
@@ -1027,11 +1938,11 @@ func (j javascriptLanguage) searchLines(
 	return strings.Split(string(masked), "\n")
 }
 
-func (javascriptLanguage) stripComment(line string) string {
-	tree, _ := parseJavaScriptSyntax(line)
+func (j javascriptLanguage) stripComment(line string) string {
+	tree, _ := parseJavaScriptSyntaxFlavor(line, j.flavor)
 	comments, _ := javascriptSyntaxMasks(line, tree)
 	if tree == nil {
-		comments, _ = javascriptFallbackMasks(line)
+		comments = scanJavaScriptFallbackFlavor(line, j.flavor).comments
 	}
 	return strings.TrimRight(maskJavaScriptSource(line, comments), " \t")
 }
@@ -1305,7 +2216,8 @@ func javascriptMemberIdentifierNode(tree *javascriptSyntaxTree, nodeIndex int) i
 func javascriptIdentifierNodeKind(kind string) bool {
 	switch kind {
 	case "identifier", "property_identifier", "private_property_identifier",
-		"shorthand_property_identifier", "shorthand_property_identifier_pattern":
+		"shorthand_property_identifier", "shorthand_property_identifier_pattern",
+		"type_identifier":
 		return true
 	default:
 		return false

@@ -327,7 +327,7 @@ func readSourceFiles(root string) ([]fileData, error) {
 		".c": true, ".cc": true, ".cjs": true, ".cpp": true, ".cs": true, ".go": true,
 		".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
 		".kt": true, ".mjs": true, ".py": true, ".rs": true, ".swift": true,
-		".ts": true, ".tsx": true,
+		".ts": true, ".tsx": true, ".mts": true, ".cts": true,
 	}
 	excludes := map[string]bool{
 		".cache": true, ".git": true, ".hg": true, ".svn": true, ".venv": true,

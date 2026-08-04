@@ -8,6 +8,7 @@ import (
 
 type javascriptFallbackScanner struct {
 	source        string
+	jsxSource     string
 	previousToken string
 	previousWord  string
 
@@ -71,6 +72,8 @@ type javascriptFallbackScanner struct {
 	bindingCanEnd           bool
 	restrictedStatementASI  bool
 	concreteBudgetExceeded  bool
+	jsxDisabled             bool
+	tsx                     bool
 }
 
 type javascriptFallbackCallable struct {
@@ -148,10 +151,24 @@ type javascriptTokenReplacement struct {
 }
 
 func scanJavaScriptFallback(source string) javascriptFallbackResult {
+	return scanJavaScriptFallbackFlavor(source, javascriptSyntaxFlavorJavaScript)
+}
+
+func scanJavaScriptFallbackFlavor(
+	source string,
+	flavor javascriptSyntaxFlavor,
+) javascriptFallbackResult {
+	jsxSource := source
+	if flavor == javascriptSyntaxFlavorTSX {
+		jsxSource = javascriptFallbackTSXTypeArgumentShadow(source)
+	}
 	scanner := &javascriptFallbackScanner{
 		source:                source,
+		jsxSource:             jsxSource,
 		expressionAllowed:     true,
 		logicalLineWhitespace: true,
+		jsxDisabled:           !flavor.permitsJSX(),
+		tsx:                   flavor == javascriptSyntaxFlavorTSX,
 	}
 	scanner.scan()
 	publicLiterals := append(
@@ -233,6 +250,383 @@ func javascriptFallbackMasks(source string) ([]javascriptByteSpan, []javascriptB
 	return result.comments, result.literals
 }
 
+const (
+	javascriptFallbackTSXMaximumLookaheadBytes = 4 << 10
+	javascriptFallbackTSXMaximumTypeDepth      = 128
+)
+
+// javascriptFallbackTSXTypeArgumentShadow replaces JSX type arguments with
+// same-width whitespace before the existing JSX recovery parser sees them.
+// Public coordinates and search visibility remain tied to the original source;
+// only JSX markup recognition uses the shadow. Every successful range advances
+// the scan past that range, and every failed check has a fixed lookahead cap.
+func javascriptFallbackTSXTypeArgumentShadow(source string) string {
+	var shadow []byte
+	for offset := 0; offset < len(source); {
+		candidateSource := source[:min(
+			len(source), offset+javascriptFallbackTSXMaximumLookaheadBytes,
+		)]
+		if source[offset] != '<' || offset+1 >= len(candidateSource) ||
+			strings.HasPrefix(candidateSource[offset:], "</") ||
+			strings.HasPrefix(candidateSource[offset:], "<!--") {
+			_, size := utf8.DecodeRuneInString(source[offset:])
+			if size < 1 {
+				size = 1
+			}
+			offset += size
+			continue
+		}
+		nameEnd, nameOK := javascriptFallbackJSXNameEnd(candidateSource, offset+1)
+		if !nameOK || nameEnd >= len(candidateSource) || candidateSource[nameEnd] != '<' {
+			offset++
+			continue
+		}
+		typeEnd, typeOK := javascriptFallbackTSXAngleEnd(candidateSource, nameEnd)
+		if !typeOK || !javascriptFallbackTSXTypeArgumentsCanContinueJSX(
+			candidateSource, typeEnd,
+		) {
+			offset++
+			continue
+		}
+		if shadow == nil {
+			shadow = []byte(source)
+		}
+		for cursor := nameEnd; cursor < typeEnd; {
+			if size := javascriptLineTerminatorSize(source, cursor); size > 0 {
+				cursor += size
+				continue
+			}
+			shadow[cursor] = ' '
+			cursor++
+		}
+		offset = typeEnd
+	}
+	if shadow == nil {
+		return source
+	}
+	return string(shadow)
+}
+
+func javascriptFallbackTSXTypeArgumentsCanContinueJSX(source string, offset int) bool {
+	offset = javascriptFallbackSkipTrivia(source, offset)
+	if offset >= len(source) {
+		return false
+	}
+	if strings.HasPrefix(source[offset:], "/>") || source[offset] == '>' ||
+		source[offset] == '{' {
+		return true
+	}
+	return javascriptIdentifierStartAt(source, offset)
+}
+
+// javascriptFallbackTSXGenericArrowAt recognizes the unambiguous generic-arrow
+// prefix forms required by TSX (a comma, constraint, default, or const modifier
+// in the type-parameter list). A genuine JSX element is rejected only after a
+// complete parameter list and arrow token are found.
+func javascriptFallbackTSXGenericArrowAt(source string, start int) bool {
+	if start < 0 || start >= len(source) {
+		return false
+	}
+	source = source[:min(len(source), start+javascriptFallbackTSXMaximumLookaheadBytes)]
+	angleEnd, ok := javascriptFallbackTSXAngleEnd(source, start)
+	if !ok || !javascriptFallbackTSXGenericParameterMarker(source, start, angleEnd) {
+		return false
+	}
+	cursor := javascriptFallbackSkipTrivia(source, angleEnd)
+	if cursor >= len(source) || source[cursor] != '(' {
+		return false
+	}
+	parameterEnd, ok := javascriptFallbackTSXDelimiterEnd(source, cursor, start)
+	if !ok {
+		return false
+	}
+	cursor = javascriptFallbackSkipTrivia(source, parameterEnd)
+	if strings.HasPrefix(source[cursor:], "=>") {
+		return true
+	}
+	if cursor >= len(source) || source[cursor] != ':' {
+		return false
+	}
+	return javascriptFallbackTSXReturnTypeHasArrow(source, cursor+1, start)
+}
+
+func javascriptFallbackTSXAngleEnd(source string, start int) (int, bool) {
+	if start < 0 || start >= len(source) || source[start] != '<' {
+		return start, false
+	}
+	limit := min(len(source), start+javascriptFallbackTSXMaximumLookaheadBytes)
+	source = source[:limit]
+	depth := 0
+	for offset := start; offset < limit; {
+		if strings.HasPrefix(source[offset:], "//") {
+			offset = javascriptLineTerminatorOffset(source, offset+2)
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "/*") {
+			end := strings.Index(source[offset+2:], "*/")
+			if end < 0 {
+				return start, false
+			}
+			offset += end + 4
+			continue
+		}
+		switch source[offset] {
+		case '\'', '"':
+			end := javascriptQuotedLiteralEnd(source, offset, source[offset])
+			if end <= offset || end > limit || source[end-1] != source[offset] {
+				return start, false
+			}
+			offset = end
+			continue
+		case '`':
+			end, closed := javascriptFallbackTSXTemplateEnd(source, offset, limit)
+			if !closed {
+				return start, false
+			}
+			offset = end
+			continue
+		case '<':
+			depth++
+			if depth > javascriptFallbackTSXMaximumTypeDepth {
+				return start, false
+			}
+		case '>':
+			if offset > start && source[offset-1] == '=' {
+				offset++
+				continue
+			}
+			depth--
+			if depth == 0 {
+				return offset + 1, true
+			}
+			if depth < 0 {
+				return start, false
+			}
+		}
+		_, size := utf8.DecodeRuneInString(source[offset:])
+		if size < 1 {
+			size = 1
+		}
+		offset += size
+	}
+	return start, false
+}
+
+func javascriptFallbackTSXTemplateEnd(source string, start, limit int) (int, bool) {
+	for offset := start + 1; offset < limit; {
+		if source[offset] == '\\' {
+			offset++
+			if offset >= limit {
+				return start, false
+			}
+			_, size := utf8.DecodeRuneInString(source[offset:])
+			if size < 1 {
+				size = 1
+			}
+			offset += size
+			continue
+		}
+		if source[offset] == '`' {
+			return offset + 1, true
+		}
+		_, size := utf8.DecodeRuneInString(source[offset:])
+		if size < 1 {
+			size = 1
+		}
+		offset += size
+	}
+	return start, false
+}
+
+func javascriptFallbackTSXGenericParameterMarker(source string, start, end int) bool {
+	if start < 0 || end <= start+2 || end > len(source) {
+		return false
+	}
+	source = source[:end]
+	for offset := start + 1; offset < end-1; {
+		if strings.HasPrefix(source[offset:], "//") {
+			offset = javascriptLineTerminatorOffset(source, offset+2)
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "/*") {
+			commentEnd := strings.Index(source[offset+2:], "*/")
+			if commentEnd < 0 {
+				return false
+			}
+			offset += commentEnd + 4
+			continue
+		}
+		if source[offset] == ',' || source[offset] == '=' {
+			return true
+		}
+		if source[offset] == '\'' || source[offset] == '"' {
+			offset = javascriptQuotedLiteralEnd(source, offset, source[offset])
+			continue
+		}
+		if javascriptIdentifierStartAt(source, offset) {
+			wordEnd := javascriptIdentifierSourceEnd(source, offset)
+			word := javascriptDecodedIdentifier(source[offset:wordEnd])
+			if word == "extends" || word == "const" {
+				return true
+			}
+			offset = wordEnd
+			continue
+		}
+		_, size := utf8.DecodeRuneInString(source[offset:])
+		if size < 1 {
+			size = 1
+		}
+		offset += size
+	}
+	return false
+}
+
+func javascriptFallbackTSXDelimiterEnd(source string, start, origin int) (int, bool) {
+	if start < 0 || start >= len(source) || source[start] != '(' {
+		return start, false
+	}
+	limit := min(len(source), origin+javascriptFallbackTSXMaximumLookaheadBytes)
+	source = source[:limit]
+	stack := []byte{'('}
+	for offset := start + 1; offset < limit; {
+		if strings.HasPrefix(source[offset:], "//") {
+			offset = javascriptLineTerminatorOffset(source, offset+2)
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "/*") {
+			end := strings.Index(source[offset+2:], "*/")
+			if end < 0 {
+				return start, false
+			}
+			offset += end + 4
+			continue
+		}
+		if source[offset] == '/' {
+			if end, closed := javascriptFallbackJSXRegexEnd(source, offset); closed &&
+				end <= limit {
+				offset = end
+				continue
+			}
+		}
+		switch source[offset] {
+		case '\'', '"':
+			end := javascriptQuotedLiteralEnd(source, offset, source[offset])
+			if end <= offset || end > limit || source[end-1] != source[offset] {
+				return start, false
+			}
+			offset = end
+			continue
+		case '`':
+			end, closed := javascriptFallbackTSXTemplateEnd(source, offset, limit)
+			if !closed {
+				return start, false
+			}
+			offset = end
+			continue
+		case '(', '[', '{':
+			stack = append(stack, source[offset])
+			if len(stack) > javascriptFallbackTSXMaximumTypeDepth {
+				return start, false
+			}
+		case ')', ']', '}':
+			if len(stack) == 0 || !javascriptFallbackTSXMatchingDelimiter(
+				stack[len(stack)-1], source[offset],
+			) {
+				return start, false
+			}
+			stack = stack[:len(stack)-1]
+			if len(stack) == 0 {
+				return offset + 1, true
+			}
+		}
+		_, size := utf8.DecodeRuneInString(source[offset:])
+		if size < 1 {
+			size = 1
+		}
+		offset += size
+	}
+	return start, false
+}
+
+func javascriptFallbackTSXMatchingDelimiter(open, closing byte) bool {
+	return open == '(' && closing == ')' || open == '[' && closing == ']' ||
+		open == '{' && closing == '}'
+}
+
+func javascriptFallbackTSXReturnTypeHasArrow(source string, start, origin int) bool {
+	limit := min(len(source), origin+javascriptFallbackTSXMaximumLookaheadBytes)
+	source = source[:limit]
+	stack := make([]byte, 0, 4)
+	angleDepth := 0
+	for offset := start; offset < limit; {
+		if strings.HasPrefix(source[offset:], "//") {
+			offset = javascriptLineTerminatorOffset(source, offset+2)
+			continue
+		}
+		if strings.HasPrefix(source[offset:], "/*") {
+			end := strings.Index(source[offset+2:], "*/")
+			if end < 0 {
+				return false
+			}
+			offset += end + 4
+			continue
+		}
+		if len(stack) == 0 && angleDepth == 0 && strings.HasPrefix(source[offset:], "=>") {
+			return true
+		}
+		switch source[offset] {
+		case '\'', '"':
+			end := javascriptQuotedLiteralEnd(source, offset, source[offset])
+			if end <= offset || end > limit || source[end-1] != source[offset] {
+				return false
+			}
+			offset = end
+			continue
+		case '`':
+			end, closed := javascriptFallbackTSXTemplateEnd(source, offset, limit)
+			if !closed {
+				return false
+			}
+			offset = end
+			continue
+		case '(', '[', '{':
+			stack = append(stack, source[offset])
+			if len(stack) > javascriptFallbackTSXMaximumTypeDepth {
+				return false
+			}
+		case ')', ']', '}':
+			if len(stack) == 0 || !javascriptFallbackTSXMatchingDelimiter(
+				stack[len(stack)-1], source[offset],
+			) {
+				return false
+			}
+			stack = stack[:len(stack)-1]
+		case '<':
+			angleDepth++
+			if angleDepth > javascriptFallbackTSXMaximumTypeDepth {
+				return false
+			}
+		case '>':
+			if offset > start && source[offset-1] == '=' {
+				break
+			}
+			if angleDepth > 0 {
+				angleDepth--
+			}
+		case ';':
+			if len(stack) == 0 && angleDepth == 0 {
+				return false
+			}
+		}
+		_, size := utf8.DecodeRuneInString(source[offset:])
+		if size < 1 {
+			size = 1
+		}
+		offset += size
+	}
+	return false
+}
+
 func (scanner *javascriptFallbackScanner) scan() {
 	for offset := 0; offset < len(scanner.source); {
 		scanner.beginJSXExpression(offset)
@@ -294,10 +688,12 @@ func (scanner *javascriptFallbackScanner) scan() {
 		}
 		scanner.logicalLineWhitespace = false
 		scanner.applyLineTerminatorASI(offset, startsLogicalLine)
-		if scanner.concreteUnitLimit == 0 && offset >= scanner.jsxRetryAfter &&
-			scanner.expressionAllowed && scanner.source[offset] == '<' {
+		if !scanner.jsxDisabled && scanner.concreteUnitLimit == 0 &&
+			offset >= scanner.jsxRetryAfter &&
+			scanner.expressionAllowed && scanner.source[offset] == '<' &&
+			(!scanner.tsx || !javascriptFallbackTSXGenericArrowAt(scanner.source, offset)) {
 			candidate, ok, failureEnd := javascriptFallbackJSXCandidateAtWithFunctionMode(
-				scanner.source, offset, scanner.activeFunctionMode(),
+				scanner.jsxSource, offset, scanner.activeFunctionMode(),
 			)
 			scanner.jsxRetryAfter = max(offset+1, failureEnd)
 			if ok {
@@ -1650,6 +2046,7 @@ func (token javascriptToken) literal() bool {
 type javascriptLexDefinition struct {
 	definition sourceDefinition
 	strong     bool
+	force      bool
 }
 
 type javascriptLexResult struct {
@@ -1681,6 +2078,25 @@ func lexJavaScriptWithHints(
 	recoveryLines map[int]bool,
 	hints javascriptFallbackResult,
 ) javascriptLexResult {
+	return lexJavaScriptWithHintsFlavor(
+		source,
+		commentSpans,
+		literalSpans,
+		recoverSyntax,
+		recoveryLines,
+		hints,
+		javascriptSyntaxFlavorJavaScript,
+	)
+}
+
+func lexJavaScriptWithHintsFlavor(
+	source string,
+	commentSpans, literalSpans []javascriptByteSpan,
+	recoverSyntax bool,
+	recoveryLines map[int]bool,
+	hints javascriptFallbackResult,
+	flavor javascriptSyntaxFlavor,
+) javascriptLexResult {
 	if !recoverSyntax {
 		return javascriptLexResult{}
 	}
@@ -1710,19 +2126,36 @@ func lexJavaScriptWithHints(
 	)
 	definitions := javascriptLexDefinitions(
 		source, tokens, delimiters, boundaries, recoveryLines, objectBraces,
-		commentSpans,
+		commentSpans, flavor.isTypeScript(),
 	)
+	imports := javascriptLexImports(
+		source, tokens, delimiters, boundaries, commentSpans, hints.jsxValues,
+		objectBraces,
+	)
+	scopes := javascriptLexScopes(
+		source, tokens, delimiters, boundaries, commentSpans, objectBraces,
+	)
+	if flavor.isTypeScript() {
+		typeScript := typeScriptLexRecovery(
+			source, flavor, tokens, delimiters, boundaries, commentSpans, recoveryLines,
+		)
+		definitions = typeScriptDefinitionsOutsideRecoveryCoverage(
+			definitions, typeScript.covered,
+		)
+		definitions = javascriptLexUniqueDefinitions(append(
+			definitions, typeScript.definitions...,
+		))
+		imports = typeScriptImportsOutsideRecoveryCoverage(imports, typeScript.covered)
+		imports = normalizeJavaScriptLineSpans(append(imports, typeScript.imports...))
+		scopes = typeScriptScopesOutsideRecoveryCoverage(scopes, typeScript.covered)
+		scopes = normalizeJavaScriptScopes(append(scopes, typeScript.scopes...))
+	}
 	return javascriptLexResult{
 		tokens:      tokens,
 		delimiters:  delimiters,
 		definitions: definitions,
-		imports: javascriptLexImports(
-			source, tokens, delimiters, boundaries, commentSpans, hints.jsxValues,
-			objectBraces,
-		),
-		scopes: javascriptLexScopes(
-			source, tokens, delimiters, boundaries, commentSpans, objectBraces,
-		),
+		imports:     imports,
+		scopes:      scopes,
 	}
 }
 
@@ -2171,6 +2604,7 @@ func javascriptLexDefinitions(
 	recoveryLines map[int]bool,
 	objectBraces []javascriptByteSpan,
 	commentSpans []javascriptByteSpan,
+	typeScript bool,
 ) []javascriptLexDefinition {
 	positions := javascriptSourcePositions{source: source, lineStarts: javascriptLineStarts(source)}
 	definitions := make([]javascriptLexDefinition, 0)
@@ -2228,7 +2662,9 @@ func javascriptLexDefinitions(
 			}
 			definitions = append(
 				definitions,
-				javascriptLexVariableDefinitions(tokens, index, delimiters, positions)...,
+				javascriptLexVariableDefinitions(
+					tokens, index, delimiters, positions, typeScript,
+				)...,
 			)
 		}
 	}
@@ -2255,6 +2691,7 @@ func javascriptLexDefinitions(
 			contexts,
 			containerEnds,
 			commentSpans,
+			typeScript,
 		)...,
 	)
 	return javascriptLexUniqueDefinitions(javascriptLexAttachDefinitionScopes(
@@ -2346,16 +2783,34 @@ func javascriptLexUniqueDefinitions(
 			column: definition.column,
 		}
 		if prior, exists := seen[key]; exists {
-			unique[prior].strong = unique[prior].strong || candidate.strong
-			if candidate.definition.ownsScope && !unique[prior].definition.ownsScope {
-				unique[prior].definition = candidate.definition
+			strong := unique[prior].strong || candidate.strong
+			force := unique[prior].force || candidate.force
+			if candidate.force && !unique[prior].force ||
+				javascriptDefinitionHasWiderScope(
+					candidate.definition, unique[prior].definition,
+				) {
+				unique[prior] = candidate
 			}
+			unique[prior].strong = strong
+			unique[prior].force = force
 			continue
 		}
 		seen[key] = len(unique)
 		unique = append(unique, candidate)
 	}
 	return unique
+}
+
+func javascriptDefinitionHasWiderScope(candidate, current sourceDefinition) bool {
+	if !candidate.ownsScope {
+		return false
+	}
+	if !current.ownsScope {
+		return true
+	}
+	return candidate.scopeStart <= current.scopeStart &&
+		candidate.scopeEnd >= current.scopeEnd &&
+		(candidate.scopeStart < current.scopeStart || candidate.scopeEnd > current.scopeEnd)
 }
 
 func javascriptLexDefinitionCandidate(
@@ -2492,6 +2947,7 @@ func javascriptLexVariableDefinitions(
 	keywordIndex int,
 	delimiters javascriptDelimiterPairs,
 	positions javascriptSourcePositions,
+	typeScript bool,
 ) []javascriptLexDefinition {
 	if keywordIndex < 0 || keywordIndex >= len(tokens) || keywordIndex+1 >= len(tokens) ||
 		tokens[keywordIndex+1].text == "=" {
@@ -2512,11 +2968,16 @@ func javascriptLexVariableDefinitions(
 		}
 		names := javascriptLexBindingNames(tokens, patternStart, patternEnd, delimiters)
 		cursor = patternEnd + 1
+		if typeScript && cursor < len(tokens) && tokens[cursor].text == ":" {
+			cursor = typeScriptLexVariableTypeEnd(tokens, cursor+1, delimiters)
+		}
 		initializerStart := -1
 		initializerEnd := patternEnd
 		if cursor < len(tokens) && tokens[cursor].text == "=" {
 			initializerStart = cursor + 1
-			separator := javascriptLexInitializerSeparator(tokens, initializerStart, delimiters)
+			separator := javascriptLexInitializerSeparator(
+				tokens, initializerStart, delimiters, typeScript,
+			)
 			initializerEnd = max(initializerStart, separator-1)
 			cursor = separator
 		}
@@ -2553,6 +3014,7 @@ func javascriptLexInitializerSeparator(
 	tokens []javascriptToken,
 	start int,
 	delimiters javascriptDelimiterPairs,
+	typeScript bool,
 ) int {
 	for index := start; index < len(tokens); index++ {
 		if tokens[index].startsLine() &&
@@ -2563,6 +3025,12 @@ func javascriptLexInitializerSeparator(
 			delimiters.at(index) > index {
 			index = delimiters.at(index)
 			continue
+		}
+		if typeScript && tokens[index].text == "<" {
+			if end := typeScriptLexGenericArgumentEnd(tokens, index, delimiters); end > index {
+				index = end
+				continue
+			}
 		}
 		if tokens[index].text == "," || tokens[index].text == ";" {
 			return index
@@ -2761,6 +3229,10 @@ func javascriptLexMethodDefinitions(
 			!javascriptLexMethodAt(tokens, nameIndex, delimiters) {
 			continue
 		}
+		if javascriptControlHeaderKeyword(javascriptDecodedIdentifier(tokens[nameIndex].text)) &&
+			!javascriptLexPlausibleMethodParameters(tokens, nameIndex, delimiters) {
+			continue
+		}
 		prefixStart := javascriptLexMethodPrefixStart(tokens, nameIndex)
 		decoratorStart := javascriptLexDecoratorPrefixStart(tokens, prefixStart, delimiters)
 		if decoratorStart < prefixStart {
@@ -2809,6 +3281,7 @@ func javascriptLexCallablePropertyDefinitions(
 	contexts []uint8,
 	containerEnds []int32,
 	commentSpans []javascriptByteSpan,
+	typeScript bool,
 ) []javascriptLexDefinition {
 	definitions := make([]javascriptLexDefinition, 0)
 	for index, token := range tokens {
@@ -2827,7 +3300,9 @@ func javascriptLexCallablePropertyDefinitions(
 			if !javascriptLexPotentialDirectCallable(tokens, index+1) {
 				continue
 			}
-			valueEnd := javascriptLexInitializerSeparator(tokens, index+1, delimiters)
+			valueEnd := javascriptLexInitializerSeparator(
+				tokens, index+1, delimiters, typeScript,
+			)
 			if scopeEnd, callable := javascriptLexDirectCallable(
 				tokens, index+1, valueEnd, delimiters, positions,
 			); callable {
@@ -2916,7 +3391,9 @@ func javascriptLexCallablePropertyDefinitions(
 				}
 				valueEnd := min(
 					containerEnd,
-					javascriptLexInitializerSeparator(tokens, index+2, delimiters),
+					javascriptLexInitializerSeparator(
+						tokens, index+2, delimiters, typeScript,
+					),
 				)
 				if owned, scopeEnd := javascriptLexInitializerScope(
 					tokens, index+2, valueEnd-1, delimiters, positions,
@@ -3335,6 +3812,125 @@ func javascriptLexMethodAt(
 		return false
 	}
 	return tokens[parameterClose+1].text == "{"
+}
+
+func javascriptLexPlausibleMethodParameters(
+	tokens []javascriptToken,
+	nameIndex int,
+	delimiters javascriptDelimiterPairs,
+) bool {
+	if nameIndex < 0 || nameIndex+1 >= len(tokens) || tokens[nameIndex+1].text != "(" {
+		return false
+	}
+	parameterEnd, paired := delimiters.get(nameIndex + 1)
+	if !paired || parameterEnd <= nameIndex+1 {
+		return false
+	}
+	for cursor := nameIndex + 2; cursor < parameterEnd; {
+		for cursor < parameterEnd && tokens[cursor].text == "@" {
+			cursor++
+			if cursor >= parameterEnd || !javascriptLexBindingName(tokens[cursor].text) {
+				return false
+			}
+			cursor++
+			for cursor+1 < parameterEnd &&
+				(tokens[cursor].text == "." || tokens[cursor].text == "?.") &&
+				javascriptLexBindingName(tokens[cursor+1].text) {
+				cursor += 2
+			}
+			if cursor < parameterEnd && tokens[cursor].text == "<" {
+				end := typeScriptLexGenericArgumentEnd(tokens, cursor, delimiters)
+				if end <= cursor || end >= parameterEnd {
+					return false
+				}
+				cursor = end + 1
+			}
+			if cursor < parameterEnd && tokens[cursor].text == "(" {
+				end, ok := delimiters.get(cursor)
+				if !ok || end <= cursor || end >= parameterEnd {
+					return false
+				}
+				cursor = end + 1
+			}
+		}
+		for cursor < parameterEnd {
+			switch tokens[cursor].text {
+			case "public", "private", "protected", "readonly", "override":
+				cursor++
+			default:
+				goto binding
+			}
+		}
+	binding:
+		if cursor < parameterEnd && tokens[cursor].text == "..." {
+			cursor++
+		}
+		if cursor >= parameterEnd {
+			return false
+		}
+		switch {
+		case tokens[cursor].text == "{" || tokens[cursor].text == "[":
+			end, ok := delimiters.get(cursor)
+			if !ok || end <= cursor || end >= parameterEnd {
+				return false
+			}
+			cursor = end + 1
+		case javascriptLexBindingName(tokens[cursor].text):
+			cursor++
+		default:
+			return false
+		}
+		for cursor < parameterEnd &&
+			(tokens[cursor].text == "?" || tokens[cursor].text == "!") {
+			cursor++
+		}
+		if cursor < parameterEnd && tokens[cursor].text == ":" {
+			cursor++
+			typeStart := cursor
+			for cursor < parameterEnd && tokens[cursor].text != "," &&
+				tokens[cursor].text != "=" {
+				if (tokens[cursor].text == "(" || tokens[cursor].text == "[" ||
+					tokens[cursor].text == "{") && delimiters.at(cursor) > cursor {
+					cursor = delimiters.at(cursor) + 1
+					continue
+				}
+				if tokens[cursor].text == "<" {
+					if end := typeScriptLexGenericArgumentEnd(
+						tokens, cursor, delimiters,
+					); end > cursor {
+						cursor = end + 1
+						continue
+					}
+				}
+				cursor++
+			}
+			if cursor == typeStart {
+				return false
+			}
+		}
+		if cursor < parameterEnd && tokens[cursor].text == "=" {
+			cursor++
+			for cursor < parameterEnd && tokens[cursor].text != "," {
+				if (tokens[cursor].text == "(" || tokens[cursor].text == "[" ||
+					tokens[cursor].text == "{") && delimiters.at(cursor) > cursor {
+					cursor = delimiters.at(cursor) + 1
+					continue
+				}
+				cursor++
+			}
+		}
+		if cursor >= parameterEnd {
+			return true
+		}
+		if tokens[cursor].text != "," {
+			return false
+		}
+		cursor++
+		if cursor == parameterEnd {
+			return true
+		}
+	}
+	return true
 }
 
 func javascriptLexMethodPrefixStart(tokens []javascriptToken, nameIndex int) int {
@@ -4376,6 +4972,8 @@ func javascriptLexicalFunctionBodies(
 	for index, token := range tokens {
 		bodyStart := -1
 		deferredStart := -1
+		parameterEnd := -1
+		methodParameters := false
 		switch token.text {
 		case "function":
 			parameterOpen := javascriptNextToken(tokens, index+1)
@@ -4407,14 +5005,22 @@ func javascriptLexicalFunctionBodies(
 				parameterClose > index && parameterClose+1 < len(tokens) &&
 				tokens[parameterClose+1].text == "{" {
 				deferredStart = index
+				parameterEnd = parameterClose
 				bodyStart = parameterClose + 1
+				methodParameters = true
 			}
 		}
 		if bodyEnd, ok := delimiters.get(bodyStart); ok && bodyEnd > bodyStart {
-			ranges = append(ranges, javascriptTokenRange{
-				start: max(deferredStart, 0),
-				end:   bodyEnd,
-			})
+			if methodParameters {
+				ranges = append(ranges, javascriptLexMethodDeferredRanges(
+					max(deferredStart, 0), parameterEnd, bodyEnd, tokens, delimiters,
+				)...)
+			} else {
+				ranges = append(ranges, javascriptTokenRange{
+					start: max(deferredStart, 0),
+					end:   bodyEnd,
+				})
+			}
 		}
 	}
 	for index, token := range tokens {
@@ -4444,6 +5050,127 @@ func javascriptLexicalFunctionBodies(
 		merged[last].end = max(merged[last].end, tokenRange.end)
 	}
 	return merged
+}
+
+func javascriptLexMethodDeferredRanges(
+	parameterStart int,
+	parameterEnd int,
+	bodyEnd int,
+	tokens []javascriptToken,
+	delimiters javascriptDelimiterPairs,
+) []javascriptTokenRange {
+	if parameterStart < 0 || parameterEnd <= parameterStart || bodyEnd <= parameterEnd ||
+		bodyEnd > len(tokens) {
+		return nil
+	}
+	decorators := javascriptLexParameterDecoratorRanges(
+		tokens, parameterStart, parameterEnd, delimiters,
+	)
+	if len(decorators) == 0 {
+		return []javascriptTokenRange{{start: parameterStart, end: bodyEnd}}
+	}
+	ranges := make([]javascriptTokenRange, 0, len(decorators)+1)
+	cursor := parameterStart
+	for _, decorator := range decorators {
+		if decorator.start > cursor {
+			ranges = append(ranges, javascriptTokenRange{start: cursor, end: decorator.start})
+		}
+		cursor = max(cursor, decorator.end)
+	}
+	if cursor < bodyEnd {
+		ranges = append(ranges, javascriptTokenRange{start: cursor, end: bodyEnd})
+	}
+	return ranges
+}
+
+func javascriptLexParameterDecoratorRanges(
+	tokens []javascriptToken,
+	parameterStart int,
+	parameterEnd int,
+	delimiters javascriptDelimiterPairs,
+) []javascriptTokenRange {
+	if parameterStart < 0 || parameterEnd <= parameterStart || parameterEnd >= len(tokens) {
+		return nil
+	}
+	ranges := make([]javascriptTokenRange, 0)
+	for cursor := parameterStart + 1; cursor < parameterEnd; {
+		for cursor < parameterEnd && tokens[cursor].text == "@" {
+			end := javascriptLexDecoratorExpressionEnd(
+				tokens, cursor, parameterEnd, delimiters,
+			)
+			if end <= cursor {
+				break
+			}
+			ranges = append(ranges, javascriptTokenRange{start: cursor, end: end})
+			cursor = end
+		}
+		for cursor < parameterEnd && tokens[cursor].text != "," {
+			if (tokens[cursor].text == "(" || tokens[cursor].text == "[" ||
+				tokens[cursor].text == "{") && delimiters.at(cursor) > cursor {
+				cursor = delimiters.at(cursor) + 1
+				continue
+			}
+			if tokens[cursor].text == "<" {
+				if end := typeScriptLexGenericArgumentEnd(
+					tokens, cursor, delimiters,
+				); end > cursor && end < parameterEnd {
+					cursor = end + 1
+					continue
+				}
+			}
+			cursor++
+		}
+		if cursor < parameterEnd && tokens[cursor].text == "," {
+			cursor++
+		}
+	}
+	return ranges
+}
+
+func javascriptLexDecoratorExpressionEnd(
+	tokens []javascriptToken,
+	start int,
+	limit int,
+	delimiters javascriptDelimiterPairs,
+) int {
+	if start < 0 || start+1 >= limit || limit > len(tokens) || tokens[start].text != "@" {
+		return -1
+	}
+	cursor := start + 1
+	if tokens[cursor].text == "(" {
+		if end, paired := delimiters.get(cursor); paired && end > cursor && end < limit {
+			return end + 1
+		}
+		return -1
+	}
+	if !javascriptLexBindingName(tokens[cursor].text) {
+		return -1
+	}
+	cursor++
+	for cursor < limit {
+		switch tokens[cursor].text {
+		case ".", "?.":
+			if cursor+1 >= limit || !javascriptLexBindingName(tokens[cursor+1].text) {
+				return cursor
+			}
+			cursor += 2
+		case "<":
+			end := typeScriptLexGenericArgumentEnd(tokens, cursor, delimiters)
+			if end <= cursor || end >= limit {
+				return cursor
+			}
+			cursor = end + 1
+		case "(":
+			end, paired := delimiters.get(cursor)
+			if !paired || end <= cursor || end >= limit {
+				return cursor
+			}
+			cursor = end + 1
+		default:
+			return cursor
+		}
+	}
+	return cursor
 }
 
 func javascriptLexStaticFieldInitializer(
@@ -4734,13 +5461,13 @@ func mergeJavaScriptDefinitions(
 	recoveryLines map[int]bool,
 ) []sourceDefinition {
 	definitions := append([]sourceDefinition(nil), treeDefinitions...)
-	seen := make(map[javascriptDefinitionIdentity]bool, len(definitions))
-	for _, definition := range definitions {
+	seen := make(map[javascriptDefinitionIdentity]int, len(definitions))
+	for index, definition := range definitions {
 		seen[javascriptDefinitionIdentity{
 			symbol: definition.symbol,
 			line:   definition.line,
 			column: definition.column,
-		}] = true
+		}] = index
 	}
 	for _, candidate := range lexical {
 		definition := normalizeJavaScriptDefinition(candidate.definition, lineCount)
@@ -4752,13 +5479,19 @@ func mergeJavaScriptDefinitions(
 			line:   definition.line,
 			column: definition.column,
 		}
-		if seen[key] {
+		if prior, exists := seen[key]; exists {
+			if candidate.force && javascriptDefinitionHasWiderScope(
+				definition, definitions[prior],
+			) {
+				definitions[prior] = definition
+			}
 			continue
 		}
-		if tree != nil && !javascriptDefinitionTouchesRecovery(definition, recoveryLines) {
+		if tree != nil && !candidate.force &&
+			!javascriptDefinitionTouchesRecovery(definition, recoveryLines) {
 			continue
 		}
-		seen[key] = true
+		seen[key] = len(definitions)
 		definitions = append(definitions, definition)
 	}
 	return sortUniqueJavaScriptDefinitions(definitions)
