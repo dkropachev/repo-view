@@ -28,7 +28,7 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 		{extension: ".h", name: "c", backend: braceLanguage{}},
 		{extension: ".cpp", name: "cpp", backend: braceLanguage{}},
 		{extension: ".cs", name: "cs", backend: braceLanguage{}},
-		{extension: ".java", name: "java", backend: braceLanguage{}},
+		{extension: ".java", name: "java", backend: javaLanguage{}},
 		{extension: ".kt", name: "kt", backend: braceLanguage{}},
 		{extension: ".swift", name: "swift", backend: braceLanguage{}},
 		{extension: ".mod", name: "mod", backend: braceLanguage{}},

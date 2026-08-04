@@ -1,5 +1,12 @@
 # Third-party notices
 
+## Unicode Character Database 17.0.0
+
+`repoview/java_lex.go` contains compact Java identifier-property ranges derived
+from [UnicodeData 17.0.0](https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt),
+copyright © 2025 Unicode, Inc. The data is licensed under the Unicode License
+V3 reproduced below.
+
 ## unicode-ident
 
 `repoview/rust_xid.go` contains generated identifier-property data derived
@@ -31,7 +38,7 @@ SOFTWARE.
 
 COPYRIGHT AND PERMISSION NOTICE
 
-Copyright © 1991-2023 Unicode, Inc.
+Copyright © 1991-2026 Unicode, Inc.
 
 NOTICE TO USER: Carefully read the following legal agreement. BY DOWNLOADING,
 INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR SOFTWARE, YOU

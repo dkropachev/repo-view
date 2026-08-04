@@ -43,10 +43,57 @@ type sourceBackendPreparer interface {
 	prepareSource(lines []string) languageBackend
 }
 
+// preparedFindScopeResolver exposes immutable, source-specific classification
+// and navigation metadata to Find without exposing a backend's owned
+// definition storage.
+type preparedFindScopeResolver interface {
+	definitionCount(lineNo int, symbol string) int
+	navigationScope(lineNo int) (int, int)
+	scopeName(lineNo int) string
+}
+
+// findScopeResolverPreparer lets a prepared language backend validate its
+// source once and reuse the resulting definitions and scopes for every hit in
+// that file. The returned resolver must be immutable and safe for concurrent
+// reads.
+type findScopeResolverPreparer interface {
+	prepareFindScopeResolver(lines []string) preparedFindScopeResolver
+}
+
 // symbolOccurrenceCounter lets a backend apply language-specific identifier
 // boundaries without changing matching rules for every other language.
 type symbolOccurrenceCounter interface {
 	countSymbolOccurrences(line, symbol string) int
+}
+
+// symbolOccurrenceCounterPreparer lets a backend build immutable per-query
+// matching state once per file instead of rebuilding it for every physical
+// line. The returned counter must be safe for sequential calls in line order.
+type symbolOccurrenceCounterPreparer interface {
+	prepareSymbolOccurrenceCounter(symbol string) func(line string) int
+}
+
+// sourceSymbolOccurrenceAugmenter streams signed corrections to physical-line
+// substring counts. Positive values represent logical code-token occurrences
+// that raw text cannot see (such as a qualified name split by trivia); negative
+// values remove raw spellings that are not symbols (such as a fragment inside
+// one numeric token). A handled walk visits physical lines in order and lets
+// the caller stop once its unique-result limit is observable.
+type sourceSymbolOccurrenceAugmenter interface {
+	walkAdditionalSymbolOccurrences(
+		lines []string,
+		symbol string,
+		visit func(lineNo, additionalCount int) bool,
+	) bool
+}
+
+// authoritativeSymbolOnLineResolver marks a language-specific symbol resolver
+// whose negative result is meaningful. The generic regex fallback must not
+// reinterpret non-symbol lexical material (for example, pieces of a numeric
+// literal) after such a resolver has rejected the line.
+type authoritativeSymbolOnLineResolver interface {
+	symbolOnLine(lines []string, lineNo int) (string, bool)
+	authoritativeSymbolOnLine()
 }
 
 // optionAwareSearchCleaner lets a backend mask constructs, such as Python
@@ -257,6 +304,7 @@ func buildLanguageRegistry() map[string]languageBackend {
 	registerLanguage(registry, newRustLanguage(), ".rs")
 	registerJavaScriptLanguages(registry)
 	registerTypeScriptLanguages(registry)
+	registerJavaLanguage(registry)
 	registerBraceLanguages(registry)
 	return registry
 }

@@ -225,11 +225,11 @@ for _, result := range response.Results {
 ```
 
 Go uses the standard library parser and scanner, with a conservative fallback
-for incomplete source. Python, Rust, JavaScript, and JSX use pure-Go Tree-sitter
-concrete parsers with language-specific lexical recovery. The JavaScript backend
-covers `.js`, `.mjs`, `.cjs`, and `.jsx`. TypeScript and TSX use dedicated
-concrete parsers for `.ts`, `.tsx`, `.mts`, and `.cts`. Java, C/C++, and similar
-brace languages use a shared brace scanner.
+for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, and Java
+use pure-Go Tree-sitter concrete parsers with language-specific lexical
+recovery. The JavaScript backend covers `.js`, `.mjs`, `.cjs`, and `.jsx`;
+TypeScript covers `.ts`, `.tsx`, `.mts`, and `.cts`; and Java covers `.java`.
+C/C++ and other brace languages use a shared brace scanner.
 
 ## Language backends
 
@@ -237,15 +237,19 @@ Language-dependent navigation is isolated behind a backend interface. Each
 backend owns its language name, definition recognition, scope selection,
 import extraction, comment syntax, and docstring behavior. The Go backend uses
 `go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
-comment/string handling. Python, Rust, JavaScript, and JSX have dedicated
-concrete parsers, coordinate-preserving lexical masks, and bounded recovery for
-malformed or newer syntax. Other brace-based languages are registered as
-distinct language backends while sharing the common brace scanner and generic
-definition matcher.
+comment/string handling. Python, Rust, JavaScript, JSX, TypeScript, TSX, and
+Java have dedicated concrete parsers, coordinate-preserving lexical masks, and
+bounded recovery for malformed or newer syntax. Other brace-based languages
+are registered as distinct language backends while sharing the common brace
+scanner and generic definition matcher.
 
 The TypeScript backend covers runtime and type declarations, TypeScript module
-forms, JSX, and coordinate-preserving recovery. The searchable-extension list
-is derived from the backend registry, so adding
-a language requires registering its extensions in one place. Shared scanning,
+forms, JSX, and coordinate-preserving recovery. The Java backend targets Java
+SE 26, including primitive-pattern preview syntax, and covers named types and
+members, records, modules, `requires`, and module imports, Javadoc ownership,
+JLS Unicode-escape preprocessing, and Unicode 17 identifier rules. It also
+recognizes legacy preview string templates for navigation and masking. The
+searchable-extension list is derived from the backend registry, so adding a
+language requires registering its extensions in one place. Shared scanning,
 path safety, filtering, result bounding, and Git change handling remain in the
 common navigation engine.

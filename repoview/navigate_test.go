@@ -101,6 +101,48 @@ func third() { Bravo() }
 	}
 }
 
+func TestFindManyMaximumLimitDoesNotOverflow(t *testing.T) {
+	view := mustView(t, t.TempDir())
+	maxInt := int(^uint(0) >> 1)
+	responses, err := view.FindMany(
+		[]string{"Alpha", "Bravo"},
+		Options{Return: ReturnLocations, Limit: maxInt},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != 2 {
+		t.Fatalf("responses = %#v", responses)
+	}
+	for _, response := range responses {
+		if response.Results == nil || len(response.Results) != 0 || response.ResultsTruncated {
+			t.Fatalf("response = %#v", response)
+		}
+	}
+}
+
+func TestFindMaximumContextDoesNotOverflow(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "found.java", "class Target {}\n")
+
+	view := mustView(t, root)
+	maxInt := int(^uint(0) >> 1)
+	response, err := view.Find(
+		"Target",
+		Options{Include: IncludeDefs, Return: ReturnContext, Context: maxInt},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results = %#v", response.Results)
+	}
+	result := response.Results[0]
+	if result.StartLine != 1 || result.EndLine != 1 || result.Code != "class Target {}" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 func TestInspectReturnsScopeAndRelatedSymbolResults(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "found.go", "package demo\n\nfunc helper() {}\n\nfunc caller() {\n\thelper()\n}\n")
