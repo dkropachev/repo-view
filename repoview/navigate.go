@@ -180,7 +180,16 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 			languageForExtension(filepath.Ext(path)),
 			lines,
 		)
-		definitions := language.sourceDefinitions(lines)
+		var definitions []sourceDefinition
+		var findScopeResolver preparedFindScopeResolver
+		if preparer, ok := language.(findScopeResolverPreparer); ok {
+			if prepared := preparer.prepareFindScopeResolver(lines); prepared != nil {
+				findScopeResolver = prepared
+			}
+		}
+		if findScopeResolver == nil {
+			definitions = language.sourceDefinitions(lines)
+		}
 		skipLines := language.ignoredSearchLines(
 			lines,
 			opts.DropComments || opts.NoComments,
@@ -196,55 +205,117 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 				opts.DropDocstrings,
 			)
 		}
-		for idx, line := range searchLines {
-			lineNo := idx + 1
-			if skipLines[lineNo] {
+		var findSnippet preparedFindSnippet
+		findSnippetPrepared := false
+		processStateLine := func(
+			state *symbolState,
+			lineOccurrenceCount func(string) int,
+			lineNo, occurrenceAdjustment int,
+		) bool {
+			// No symbol can receive more than the shared limit. Keep one
+			// additional result so truncation remains observable.
+			if opts.Limit > 0 && len(state.results) > opts.Limit {
+				return false
+			}
+			if lineNo < 1 || lineNo > len(searchLines) || skipLines[lineNo] {
+				return true
+			}
+			line := searchLines[lineNo-1]
+			occurrences := lineOccurrenceCount(line)
+			switch {
+			case occurrenceAdjustment < 0:
+				if occurrenceAdjustment <= -occurrences {
+					occurrences = 0
+				} else {
+					occurrences += occurrenceAdjustment
+				}
+			case occurrenceAdjustment > int(^uint(0)>>1)-occurrences:
+				occurrences = int(^uint(0) >> 1)
+			default:
+				occurrences += occurrenceAdjustment
+			}
+			if occurrences == 0 {
+				return true
+			}
+			var definitionsOnLine int
+			if findScopeResolver != nil {
+				definitionsOnLine = findScopeResolver.definitionCount(lineNo, state.symbol)
+			} else {
+				definitionsOnLine = definitionCount(definitions, lineNo, state.symbol)
+			}
+			matchKinds := []bool{false}
+			if definitionsOnLine > 0 {
+				matchKinds = []bool{true}
+				if occurrences > definitionsOnLine {
+					matchKinds = append(matchKinds, false)
+				}
+			}
+			for _, isDefinition := range matchKinds {
+				if opts.Limit > 0 && len(state.results) > opts.Limit {
+					break
+				}
+				if !includeKind(opts.Include, isDefinition) {
+					continue
+				}
+				var preparedSnippet *preparedFindSnippet
+				if opts.Return != ReturnLocations {
+					if !findSnippetPrepared {
+						findSnippet = prepareFindSnippet(language, lines, opts)
+						findSnippetPrepared = true
+					}
+					preparedSnippet = &findSnippet
+				}
+				result := r.resultForFindHit(
+					state.symbol,
+					kindForMatch(isDefinition),
+					rel,
+					language,
+					lines,
+					lineNo,
+					opts,
+					findScopeResolver,
+					preparedSnippet,
+				)
+				key := resultKey(result)
+				if state.seen[key] {
+					continue
+				}
+				state.seen[key] = true
+				state.results = append(state.results, result)
+			}
+			return opts.Limit <= 0 || len(state.results) <= opts.Limit
+		}
+
+		for stateIndex := range states {
+			state := &states[stateIndex]
+			if opts.Limit > 0 && len(state.results) > opts.Limit {
 				continue
 			}
-			for stateIndex := range states {
-				state := &states[stateIndex]
-				// No symbol can receive more than the shared limit. Keep one
-				// additional result so truncation remains observable.
-				if opts.Limit > 0 && len(state.results) > opts.Limit {
-					continue
+			lineOccurrenceCount := func(line string) int {
+				return countSymbolOccurrences(line, state.symbol)
+			}
+			if preparer, ok := language.(symbolOccurrenceCounterPreparer); ok {
+				lineOccurrenceCount = preparer.prepareSymbolOccurrenceCounter(state.symbol)
+			} else if counter, ok := language.(symbolOccurrenceCounter); ok {
+				lineOccurrenceCount = func(line string) int {
+					return counter.countSymbolOccurrences(line, state.symbol)
 				}
-				occurrences := countSymbolOccurrences(line, state.symbol)
-				if counter, ok := language.(symbolOccurrenceCounter); ok {
-					occurrences = counter.countSymbolOccurrences(line, state.symbol)
-				}
-				if occurrences == 0 {
-					continue
-				}
-				definitionsOnLine := definitionCount(definitions, lineNo, state.symbol)
-				matchKinds := []bool{false}
-				if definitionsOnLine > 0 {
-					matchKinds = []bool{true}
-					if occurrences > definitionsOnLine {
-						matchKinds = append(matchKinds, false)
-					}
-				}
-				for _, isDefinition := range matchKinds {
-					if opts.Limit > 0 && len(state.results) > opts.Limit {
-						break
-					}
-					if !includeKind(opts.Include, isDefinition) {
-						continue
-					}
-					result := r.resultForHit(
-						state.symbol,
-						kindForMatch(isDefinition),
-						rel,
-						language,
-						lines,
-						lineNo,
-						opts,
-					)
-					key := resultKey(result)
-					if state.seen[key] {
-						continue
-					}
-					state.seen[key] = true
-					state.results = append(state.results, result)
+			}
+			if walker, ok := language.(sourceSymbolOccurrenceAugmenter); ok &&
+				walker.walkAdditionalSymbolOccurrences(
+					lines, state.symbol,
+					func(lineNo, occurrenceAdjustment int) bool {
+						return processStateLine(
+							state, lineOccurrenceCount,
+							lineNo, occurrenceAdjustment,
+						)
+					},
+				) {
+				continue
+			}
+			for lineIndex := range searchLines {
+				if !processStateLine(state, lineOccurrenceCount, lineIndex+1, 0) {
+					break
 				}
 			}
 		}
@@ -278,7 +349,11 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 }
 
 func fairResultLimit(remaining, remainingSelectors int) int {
-	return (remaining + remainingSelectors - 1) / remainingSelectors
+	limit := remaining / remainingSelectors
+	if remaining%remainingSelectors != 0 {
+		limit++
+	}
+	return limit
 }
 
 func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, error) {
@@ -537,10 +612,26 @@ func (r *RepoView) resultForHit(
 	lineNo int,
 	opts Options,
 ) Result {
+	return r.resultForFindHit(
+		symbol, kind, rel, language, lines, lineNo, opts, nil, nil,
+	)
+}
+
+func (r *RepoView) resultForFindHit(
+	symbol, kind, rel string,
+	language languageBackend,
+	lines []string,
+	lineNo int,
+	opts Options,
+	findScopeResolver preparedFindScopeResolver,
+	preparedSnippet *preparedFindSnippet,
+) Result {
 	start, end := lineNo, lineNo
 	switch opts.Return {
 	case ReturnScope:
-		if resolver, ok := language.(navigationScopeResolver); ok {
+		if findScopeResolver != nil {
+			start, end = findScopeResolver.navigationScope(lineNo)
+		} else if resolver, ok := language.(navigationScopeResolver); ok {
 			start, end = resolver.navigationScope(lines, lineNo)
 		} else {
 			start, end = language.enclosingScope(lines, lineNo)
@@ -551,9 +642,12 @@ func (r *RepoView) resultForHit(
 		start, end = lineNo, lineNo
 	}
 	var scope string
-	if kind == "def" {
+	switch {
+	case kind == "def":
 		scope = symbol
-	} else {
+	case findScopeResolver != nil:
+		scope = findScopeResolver.scopeName(lineNo)
+	default:
 		scope = scopeName(lines, lineNo, language)
 	}
 	result := Result{
@@ -568,9 +662,37 @@ func (r *RepoView) resultForHit(
 	}
 	if opts.Return != ReturnLocations {
 		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
-			resultSnippet(language, lines, start, end, lineNo, opts)
+			resultSnippetWithPrepared(
+				language, lines, start, end, lineNo, opts, preparedSnippet,
+			)
 	}
 	return result
+}
+
+type preparedFindSnippet struct {
+	lines                   []string
+	linePreservingAttempted bool
+	cleanedWholeSource      bool
+}
+
+func prepareFindSnippet(
+	language languageBackend,
+	lines []string,
+	opts Options,
+) preparedFindSnippet {
+	cleaner, ok := language.(linePreservingSourceCleaner)
+	if !ok || !opts.DropComments && !opts.DropDocstrings {
+		return preparedFindSnippet{}
+	}
+	prepared := preparedFindSnippet{linePreservingAttempted: true}
+	cleaned := cleaner.cleanSourceLines(
+		lines, opts.DropComments, opts.DropDocstrings,
+	)
+	if len(cleaned) == len(lines) {
+		prepared.lines = cleaned
+		prepared.cleanedWholeSource = true
+	}
+	return prepared
 }
 
 func resultSnippet(
@@ -579,14 +701,34 @@ func resultSnippet(
 	start, end, focus int,
 	opts Options,
 ) (string, int, int, bool) {
+	return resultSnippetWithPrepared(
+		language, lines, start, end, focus, opts, nil,
+	)
+}
+
+func resultSnippetWithPrepared(
+	language languageBackend,
+	lines []string,
+	start, end, focus int,
+	opts Options,
+	prepared *preparedFindSnippet,
+) (string, int, int, bool) {
 	snippetLines := lines
 	cleanedWholeSource := false
-	if cleaner, ok := language.(linePreservingSourceCleaner); ok &&
-		(opts.DropComments || opts.DropDocstrings) {
-		cleaned := cleaner.cleanSourceLines(lines, opts.DropComments, opts.DropDocstrings)
-		if len(cleaned) == len(lines) {
-			snippetLines = cleaned
-			cleanedWholeSource = true
+	linePreservingAttempted := prepared != nil && prepared.linePreservingAttempted
+	if prepared != nil && prepared.cleanedWholeSource {
+		snippetLines = prepared.lines
+		cleanedWholeSource = true
+	} else if !linePreservingAttempted {
+		if cleaner, ok := language.(linePreservingSourceCleaner); ok &&
+			(opts.DropComments || opts.DropDocstrings) {
+			cleaned := cleaner.cleanSourceLines(
+				lines, opts.DropComments, opts.DropDocstrings,
+			)
+			if len(cleaned) == len(lines) {
+				snippetLines = cleaned
+				cleanedWholeSource = true
+			}
 		}
 	}
 	code, codeStart, codeEnd, truncated := snippet(
@@ -737,13 +879,13 @@ func globMatch(pattern, path string) bool {
 }
 
 func contextRange(total, lineNo, context int) (int, int) {
-	start := lineNo - context
-	if start < 1 {
-		start = 1
+	start := 1
+	if context < lineNo-1 {
+		start = lineNo - context
 	}
-	end := lineNo + context
-	if end > total {
-		end = total
+	end := total
+	if context < total-lineNo {
+		end = lineNo + context
 	}
 	return start, end
 }
@@ -813,6 +955,9 @@ func bestSymbolOnLine(lines []string, lineNo int, language languageBackend) stri
 	}); ok {
 		if symbol, found := resolver.symbolOnLine(lines, lineNo); found {
 			return symbol
+		}
+		if _, authoritative := language.(authoritativeSymbolOnLineResolver); authoritative {
+			return ""
 		}
 	}
 	line := language.searchLines(lines, true, true)[lineNo-1]
