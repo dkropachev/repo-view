@@ -985,6 +985,11 @@ func bestSymbolOnLine(lines []string, lineNo int, language languageBackend) stri
 }
 
 func scopeName(lines []string, lineNo int, language languageBackend) string {
+	if resolver, ok := language.(sourceScopeNameResolver); ok {
+		if symbol, handled := resolver.scopeNameOnLine(lines, lineNo); handled {
+			return symbol
+		}
+	}
 	definitions := language.sourceDefinitions(lines)
 	bestSymbol := ""
 	bestSize := 0

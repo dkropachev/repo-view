@@ -113,6 +113,13 @@ type navigationScopeResolver interface {
 	navigationScope(lines []string, lineNo int) (int, int)
 }
 
+// sourceScopeNameResolver lets a backend make an authoritative named-scope
+// decision when unnamed syntactic scopes would make the generic forward scan
+// attach an unrelated later declaration.
+type sourceScopeNameResolver interface {
+	scopeNameOnLine(lines []string, lineNo int) (string, bool)
+}
+
 type sourceDefinition struct {
 	symbol     string
 	line       int
@@ -305,6 +312,7 @@ func buildLanguageRegistry() map[string]languageBackend {
 	registerJavaScriptLanguages(registry)
 	registerTypeScriptLanguages(registry)
 	registerJavaLanguage(registry)
+	registerCLanguage(registry)
 	registerBraceLanguages(registry)
 	return registry
 }

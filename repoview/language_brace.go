@@ -19,7 +19,6 @@ func newBraceLanguage(name string) braceLanguage {
 }
 
 func registerBraceLanguages(registry map[string]languageBackend) {
-	registerLanguage(registry, newBraceLanguage("c"), ".c", ".h")
 	registerLanguage(registry, newBraceLanguage("cpp"), ".cc", ".cpp", ".hpp")
 	registerLanguage(registry, newBraceLanguage("cs"), ".cs")
 	registerLanguage(registry, newBraceLanguage("kt"), ".kt")
