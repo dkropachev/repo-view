@@ -225,11 +225,11 @@ for _, result := range response.Results {
 ```
 
 Go uses the standard library parser and scanner, with a conservative fallback
-for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, and Java
+for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java, and C
 use pure-Go Tree-sitter concrete parsers with language-specific lexical
 recovery. The JavaScript backend covers `.js`, `.mjs`, `.cjs`, and `.jsx`;
 TypeScript covers `.ts`, `.tsx`, `.mts`, and `.cts`; and Java covers `.java`.
-C/C++ and other brace languages use a shared brace scanner.
+C covers `.c` and `.h`. C++ and other brace languages use a shared brace scanner.
 
 ## Language backends
 
@@ -237,8 +237,8 @@ Language-dependent navigation is isolated behind a backend interface. Each
 backend owns its language name, definition recognition, scope selection,
 import extraction, comment syntax, and docstring behavior. The Go backend uses
 `go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
-comment/string handling. Python, Rust, JavaScript, JSX, TypeScript, TSX, and
-Java have dedicated concrete parsers, coordinate-preserving lexical masks, and
+comment/string handling. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java,
+and C have dedicated concrete parsers, coordinate-preserving lexical masks, and
 bounded recovery for malformed or newer syntax. Other brace-based languages
 are registered as distinct language backends while sharing the common brace
 scanner and generic definition matcher.
@@ -249,6 +249,10 @@ SE 26, including primitive-pattern preview syntax, and covers named types and
 members, records, modules, `requires`, and module imports, Javadoc ownership,
 JLS Unicode-escape preprocessing, and Unicode 17 identifier rules. It also
 recognizes legacy preview string templates for navigation and masking. The
+C backend covers functions and prototypes, object and type declarations,
+aggregate members, enumerators, macros, include/embed directives, complex C
+declarators, preprocessor scopes, and bounded recovery for C23 and common
+compiler-extension syntax outside the pinned concrete grammar. The
 searchable-extension list is derived from the backend registry, so adding a
 language requires registering its extensions in one place. Shared scanning,
 path safety, filtering, result bounding, and Git change handling remain in the
