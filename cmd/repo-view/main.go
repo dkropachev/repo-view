@@ -1341,6 +1341,8 @@ func fenceLanguage(path string) string {
 		return "java"
 	case ".kt", ".kts":
 		return "kotlin"
+	case ".swift":
+		return "swift"
 	default:
 		return ""
 	}
