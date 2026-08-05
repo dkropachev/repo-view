@@ -81,6 +81,14 @@ func TestFenceLanguageCoversKotlinSourceAndScriptExtensions(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversSwiftSourceExtension(t *testing.T) {
+	t.Parallel()
+
+	if got := fenceLanguage("Sources/App/Service.swift"); got != "swift" {
+		t.Fatalf("fenceLanguage(Service.swift) = %q, want swift", got)
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{
@@ -1048,6 +1056,93 @@ func TestOutlineAcceptsMultiplePaths(t *testing.T) {
 	}
 	if len(responses[0].Results) != 1 || len(responses[1].Results) != 1 {
 		t.Fatalf("results = %#v", responses)
+	}
+}
+
+func TestSwiftCLIOutlineFindAndInspectUseDedicatedBackend(t *testing.T) {
+	root := t.TempDir()
+	const source = `import Foundation
+
+final class Service {
+    let value = 1
+    func run() {
+        Target()
+    }
+}
+`
+	if err := os.WriteFile(filepath.Join(root, "Service.swift"), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	outlineJSON := captureStdout(t, func() {
+		if status := run([]string{
+			"outline", "Service.swift",
+			"--root", root,
+			"--return", "locations",
+			"--limit", "10",
+			"--json",
+		}); status != 0 {
+			t.Fatalf("outline status = %d", status)
+		}
+	})
+	var outline repoview.OutlineResponse
+	if err := json.Unmarshal([]byte(outlineJSON), &outline); err != nil {
+		t.Fatalf("decode Swift outline: %v\n%s", err, outlineJSON)
+	}
+	wantSymbols := []string{"Service", "value", "run"}
+	if len(outline.Results) != len(wantSymbols) {
+		t.Fatalf("Swift outline = %#v, want %v", outline.Results, wantSymbols)
+	}
+	for index, want := range wantSymbols {
+		result := outline.Results[index]
+		if result.Symbol != want || result.Kind != "def" || result.Language != "swift" {
+			t.Errorf("Swift outline result %d = %#v, want %q definition", index, result, want)
+		}
+	}
+
+	findJSON := captureStdout(t, func() {
+		if status := run([]string{
+			"find", "Target",
+			"--root", root,
+			"--include", "refs",
+			"--return", "scope",
+			"--limit", "10",
+			"--json",
+		}); status != 0 {
+			t.Fatalf("find status = %d", status)
+		}
+	})
+	var found []repoview.FindResponse
+	if err := json.Unmarshal([]byte(findJSON), &found); err != nil {
+		t.Fatalf("decode Swift find: %v\n%s", err, findJSON)
+	}
+	if len(found) != 1 || len(found[0].Results) != 1 ||
+		found[0].Results[0].Path != "Service.swift" ||
+		found[0].Results[0].Language != "swift" ||
+		found[0].Results[0].Scope != "run" ||
+		found[0].Results[0].StartLine != 5 || found[0].Results[0].EndLine != 7 {
+		t.Fatalf("Swift find = %#v, want Target in run at 5-7", found)
+	}
+
+	inspectJSON := captureStdout(t, func() {
+		if status := run([]string{
+			"inspect", "Service.swift:6",
+			"--root", root,
+			"--include", "scope",
+			"--return", "scope",
+			"--limit", "10",
+			"--json",
+		}); status != 0 {
+			t.Fatalf("inspect status = %d", status)
+		}
+	})
+	var inspected repoview.InspectResponse
+	if err := json.Unmarshal([]byte(inspectJSON), &inspected); err != nil {
+		t.Fatalf("decode Swift inspect: %v\n%s", err, inspectJSON)
+	}
+	if inspected.Symbol != "Target" || len(inspected.Results) != 1 ||
+		inspected.Results[0].Language != "swift" || inspected.Results[0].Scope != "run" {
+		t.Fatalf("Swift inspect = %#v, want Target in run", inspected)
 	}
 }
 

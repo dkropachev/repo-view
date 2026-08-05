@@ -24,6 +24,20 @@ The pinned source checksums are recorded in `internal/kotlingrammar/README.md`.
 The upstream software is licensed under the MIT License reproduced in
 `internal/kotlingrammar/LICENSE.tree-sitter-kotlin`.
 
+## tree-sitter-swift
+
+`internal/swiftgrammar/language_generated.go` and
+`internal/swiftgrammar/language_tables.bin` contain generated parse tables
+derived from
+[tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) commit
+`8d02b7ff390a17a43ce90c4e987c49315cfc4be6`, and
+`internal/swiftgrammar/scanner.go` is a bounded pure-Go port of its external
+scanner. `internal/swiftgrammar/testdata/tree-sitter-swift-corpus` contains the
+upstream grammar corpus used for exact-tree conformance tests. The pinned
+source and generator checksums are recorded in
+`internal/swiftgrammar/README.md`. The upstream software is licensed under the
+MIT License reproduced in `internal/swiftgrammar/LICENSE.tree-sitter-swift`.
+
 ## Unicode Character Database 17.0.0
 
 `repoview/java_lex.go` contains compact Java identifier-property ranges, and

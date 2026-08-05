@@ -32,7 +32,7 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 		{extension: ".java", name: "java", backend: javaLanguage{}},
 		{extension: ".kt", name: "kt", backend: kotlinLanguage{}},
 		{extension: ".kts", name: "kt", backend: kotlinLanguage{}},
-		{extension: ".swift", name: "swift", backend: braceLanguage{}},
+		{extension: ".swift", name: "swift", backend: swiftLanguage{}},
 		{extension: ".mod", name: "mod", backend: braceLanguage{}},
 	}
 
@@ -80,6 +80,7 @@ func TestLanguageBackendsOwnDefinitionRules(t *testing.T) {
 		{extension: ".java", line: "public void render() {", want: "render"},
 		{extension: ".cs", line: "public void Render() {", want: "Render"},
 		{extension: ".kt", line: "suspend fun render() {", want: "render"},
+		{extension: ".swift", line: "func render() {", want: "render"},
 	}
 
 	for _, test := range tests {

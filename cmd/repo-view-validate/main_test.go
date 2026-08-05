@@ -202,6 +202,33 @@ func TestReadSourceFilesIncludesKotlinSourceAndScriptExtensions(t *testing.T) {
 	}
 }
 
+func TestReadSourceFilesIncludesSwiftSourceExtension(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"Package.swift": "import PackageDescription\nlet package = Package(name: \"Demo\")\n",
+		"Source.swift":  "struct Source {}\n",
+		"ignored.txt":   "struct Ignored {}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := readSourceFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, file.rel)
+	}
+	const want = "Package.swift,Source.swift"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("Swift source files = %#v, want %s", got, want)
+	}
+}
+
 func TestReadLinesAcceptsMinifiedJavaScriptLineOverOneMiB(t *testing.T) {
 	t.Parallel()
 
@@ -238,6 +265,35 @@ func TestValidateRepoAcceptsJavaScriptDefinitionAndReferenceOnSameLine(t *testin
 	}
 	if validated != 1 {
 		t.Fatalf("validated symbols = %d, want 1", validated)
+	}
+}
+
+func TestValidateRepoAcceptsSwiftDefinitionAndReferences(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	const source = `func shared() {}
+
+struct Caller {
+    func call() {
+        shared()
+    }
+}
+`
+	if err := os.WriteFile(
+		filepath.Join(root, "Fixture.swift"),
+		[]byte(source),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	validated, err := validateRepo(root, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if validated != 1 {
+		t.Fatalf("validated Swift symbols = %d, want 1", validated)
 	}
 }
 
