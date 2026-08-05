@@ -2,8 +2,9 @@
 
 ## Unicode Character Database 17.0.0
 
-`repoview/java_lex.go` contains compact Java identifier-property ranges derived
-from [UnicodeData 17.0.0](https://www.unicode.org/Public/17.0.0/ucd/UnicodeData.txt),
+`repoview/java_lex.go` contains compact Java identifier-property ranges, and
+`repoview/cpp_unicode17_names.go` contains compact C++ character-name data,
+derived from the [Unicode Character Database 17.0.0](https://www.unicode.org/Public/17.0.0/ucd/),
 copyright © 2025 Unicode, Inc. The data is licensed under the Unicode License
 V3 reproduced below.
 

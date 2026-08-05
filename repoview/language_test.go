@@ -26,7 +26,7 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 		{extension: ".cts", name: "cts", backend: typescriptLanguage{}},
 		{extension: ".c", name: "c", backend: cLanguage{}},
 		{extension: ".h", name: "c", backend: cLanguage{}},
-		{extension: ".cpp", name: "cpp", backend: braceLanguage{}},
+		{extension: ".cpp", name: "cpp", backend: cppLanguage{}},
 		{extension: ".cs", name: "cs", backend: braceLanguage{}},
 		{extension: ".java", name: "java", backend: javaLanguage{}},
 		{extension: ".kt", name: "kt", backend: braceLanguage{}},
@@ -74,6 +74,7 @@ func TestLanguageBackendsOwnDefinitionRules(t *testing.T) {
 		{extension: ".js", line: "function render() {", want: "render"},
 		{extension: ".ts", line: "class Renderer {", want: "Renderer"},
 		{extension: ".c", line: "void render(void) {", want: "render"},
+		{extension: ".cpp", line: "void render() {", want: "render"},
 		{extension: ".java", line: "public void render() {", want: "render"},
 	}
 
