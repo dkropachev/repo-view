@@ -175,6 +175,33 @@ func TestReadSourceFilesIncludesJavaScriptAndTypeScriptModuleExtensions(t *testi
 	}
 }
 
+func TestReadSourceFilesIncludesKotlinSourceAndScriptExtensions(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"build.gradle.kts": "plugins { kotlin(\"jvm\") }\n",
+		"source.kt":        "class Source\n",
+		"ignored.txt":      "class Ignored\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := readSourceFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, file.rel)
+	}
+	const want = "build.gradle.kts,source.kt"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("source files = %#v, want %s", got, want)
+	}
+}
+
 func TestReadLinesAcceptsMinifiedJavaScriptLineOverOneMiB(t *testing.T) {
 	t.Parallel()
 

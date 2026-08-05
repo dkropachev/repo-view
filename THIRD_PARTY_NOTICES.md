@@ -12,6 +12,18 @@ The pinned source commit and checksums are recorded in
 MIT License reproduced in
 `internal/csharpgrammar/LICENSE.tree-sitter-c-sharp`.
 
+## tree-sitter-kotlin
+
+`internal/kotlingrammar/language_generated.go` and
+`internal/kotlingrammar/language_tables.bin` contain generated parse tables
+derived from
+[tree-sitter-kotlin](https://github.com/fwcd/tree-sitter-kotlin) commit
+`1852ea17b7f60fb3f9d84e0b1555d56b46b39fb1`, and
+`internal/kotlingrammar/scanner.go` is a pure-Go port of its external scanner.
+The pinned source checksums are recorded in `internal/kotlingrammar/README.md`.
+The upstream software is licensed under the MIT License reproduced in
+`internal/kotlingrammar/LICENSE.tree-sitter-kotlin`.
+
 ## Unicode Character Database 17.0.0
 
 `repoview/java_lex.go` contains compact Java identifier-property ranges, and

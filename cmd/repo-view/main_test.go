@@ -71,6 +71,16 @@ func TestFenceLanguageCoversJavaScriptAndTypeScriptExtensions(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversKotlinSourceAndScriptExtensions(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"source.kt", "build.gradle.kts"} {
+		if got := fenceLanguage(path); got != "kotlin" {
+			t.Fatalf("fenceLanguage(%q) = %q, want kotlin", path, got)
+		}
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{
