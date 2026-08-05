@@ -1343,6 +1343,8 @@ func fenceLanguage(path string) string {
 		return "kotlin"
 	case ".swift":
 		return "swift"
+	case ".mod", ".def":
+		return "modula-2"
 	default:
 		return ""
 	}

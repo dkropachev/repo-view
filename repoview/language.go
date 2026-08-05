@@ -317,7 +317,7 @@ func buildLanguageRegistry() map[string]languageBackend {
 	registerCSharpLanguage(registry)
 	registerKotlinLanguage(registry)
 	registerSwiftLanguage(registry)
-	registerBraceLanguages(registry)
+	registerModulaLanguage(registry)
 	return registry
 }
 

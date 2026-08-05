@@ -17,7 +17,3 @@ func newBraceLanguage(name string) braceLanguage {
 		false,
 	)}
 }
-
-func registerBraceLanguages(registry map[string]languageBackend) {
-	registerLanguage(registry, newBraceLanguage("mod"), ".mod")
-}

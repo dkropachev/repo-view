@@ -89,6 +89,16 @@ func TestFenceLanguageCoversSwiftSourceExtension(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversModulaSourceExtensions(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"src/Program.mod", "lib/Storage.def"} {
+		if got := fenceLanguage(path); got != "modula-2" {
+			t.Fatalf("fenceLanguage(%q) = %q, want modula-2", path, got)
+		}
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{
