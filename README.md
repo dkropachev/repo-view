@@ -226,15 +226,17 @@ for _, result := range response.Results {
 
 Go uses the standard library parser and scanner, with a conservative fallback
 for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java, C,
-C++, C#, Kotlin, and Swift
-use pure-Go Tree-sitter concrete parsers with language-specific lexical
-recovery. The JavaScript backend covers `.js`, `.mjs`, `.cjs`, and `.jsx`;
+C++, C#, Kotlin, and Swift use pure-Go Tree-sitter concrete parsers with
+language-specific lexical recovery. The JavaScript backend covers `.js`,
+`.mjs`, `.cjs`, and `.jsx`;
 TypeScript covers `.ts`, `.tsx`, `.mts`, and `.cts`; and Java covers `.java`.
 C covers `.c` and `.h`. C++ has a dedicated backend for common source, header,
 template-implementation, and module-interface extensions. C# covers `.cs` and
 script `.csx` sources. Kotlin covers `.kt` and script `.kts` sources. Swift
-covers `.swift` sources, including Swift package manifests. Other brace
-languages use the shared brace scanner.
+covers `.swift` sources, including Swift package manifests. Modula-2 uses a
+dedicated first-party concrete parser and bounded lexical recovery for `.mod`
+program or implementation modules and `.def` definition modules. Unknown
+extensions fall back to the shared brace scanner.
 
 ## Language backends
 
@@ -243,10 +245,10 @@ backend owns its language name, definition recognition, scope selection,
 import extraction, comment syntax, and docstring behavior. The Go backend uses
 `go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
 comment/string handling. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java,
-C, C++, C#, Kotlin, and Swift have dedicated concrete parsers, coordinate-preserving
-lexical masks, and bounded recovery for malformed or newer syntax. Other
-brace-based languages are registered as distinct language backends while
-sharing the common brace scanner and generic definition matcher.
+C, C++, C#, Kotlin, Swift, and Modula-2 have dedicated concrete parsers,
+coordinate-preserving lexical masks, and bounded recovery for malformed or
+newer syntax. Unknown brace-based languages use the common brace scanner and
+generic definition matcher.
 
 The C++ backend covers declarations, templates, namespaces, special member and
 operator functions, concepts, structured bindings, preprocessing definitions,
@@ -274,6 +276,15 @@ multiline strings, interpolation, and regex literals. Its generated concrete
 grammar, bounded pure-Go external scanner, and full-source lexical recovery
 have independent byte, token, delimiter, directive, structural, and retention
 limits.
+
+The Modula-2 backend targets GNU's PIM and ISO grammar for program,
+implementation, definition, and local modules, including common GNU lexer and
+procedure extensions. It covers imports, constants, types, variables,
+procedures, records, enumerations, nested comments, pragmas, and structured
+statement scopes. An uppercase module-header content gate keeps non-Modula
+files such as `go.mod` searchable without inventing declarations. Its
+first-party concrete parser and independent lexical recovery have separate
+byte, token, nesting, declaration, and retention limits.
 
 The TypeScript backend covers runtime and type declarations, TypeScript module
 forms, JSX, and coordinate-preserving recovery. The Java backend targets Java

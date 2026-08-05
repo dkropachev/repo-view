@@ -33,7 +33,8 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 		{extension: ".kt", name: "kt", backend: kotlinLanguage{}},
 		{extension: ".kts", name: "kt", backend: kotlinLanguage{}},
 		{extension: ".swift", name: "swift", backend: swiftLanguage{}},
-		{extension: ".mod", name: "mod", backend: braceLanguage{}},
+		{extension: ".mod", name: "mod", backend: modulaLanguage{}},
+		{extension: ".def", name: "mod", backend: modulaLanguage{}},
 	}
 
 	for _, test := range tests {

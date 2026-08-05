@@ -229,6 +229,67 @@ func TestReadSourceFilesIncludesSwiftSourceExtension(t *testing.T) {
 	}
 }
 
+func TestReadSourceFilesIncludesModulaSourceExtensions(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"Program.mod": "MODULE Program; BEGIN END Program.\n",
+		"Storage.def": "DEFINITION MODULE Storage; END Storage.\n",
+		"ignored.txt": "MODULE Ignored; END Ignored.\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := readSourceFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, file.rel)
+	}
+	const want = "Program.mod,Storage.def"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("Modula source files = %#v, want %s", got, want)
+	}
+}
+
+func TestBuildIndexFiltersModulaKeywordsOnlyForModulaFiles(t *testing.T) {
+	t.Parallel()
+
+	files := []fileData{
+		{
+			rel:  "Keywords.java",
+			ext:  ".java",
+			line: []string{"int MODULE = 1;", "MODULE++;", "int TYPE = 1;", "TYPE++;"},
+		},
+		{
+			rel:  "Keywords.mod",
+			ext:  ".mod",
+			line: []string{"MODULE", "MODULE", "TYPE", "TYPE"},
+		},
+	}
+
+	index := buildIndex(files)
+	for _, symbol := range []string{"MODULE", "TYPE"} {
+		locations := index[symbol]
+		if len(locations) != 2 {
+			t.Fatalf("%s locations = %#v, want two Java locations", symbol, locations)
+		}
+		for _, location := range locations {
+			if location.path != "Keywords.java" {
+				t.Fatalf("%s location = %#v, want only Java locations", symbol, location)
+			}
+		}
+	}
+
+	if got, want := strings.Join(selectSymbols(index, 2), ","), "MODULE,TYPE"; got != want {
+		t.Fatalf("sampled symbols = %q, want %q", got, want)
+	}
+}
+
 func TestReadLinesAcceptsMinifiedJavaScriptLineOverOneMiB(t *testing.T) {
 	t.Parallel()
 

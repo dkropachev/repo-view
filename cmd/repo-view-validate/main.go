@@ -324,10 +324,10 @@ func validateRepo(root string, cases int) (int, error) {
 
 func readSourceFiles(root string) ([]fileData, error) {
 	extensions := map[string]bool{
-		".c": true, ".cc": true, ".cjs": true, ".cpp": true, ".cs": true, ".go": true,
-		".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
+		".c": true, ".cc": true, ".cjs": true, ".cpp": true, ".cs": true, ".def": true,
+		".go": true, ".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
 		".kt": true, ".kts": true, ".mjs": true, ".py": true, ".rs": true, ".swift": true,
-		".ts": true, ".tsx": true, ".mts": true, ".cts": true,
+		".ts": true, ".tsx": true, ".mts": true, ".cts": true, ".mod": true,
 	}
 	excludes := map[string]bool{
 		".cache": true, ".git": true, ".hg": true, ".svn": true, ".venv": true,
@@ -391,7 +391,7 @@ func buildIndex(files []fileData) map[string][]location {
 		for i, line := range file.line {
 			seen := map[string]bool{}
 			for _, symbol := range ident.FindAllString(line, -1) {
-				if seen[symbol] || isKeyword(symbol) {
+				if seen[symbol] || isKeyword(symbol) || isModulaKeyword(file.ext, symbol) {
 					continue
 				}
 				if !independentContainsSymbol(line, symbol) {
@@ -557,6 +557,24 @@ func isKeyword(symbol string) bool {
 		"let", "match", "nil", "none", "null", "package", "private", "protected", "pub",
 		"public", "return", "self", "static", "struct", "switch", "this", "true", "type",
 		"uint", "use", "var", "void", "while":
+		return true
+	default:
+		return false
+	}
+}
+
+func isModulaKeyword(ext, symbol string) bool {
+	if ext != ".mod" && ext != ".def" {
+		return false
+	}
+	switch symbol {
+	case "AND", "ARRAY", "ASM", "BEGIN", "BY", "CASE", "CONST", "DEFINITION", "DIV", "DO",
+		"ELSE", "ELSIF", "END", "EXCEPT", "EXIT", "EXPORT", "FINALLY", "FOR", "FORWARD",
+		"FROM", "IF", "IMPLEMENTATION", "IMPORT", "IN", "LOOP", "MOD", "MODULE", "NOT", "OF",
+		"OR", "PACKEDSET", "POINTER", "PROCEDURE", "QUALIFIED", "RECORD", "REM", "REPEAT",
+		"RETRY", "RETURN", "SET", "THEN", "TO", "TYPE", "UNQUALIFIED", "UNTIL", "VAR",
+		"VOLATILE", "WHILE", "WITH", "__ATTRIBUTE__", "__BUILTIN__", "__COLUMN__",
+		"__DATE__", "__FILE__", "__FUNCTION__", "__INLINE__", "__LINE__":
 		return true
 	default:
 		return false
