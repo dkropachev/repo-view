@@ -225,12 +225,14 @@ for _, result := range response.Results {
 ```
 
 Go uses the standard library parser and scanner, with a conservative fallback
-for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java, C, and C++
+for incomplete source. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java, C,
+C++, and C#
 use pure-Go Tree-sitter concrete parsers with language-specific lexical
 recovery. The JavaScript backend covers `.js`, `.mjs`, `.cjs`, and `.jsx`;
 TypeScript covers `.ts`, `.tsx`, `.mts`, and `.cts`; and Java covers `.java`.
 C covers `.c` and `.h`. C++ has a dedicated backend for common source, header,
-template-implementation, and module-interface extensions. Other brace languages
+template-implementation, and module-interface extensions. C# covers `.cs` and
+script `.csx` sources. Other brace languages
 use the shared brace scanner.
 
 ## Language backends
@@ -240,7 +242,7 @@ backend owns its language name, definition recognition, scope selection,
 import extraction, comment syntax, and docstring behavior. The Go backend uses
 `go/parser` and `go/scanner` for declarations, scopes, imports, and lexical
 comment/string handling. Python, Rust, JavaScript, JSX, TypeScript, TSX, Java,
-C, and C++ have dedicated concrete parsers, coordinate-preserving lexical masks, and
+C, C++, and C# have dedicated concrete parsers, coordinate-preserving lexical masks, and
 bounded recovery for malformed or newer syntax. Other brace-based languages
 are registered as distinct language backends while sharing the common brace
 scanner and generic definition matcher.
@@ -250,6 +252,12 @@ operator functions, concepts, structured bindings, preprocessing definitions,
 and C++20 module/import forms. Its concrete parser and full-source lexical
 recovery use independent byte, token, delimiter, and ambiguity budgets so
 malformed or very large inputs remain bounded.
+
+The C# backend targets current C# 14 syntax, including records, primary and
+partial declarations, extension blocks and operators, raw and interpolated
+strings, file-scoped namespaces, global/alias usings, and file-app dependency
+directives. Its pure-Go external scanner and full-source lexical recovery have
+independent byte, token, delimiter, preprocessor, and retention limits.
 
 The TypeScript backend covers runtime and type declarations, TypeScript module
 forms, JSX, and coordinate-preserving recovery. The Java backend targets Java

@@ -314,6 +314,7 @@ func buildLanguageRegistry() map[string]languageBackend {
 	registerJavaLanguage(registry)
 	registerCLanguage(registry)
 	registerCPPLanguage(registry)
+	registerCSharpLanguage(registry)
 	registerBraceLanguages(registry)
 	return registry
 }

@@ -27,7 +27,8 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 		{extension: ".c", name: "c", backend: cLanguage{}},
 		{extension: ".h", name: "c", backend: cLanguage{}},
 		{extension: ".cpp", name: "cpp", backend: cppLanguage{}},
-		{extension: ".cs", name: "cs", backend: braceLanguage{}},
+		{extension: ".cs", name: "cs", backend: csharpLanguage{}},
+		{extension: ".csx", name: "cs", backend: csharpLanguage{}},
 		{extension: ".java", name: "java", backend: javaLanguage{}},
 		{extension: ".kt", name: "kt", backend: braceLanguage{}},
 		{extension: ".swift", name: "swift", backend: braceLanguage{}},
@@ -76,6 +77,7 @@ func TestLanguageBackendsOwnDefinitionRules(t *testing.T) {
 		{extension: ".c", line: "void render(void) {", want: "render"},
 		{extension: ".cpp", line: "void render() {", want: "render"},
 		{extension: ".java", line: "public void render() {", want: "render"},
+		{extension: ".cs", line: "public void Render() {", want: "Render"},
 	}
 
 	for _, test := range tests {
