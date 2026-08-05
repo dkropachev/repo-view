@@ -10,7 +10,6 @@ func TestModulaDefinitionForAcceptsGNUStringMacrosOnly(t *testing.T) {
 	t.Parallel()
 
 	for _, macro := range []string{"__FILE__", "__DATE__", "__FUNCTION__"} {
-		macro := macro
 		t.Run(macro, func(t *testing.T) {
 			t.Parallel()
 			source := "DEFINITION MODULE FOR " + macro + " Foreign;\nEND Foreign.\n"
@@ -43,7 +42,6 @@ func TestModulaDefinitionForAcceptsGNUStringMacrosOnly(t *testing.T) {
 	}
 
 	for _, macro := range []string{"__LINE__", "__COLUMN__"} {
-		macro := macro
 		t.Run(macro, func(t *testing.T) {
 			t.Parallel()
 			source := "DEFINITION MODULE FOR " + macro + " Foreign;\nEND Foreign.\n"

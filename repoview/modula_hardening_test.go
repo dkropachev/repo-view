@@ -687,11 +687,11 @@ END D.
 	for _, test := range invalid {
 		t.Run("invalid/"+test.name, func(t *testing.T) {
 			t.Parallel()
-			owner, close := "MODULE M;", "END M."
+			owner, terminator := "MODULE M;", "END M."
 			body := "\nBEGIN\nEND Fake;"
 			want := []string{"M", "Tail"}
 			if test.definition {
-				owner, close = "DEFINITION MODULE D;", "END D."
+				owner, terminator = "DEFINITION MODULE D;", "END D."
 				body = ""
 				want = []string{"D", "Tail"}
 			}
@@ -700,7 +700,7 @@ END D.
 			if !test.definition {
 				source += "BEGIN\nEND Tail;\nBEGIN\n"
 			}
-			source += close + "\n"
+			source += terminator + "\n"
 			lines := modulaTestLines(source)
 			tree := modulaTreeTestParseRecovery(t, source)
 			if spans := modulaSyntaxErrorSpans(tree, len(source)); len(spans) == 0 {
@@ -1435,6 +1435,8 @@ END M.
 	}
 	for _, test := range largeOwnerTests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			lines := modulaTestLines(test.source)
 			analysis := analyzeModulaSource(test.source, len(lines))
 			if analysis == nil {

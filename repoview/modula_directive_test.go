@@ -101,7 +101,6 @@ func TestModulaRecoveryProcedureAttributeDirectiveValidation(t *testing.T) {
 		{name: "argument", source: "<* leaf(1) *>", want: false},
 		{name: "unmatched", source: "<* leaf", want: false},
 	} {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			tokens := lexModula(test.source).tokens
@@ -710,6 +709,8 @@ func TestModulaGNUPairedDirectiveDeclarationHeaderCapBoundary(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			// Header tokens are Broken, =, INTEGER, <*, payload..., *>.
 			payloadTokens := test.tokens - 5
 			source := `MODULE HeaderBoundary;
@@ -769,9 +770,7 @@ func TestModulaGNUPairedDirectiveRawOwnerHeaderCapBoundary(t *testing.T) {
 		{name: "payload over cap", tokens: modulaMaximumDeclarationTokens + 68},
 	}
 	for _, owner := range owners {
-		owner := owner
 		for _, boundary := range boundaries {
-			boundary := boundary
 			t.Run(owner.name+" "+boundary.name, func(t *testing.T) {
 				t.Parallel()
 
@@ -860,7 +859,6 @@ func TestModulaGNUOverflowOptionalDefaultExpressionValidation(t *testing.T) {
 		{name: "adjacent operands in parentheses", malformed: "(1 2)"},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			source := `MODULE DefaultBoundary;
@@ -905,7 +903,6 @@ func TestModulaGNUOverflowOptionalDefaultValidUnaryExpressions(t *testing.T) {
 		{name: "logical not", expression: "NOT flag AND " + logical + "flag"},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			source := `MODULE ValidDefaultBoundary;
@@ -994,14 +991,12 @@ END CompositeDefault.
 		modulaTestAssertDefinitionCoordinates(t, lines, lexical.definitions)
 	}
 	for _, test := range valid {
-		test := test
 		t.Run("valid "+test.name, func(t *testing.T) {
 			t.Parallel()
 			run(t, test.shape, true)
 		})
 	}
 	for _, test := range invalid {
-		test := test
 		t.Run("invalid "+test.name, func(t *testing.T) {
 			t.Parallel()
 			run(t, test.shape, false)
@@ -1026,12 +1021,13 @@ END ConcreteBoundary.
 			baseUnits, modulaMaximumConcreteTokens)
 	}
 	for _, delta := range []int{0, 1} {
-		delta := delta
 		name := "at cap"
 		if delta == 1 {
 			name = "one over cap"
 		}
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
 			source := prefix + strings.Repeat(
 				"noise ", modulaMaximumConcreteTokens-baseUnits+delta,
 			) + suffix
@@ -1119,6 +1115,8 @@ END OverUnmatched.
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			lines := modulaTestLines(test.source)
 			lexed := lexModula(test.source)
 			if lexed.concreteEligible ||
@@ -1222,6 +1220,8 @@ END HugeDefinition.
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
 			fixture := modulaDirectiveTestAnalyze(t, test.source, false)
 			if fixture.lexed.lexicalUnits <= modulaMaximumDeclarationTokens {
 				t.Fatalf("huge heading lexical units = %d, want > declaration cap %d",

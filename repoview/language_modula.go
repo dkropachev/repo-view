@@ -14,6 +14,9 @@ type modulaLanguage struct {
 }
 
 type modulaSourceAnalysis struct {
+	tree          *modulaSyntaxTree
+	scopeResolver *cPreparedFindScopeResolver
+	source        string
 	lineStorage   []string
 	lineSnapshot  []string
 	lineStarts    []int
@@ -22,9 +25,6 @@ type modulaSourceAnalysis struct {
 	imports       []cLineSpan
 	recoverySpans []cByteSpan
 	lexed         modulaLexResult
-	tree          *modulaSyntaxTree
-	scopeResolver *cPreparedFindScopeResolver
-	source        string
 	lineCount     int
 	gated         bool
 }
@@ -237,12 +237,11 @@ func modulaLineDefinitionSymbol(tokens []modulaToken) (string, bool) {
 
 func modulaLineModuleSymbol(tokens []modulaToken) (string, bool) {
 	index := 0
-	definition := false
 	switch tokens[index].text {
 	case "MODULE":
 		index++
 	case "DEFINITION", "IMPLEMENTATION":
-		definition = tokens[index].text == "DEFINITION"
+		definition := tokens[index].text == "DEFINITION"
 		index++
 		if index >= len(tokens) || tokens[index].text != "MODULE" {
 			return "", false

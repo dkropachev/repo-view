@@ -8,9 +8,10 @@ type modulaSyntaxNode = treeSitterSyntaxNode
 type modulaSyntaxTree = treeSitterSyntaxTree
 
 type modulaParseNode struct {
-	kind       string
-	start, end int
-	children   []*modulaParseNode
+	kind     string
+	children []*modulaParseNode
+	start    int
+	end      int
 }
 
 type modulaConcreteParser struct {
@@ -29,15 +30,14 @@ type modulaDeclarationContext struct {
 }
 
 type modulaRecordState struct {
-	segmentStart   int
-	typeStart      int
 	boundary       string
+	segmentStart   int
 	defaultAllowed bool
 }
 
 type modulaTypeBlock struct {
-	kind   string
 	record *modulaRecordState
+	kind   string
 }
 
 // parseModulaSyntax builds a strict, position-safe concrete tree without a C
@@ -198,9 +198,9 @@ func (parser *modulaConcreteParser) parseModuleDeclarations(
 	context modulaDeclarationContext,
 ) {
 	for parser.index < len(parser.tokens) && !parser.at("END") &&
-		!(parser.at("BEGIN") && !context.definition) &&
-		!(parser.at("FINALLY") && !context.definition && !context.procedure) &&
-		!(context.procedure && (parser.at("FINALLY") || parser.at("EXCEPT"))) {
+		(!parser.at("BEGIN") || context.definition) &&
+		(!parser.at("FINALLY") || context.definition || context.procedure) &&
+		(!context.procedure || !parser.at("FINALLY") && !parser.at("EXCEPT")) {
 		switch parser.current().text {
 		case "IMPORT", "FROM":
 			node := parser.parseImport()
@@ -345,18 +345,19 @@ func (parser *modulaConcreteParser) parseConstantSection(parent *modulaParseNode
 		} else {
 			rhsStart := parser.index
 			semicolon, restart := parser.findDeclarationBoundary(parser.index, false)
-			if restart >= 0 {
+			switch {
+			case restart >= 0:
 				declaration.kind = "ERROR"
 				declaration.children = nil
 				parser.index = restart
-			} else if semicolon < 0 || semicolon == rhsStart ||
+			case semicolon < 0 || semicolon == rhsStart ||
 				!modulaConstantExpressionRangeValid(
 					parser.tokens, rhsStart, semicolon,
-				) {
+				):
 				declaration.kind = "ERROR"
 				declaration.children = nil
 				parser.recoverTo(";", "END")
-			} else {
+			default:
 				parser.index = semicolon
 			}
 		}
@@ -931,14 +932,14 @@ func (parser *modulaExpressionParser) parseDesignator() bool {
 }
 
 func (parser *modulaExpressionParser) parseExpressionList(
-	open, close string,
+	open, closing string,
 	emptyAllowed bool,
 ) bool {
 	if !parser.at(open) || !parser.enterDepth() {
 		return false
 	}
 	parser.index++
-	if parser.consume(close) {
+	if parser.consume(closing) {
 		parser.depth--
 		if emptyAllowed {
 			return true
@@ -953,7 +954,7 @@ func (parser *modulaExpressionParser) parseExpressionList(
 			return false
 		}
 	}
-	if !parser.require(close) {
+	if !parser.require(closing) {
 		return false
 	}
 	parser.depth--
@@ -1143,23 +1144,25 @@ func (parser *modulaConcreteParser) parseTypeSection(
 				semicolon, restart := parser.findDeclarationSemicolonBoundary(
 					parser.index, true,
 				)
-				if restart >= 0 {
+				switch {
+				case restart >= 0:
 					parser.index = restart
-				} else if semicolon >= 0 {
+				case semicolon >= 0:
 					parser.index = semicolon
-				} else {
+				default:
 					parser.index = len(parser.tokens)
 				}
 			}
 		} else {
 			rhsStart := parser.index
 			semicolon, restart := parser.findDeclarationBoundary(rhsStart, true)
-			if restart >= 0 {
+			switch {
+			case restart >= 0:
 				declaration.kind = "ERROR"
 				declaration.children = nil
 				parser.index = restart
-			} else if semicolon < 0 || semicolon == rhsStart ||
-				!modulaTypeRangeValid(parser.tokens, rhsStart, semicolon) {
+			case semicolon < 0 || semicolon == rhsStart ||
+				!modulaTypeRangeValid(parser.tokens, rhsStart, semicolon):
 				declaration.kind = "ERROR"
 				declaration.children = nil
 				if semicolon >= 0 {
@@ -1167,7 +1170,7 @@ func (parser *modulaConcreteParser) parseTypeSection(
 				} else {
 					parser.recoverTo(";", "END")
 				}
-			} else {
+			default:
 				if modulaTypeRangeContainsRecord(parser.tokens, rhsStart, semicolon) {
 					declaration.kind = "record_type_declaration"
 				}
@@ -1200,11 +1203,12 @@ func (parser *modulaConcreteParser) parseVariableSection(parent *modulaParseNode
 			semicolon, restart := parser.findDeclarationSemicolonBoundary(
 				startIndex, false,
 			)
-			if restart >= 0 {
+			switch {
+			case restart >= 0:
 				parser.index = restart
-			} else if semicolon >= 0 {
+			case semicolon >= 0:
 				parser.index = semicolon + 1
-			} else {
+			default:
 				parser.index = len(parser.tokens)
 			}
 			continue
@@ -1618,10 +1622,13 @@ func (parser *modulaConcreteParser) parseStatementBlock(
 			}
 			delimiters = append(delimiters, token)
 		case ")", "]", "}":
-			expected := "("
-			if token.text == "]" {
+			var expected string
+			switch token.text {
+			case ")":
+				expected = "("
+			case "]":
 				expected = "["
-			} else if token.text == "}" {
+			case "}":
 				expected = "{"
 			}
 			if len(delimiters) == 0 ||
@@ -1720,17 +1727,18 @@ func (parser *modulaConcreteParser) parseStatementBlock(
 			parser.index = directiveEnd
 		case "IMPORT", "FROM", "EXPORT", "CONST", "TYPE", "VAR", "MODULE", "PROCEDURE":
 			finishStatement()
-			end := token.end
+			var end int
 			semicolon, restart := parser.findDeclarationSemicolonBoundary(
 				parser.index+1, false,
 			)
-			if semicolon >= 0 {
+			switch {
+			case semicolon >= 0:
 				end = parser.tokens[semicolon].end
 				parser.index = semicolon + 1
-			} else if restart >= 0 {
+			case restart >= 0:
 				end = parser.tokens[restart].start
 				parser.index = restart
-			} else {
+			default:
 				end = len(parser.source)
 				parser.index = len(parser.tokens)
 			}
@@ -2247,7 +2255,7 @@ func (parser *modulaConcreteParser) findTopLevelToken(
 	return -1
 }
 
-func (parser *modulaConcreteParser) skipBalanced(open, close string) bool {
+func (parser *modulaConcreteParser) skipBalanced(open, closing string) bool {
 	if !parser.at(open) {
 		return false
 	}
@@ -2264,7 +2272,7 @@ func (parser *modulaConcreteParser) skipBalanced(open, close string) bool {
 		switch parser.current().text {
 		case open:
 			depth++
-		case close:
+		case closing:
 			depth--
 		}
 		parser.index++
@@ -2730,9 +2738,10 @@ func modulaTypeRangeValid(tokens []modulaToken, start, end int) bool {
 // and stack-safe.
 type modulaTypeParser struct {
 	tokens         []modulaToken
-	index, end     int
-	collectMembers bool
 	members        []*modulaParseNode
+	index          int
+	end            int
+	collectMembers bool
 }
 
 func (parser *modulaTypeParser) parseType(depth int) bool {
@@ -3077,10 +3086,7 @@ func (parser *modulaTypeParser) currentIsName() bool {
 }
 
 func (parser *modulaTypeParser) require(text string) bool {
-	if !parser.consume(text) {
-		return false
-	}
-	return true
+	return parser.consume(text)
 }
 
 func (parser *modulaTypeParser) consume(text string) bool {

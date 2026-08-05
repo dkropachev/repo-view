@@ -85,8 +85,8 @@ const (
 // It consumes the unretained token stream, so a valid priority expression can
 // cross the head/tail retention frontier without turning a Modula-2 file inert.
 type modulaContentGateStream struct {
-	state         uint8
 	priorityDepth int
+	state         uint8
 	definition    bool
 	directive     bool
 	done          bool
@@ -240,29 +240,31 @@ func lexModula(source string) modulaLexResult {
 	result := modulaLexResult{concreteEligible: len(source) <= modulaMaximumConcreteParseBytes}
 	var retention modulaTokenRetention
 	var contentGate modulaContentGateStream
-	appendSpan := func(destination *[]cByteSpan, span cByteSpan) bool {
+	appendSpan := func(destination *[]cByteSpan, span cByteSpan) {
 		result.lexicalUnits++
 		if span.start >= span.end {
-			return true
+			return
 		}
 		if len(*destination) < modulaMaximumRetainedSpans {
 			*destination = append(*destination, span)
 		} else {
 			result.spansTruncated = true
 		}
-		return true
 	}
 	walker := modulaLexicalWalker{
 		source: source,
 		sink: modulaLexicalSink{
 			comment: func(span cByteSpan) bool {
-				return appendSpan(&result.commentSpans, span)
+				appendSpan(&result.commentSpans, span)
+				return true
 			},
 			literal: func(span cByteSpan) bool {
-				return appendSpan(&result.stringSpans, span)
+				appendSpan(&result.stringSpans, span)
+				return true
 			},
 			pragma: func(span cByteSpan) bool {
-				return appendSpan(&result.pragmaSpans, span)
+				appendSpan(&result.pragmaSpans, span)
+				return true
 			},
 			token: func(token modulaToken) bool {
 				result.lexicalUnits++
@@ -286,17 +288,16 @@ func lexModula(source string) modulaLexResult {
 	return result
 }
 
-func walkModulaLexically(source string, sink modulaLexicalSink) bool {
+func walkModulaLexically(source string, sink modulaLexicalSink) {
 	walker := modulaLexicalWalker{
 		source: source, sink: sink, lineOnlySpace: true,
 	}
 	walker.walk()
-	return !walker.stopped
 }
 
 type modulaLexicalWalker struct {
-	source string
 	sink   modulaLexicalSink
+	source string
 
 	offset, maximumCommentDepth int
 	directiveEnd                int
@@ -373,7 +374,8 @@ func (walker *modulaLexicalWalker) walk() {
 		token := modulaToken{
 			start: start, nameStart: start, lineStart: walker.lineOnlySpace,
 		}
-		if modulaIdentifierStart(r) {
+		switch {
+		case modulaIdentifierStart(r):
 			walker.offset += size
 			for walker.offset < len(walker.source) {
 				next, nextSize := utf8.DecodeRuneInString(walker.source[walker.offset:])
@@ -384,12 +386,12 @@ func (walker *modulaLexicalWalker) walk() {
 				walker.offset += nextSize
 			}
 			token.kind = modulaTokenIdentifier
-		} else if modulaASCIIDigit(r) || r == '.' && modulaLeadingDotNumber(
+		case modulaASCIIDigit(r) || r == '.' && modulaLeadingDotNumber(
 			walker.source, walker.offset,
-		) {
+		):
 			walker.offset = modulaNumberEnd(walker.source, walker.offset)
 			token.kind = modulaTokenNumber
-		} else {
+		default:
 			if canonical, width, ok := modulaAlternatePunctuation(
 				walker.source, start,
 			); ok {
@@ -800,7 +802,7 @@ func modulaDoublePunctuation(text string) bool {
 
 func modulaLineStarts(source string) []int {
 	starts := []int{0}
-	for offset := 0; offset < len(source); offset++ {
+	for offset := range len(source) {
 		if source[offset] == '\n' {
 			starts = append(starts, offset+1)
 		}

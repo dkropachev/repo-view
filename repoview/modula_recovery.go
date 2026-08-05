@@ -95,9 +95,9 @@ const (
 )
 
 type modulaRecoveryFormalStream struct {
-	state             uint8
-	defaultDepth      int
 	defaultExpression modulaRecoveryExpressionStream
+	defaultDepth      int
+	state             uint8
 	optional          bool
 	extended          bool
 	defaultSeen       bool
@@ -150,74 +150,72 @@ type modulaRecoveryReturnStream struct {
 }
 
 type modulaRecoveryParser struct {
-	lineStarts []int
-	header     []modulaToken
-	frames     []modulaRecoveryFrame
-	controls   []modulaRecoveryControl
+	pairedDirectiveTokens          []modulaToken
+	header                         []modulaToken
+	frames                         []modulaRecoveryFrame
+	controls                       []modulaRecoveryControl
+	definitions                    []sourceDefinition
+	scopes                         []cLineScope
+	headerOverflowProcedureSegment []modulaToken
+	lineStarts                     []int
+	imports                        []cLineSpan
+	headerOverflowModuleExpression modulaRecoveryExpressionStream
+	headerOverflowName             modulaToken
+	headerOverflowProcedureStream  modulaRecoveryFormalStream
+	pendingRepeatControl           modulaRecoveryControl
+	headerOverflowProcedureBracket int
+	headerOverflowImportStart      int
+	pairedDirectiveCount           int
 	// ownerOverflow counts named procedure/module owners beyond the bounded
 	// frame stack. Keeping only their depth lets recovery ignore their ENDs
 	// without allowing those ENDs to unwind retained frames.
-	ownerOverflow                int
-	ownerOverflowForwardEligible bool
-	controlOverflow              int
-	invalidBody                  bool
-	invalidBodyEnd               bool
-	invalidBodyName              bool
-	invalidBodyOwnerName         bool
-	invalidBodyOwner             bool
-	invalidBodyDepth             int
-	invalidBodyRepeatDepth       int
-
-	definitions []sourceDefinition
-	scopes      []cLineScope
-	imports     []cLineSpan
-
+	ownerOverflow                          int
+	pendingRepeatEnd                       int
+	controlOverflow                        int
+	pendingBareBodyEndLine                 int
 	lineCount                              int
-	headerOverflow                         bool
-	headerOverflowOwner                    modulaRecoveryOwnerKind
-	headerOverflowName                     modulaToken
 	headerOverflowStart                    int
-	headerOverflowDefinition               bool
-	headerOverflowLocalModule              bool
-	headerOverflowSection                  modulaRecoverySection
+	headerOverflowProcedureParen           int
+	headerOverflowRawOwnerParen            int
+	invalidBodyDepth                       int
 	headerOverflowParen                    int
 	headerOverflowBracket                  int
 	headerOverflowBlocks                   int
-	headerOverflowTracksBlocks             bool
-	headerOverflowProcedureValid           bool
-	headerOverflowProcedurePhase           uint8
-	headerOverflowProcedureParen           int
-	headerOverflowProcedureBracket         int
-	headerOverflowProcedureSawSection      bool
-	headerOverflowProcedureSegment         []modulaToken
-	headerOverflowProcedureStreaming       bool
-	headerOverflowProcedureStream          modulaRecoveryFormalStream
-	headerOverflowProcedureSuffixStreaming bool
+	invalidBodyRepeatDepth                 int
 	headerOverflowProcedureReturnStream    modulaRecoveryReturnStream
+	headerOverflowProcedureSuffixStreaming bool
+	headerOverflowLocalModule              bool
+	invalidBody                            bool
+	headerOverflowProcedureSawSection      bool
+	ownerOverflowForwardEligible           bool
+	headerOverflowProcedureStreaming       bool
+	headerOverflowProcedureValid           bool
+	invalidBodyEnd                         bool
+	headerOverflowTracksBlocks             bool
 	headerOverflowProcedureFormalAttribute bool
 	headerOverflowProcedureAttribute       bool
 	headerOverflowModuleValid              bool
 	headerOverflowModuleSuffix             uint8
-	headerOverflowModuleExpression         modulaRecoveryExpressionStream
+	headerOverflowSection                  modulaRecoverySection
 	headerOverflowRawOwnerState            uint8
 	headerOverflowRawOwnerDefinition       bool
 	headerOverflowRawOwnerLocalModule      bool
-	headerOverflowRawOwnerParen            int
+	headerOverflowProcedurePhase           uint8
 	headerOverflowImport                   bool
 	headerOverflowImportValid              bool
 	headerOverflowImportState              uint8
-	headerOverflowImportStart              int
+	headerOverflowDefinition               bool
 	pendingBareBodyEnd                     bool
-	pendingBareBodyEndLine                 int
+	headerOverflowOwner                    modulaRecoveryOwnerKind
 	pendingRepeatCondition                 bool
-	pendingRepeatControl                   modulaRecoveryControl
-	pendingRepeatEnd                       int
+	headerOverflow                         bool
+	invalidBodyOwner                       bool
 	statementStart                         bool
 	pairedDirective                        bool
 	pairedDirectiveHeader                  bool
-	pairedDirectiveTokens                  []modulaToken
+	invalidBodyOwnerName                   bool
 	pairedDirectiveOverflow                bool
-	pairedDirectiveCount                   int
+	invalidBodyName                        bool
 	pairedDirectiveExactAttribute          bool
 	unmatchedDirective                     bool
 }
@@ -381,13 +379,14 @@ func (parser *modulaRecoveryParser) acceptPairedDirectiveToken(token modulaToken
 	// one atom at its close, so payload punctuation/keywords can never mutate
 	// the overflow procedure, import, or structural state.
 	parser.pairedDirectiveCount++
-	if parser.pairedDirectiveCount == 2 {
+	switch parser.pairedDirectiveCount {
+	case 2:
 		parser.pairedDirectiveExactAttribute =
 			token.kind == modulaTokenIdentifier && !modulaKeyword(token.text)
-	} else if parser.pairedDirectiveCount == 3 {
+	case 3:
 		parser.pairedDirectiveExactAttribute =
 			parser.pairedDirectiveExactAttribute && token.text == "*>"
-	} else {
+	default:
 		parser.pairedDirectiveExactAttribute = false
 	}
 	if len(parser.pairedDirectiveTokens) < modulaMaximumDeclarationTokens {
@@ -653,9 +652,10 @@ func (parser *modulaRecoveryParser) headerContinuesWith(token modulaToken) bool 
 		return last == "=" || last == "TO" || last == "OF"
 	case modulaRecoveryVarSection:
 		return last == ":"
-	default:
+	case modulaRecoveryNoSection, modulaRecoveryConstSection:
 		return false
 	}
+	return false
 }
 
 func (parser *modulaRecoveryParser) acceptBody(token modulaToken, line int) {
@@ -672,22 +672,23 @@ func (parser *modulaRecoveryParser) acceptBody(token modulaToken, line int) {
 	}
 	if len(parser.header) > 0 {
 		frameDepth := len(parser.frames)
-		if token.lineStart && token.text == "END" {
+		switch {
+		case token.lineStart && token.text == "END":
 			// A bare control END may be followed immediately by its owner's END.
 			parser.finishBodyEnd(line-1, "")
 			if len(parser.frames) < frameDepth {
 				parser.accept(token)
 				return
 			}
-		} else if token.text == ";" || token.text == "." {
+		case token.text == ";" || token.text == ".":
 			parser.finishBodyEnd(line, token.text)
 			return
-		} else if len(parser.header) == 1 && token.kind == modulaTokenIdentifier &&
+		case len(parser.header) == 1 && token.kind == modulaTokenIdentifier &&
 			(!modulaKeyword(token.text) || parser.currentFrame().invalid &&
-				token.text == parser.currentFrame().name) {
+				token.text == parser.currentFrame().name):
 			parser.appendHeader(token)
 			return
-		} else {
+		default:
 			parser.finishBodyEnd(line, "")
 			if len(parser.frames) < frameDepth {
 				parser.accept(token)
@@ -770,6 +771,7 @@ func (parser *modulaRecoveryParser) beginHeaderOverflow() {
 		switch parser.currentFrame().section {
 		case modulaRecoveryTypeSection, modulaRecoveryVarSection:
 			parser.headerOverflowSection = parser.currentFrame().section
+		case modulaRecoveryNoSection, modulaRecoveryConstSection:
 		}
 	}
 	if parser.headerOverflowOwner == modulaRecoveryNoOwner {
@@ -1302,8 +1304,7 @@ func (parser *modulaRecoveryParser) finishHeaderOverflowProcedureSection(
 		parser.headerOverflowProcedureValid = false
 		return
 	}
-	extended := false
-	valid := false
+	var extended, valid bool
 	if streaming {
 		extended = stream.optional || stream.extended
 		valid = stream.finish(parser.currentFrame().definitionUnit)
@@ -1423,9 +1424,10 @@ func (stream *modulaRecoveryExpressionStream) accept(token modulaToken) {
 		return
 	case ")", "]", "}":
 		expected := "("
-		if token.text == "]" {
+		switch token.text {
+		case "]":
 			expected = "["
-		} else if token.text == "}" {
+		case "}":
 			expected = "{"
 		}
 		if len(stream.delimiters) == 0 ||
@@ -1672,14 +1674,14 @@ func (stream *modulaRecoveryExpressionStream) markExpressionContent() {
 	}
 }
 
-func (stream modulaRecoveryExpressionStream) currentExpressionGeneral() bool {
+func (stream *modulaRecoveryExpressionStream) currentExpressionGeneral() bool {
 	if len(stream.delimiters) == 0 {
 		return false
 	}
 	return stream.delimiters[len(stream.delimiters)-1].general
 }
 
-func (stream modulaRecoveryExpressionStream) expressionRelationSeen() bool {
+func (stream *modulaRecoveryExpressionStream) expressionRelationSeen() bool {
 	if len(stream.delimiters) == 0 {
 		return stream.rootRelation
 	}
@@ -1694,7 +1696,7 @@ func (stream *modulaRecoveryExpressionStream) setExpressionRelation(value bool) 
 	stream.delimiters[len(stream.delimiters)-1].relation = value
 }
 
-func (stream modulaRecoveryExpressionStream) finish() bool {
+func (stream *modulaRecoveryExpressionStream) finish() bool {
 	return stream.valid && stream.sawOperand && !stream.expectOperand &&
 		!stream.selector && stream.attributeState == modulaRecoveryAttributeNone &&
 		len(stream.delimiters) == 0
@@ -1742,11 +1744,12 @@ func (stream *modulaRecoveryFormalStream) accept(token modulaToken) {
 			stream.valid = false
 		}
 	case modulaRecoveryFormalStreamTypeStart:
-		if token.text == "ARRAY" {
+		switch {
+		case token.text == "ARRAY":
 			stream.state = modulaRecoveryFormalStreamArrayOF
-		} else if identifier {
+		case identifier:
 			stream.state = modulaRecoveryFormalStreamAfterTypeName
-		} else {
+		default:
 			stream.valid = false
 		}
 	case modulaRecoveryFormalStreamArrayOF:
@@ -1810,9 +1813,10 @@ func (stream *modulaRecoveryFormalStream) acceptDefaultExpressionToken(
 		stream.state = modulaRecoveryFormalStreamOptionalDone
 		return
 	}
-	if token.text == "[" {
+	switch token.text {
+	case "[":
 		stream.defaultDepth++
-	} else if token.text == "]" {
+	case "]":
 		stream.defaultDepth--
 	}
 	stream.defaultExpression.accept(token)
@@ -1821,7 +1825,7 @@ func (stream *modulaRecoveryFormalStream) acceptDefaultExpressionToken(
 	}
 }
 
-func (stream modulaRecoveryFormalStream) finish(definition bool) bool {
+func (stream *modulaRecoveryFormalStream) finish(definition bool) bool {
 	if !stream.valid {
 		return false
 	}
@@ -1911,7 +1915,7 @@ func (stream *modulaRecoveryReturnStream) accept(token modulaToken) {
 	}
 }
 
-func (stream modulaRecoveryReturnStream) finish() bool {
+func (stream *modulaRecoveryReturnStream) finish() bool {
 	if !stream.valid {
 		return false
 	}
@@ -2019,6 +2023,7 @@ func (parser *modulaRecoveryParser) headerBlockStart(
 		if index := modulaRecoveryTopLevelToken(header, ":"); index > 0 {
 			return index + 1
 		}
+	case modulaRecoveryNoSection, modulaRecoveryConstSection:
 	}
 	return -1
 }
@@ -2314,6 +2319,8 @@ func (parser *modulaRecoveryParser) acceptSectionHeader(
 			parser.addDefinition(name, parser.line(name.start), line, false)
 		}
 		parser.addTypeMemberDefinitions(header, colon+1, len(header), line)
+	case modulaRecoveryNoSection:
+		return
 	}
 }
 
@@ -2472,12 +2479,10 @@ func (parser *modulaRecoveryParser) acceptRepeatConditionToken(
 	if !parser.pendingRepeatCondition {
 		return
 	}
-	boundary := false
+	boundary := token.lineStart && modulaRecoveryRestartToken(token.text)
 	switch token.text {
 	case ";", "END", "ELSE", "ELSIF", "EXCEPT", "FINALLY", "|", "UNTIL":
 		boundary = true
-	default:
-		boundary = token.lineStart && modulaRecoveryRestartToken(token.text)
 	}
 	if boundary {
 		parser.finishRepeatCondition()
@@ -2603,7 +2608,7 @@ func modulaRecoveryModuleHeader(header []modulaToken) bool {
 }
 
 func modulaRecoveryModuleName(header []modulaToken) (int, bool, bool) {
-	index := 0
+	var index int
 	definition := false
 	switch header[0].text {
 	case "MODULE":
@@ -2643,7 +2648,7 @@ func modulaRecoveryRawModuleName(
 	if len(header) < 2 {
 		return modulaToken{}, false, false
 	}
-	index := 0
+	var index int
 	definition := false
 	switch header[0].text {
 	case "MODULE":
@@ -2859,11 +2864,11 @@ func modulaRecoveryFormalSectionValid(
 	}
 	optional := len(tokens) >= 2 && tokens[0].text == "["
 	if optional {
-		close := modulaRecoveryMatchingDelimiter(tokens, 0, "[", "]")
-		if close != len(tokens)-1 {
+		closeIndex := modulaRecoveryMatchingDelimiter(tokens, 0, "[", "]")
+		if closeIndex != len(tokens)-1 {
 			return false
 		}
-		tokens = tokens[1:close]
+		tokens = tokens[1:closeIndex]
 	}
 	if len(tokens) > 0 && tokens[0].text == "VAR" {
 		if optional {
@@ -3052,14 +3057,14 @@ func modulaRecoveryTopLevelToken(tokens []modulaToken, text string) int {
 func modulaRecoveryMatchingDelimiter(
 	tokens []modulaToken,
 	start int,
-	open, close string,
+	openToken, closeToken string,
 ) int {
 	depth := 0
 	for index := start; index < len(tokens); index++ {
 		switch tokens[index].text {
-		case open:
+		case openToken:
 			depth++
-		case close:
+		case closeToken:
 			depth--
 			if depth == 0 {
 				return index
@@ -3072,9 +3077,9 @@ func modulaRecoveryMatchingDelimiter(
 func modulaRecoveryBalancedRange(
 	tokens []modulaToken,
 	start int,
-	open, close string,
+	openToken, closeToken string,
 ) bool {
-	return modulaRecoveryMatchingDelimiter(tokens, start, open, close) == len(tokens)-1
+	return modulaRecoveryMatchingDelimiter(tokens, start, openToken, closeToken) == len(tokens)-1
 }
 
 func modulaRecoveryTokenAt(
