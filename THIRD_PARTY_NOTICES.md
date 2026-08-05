@@ -1,5 +1,17 @@
 # Third-party notices
 
+## tree-sitter-c-sharp
+
+`internal/csharpgrammar/language_generated.go` and
+`internal/csharpgrammar/language_tables.bin` contain generated parse tables
+derived from
+[tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp), and
+`internal/csharpgrammar/scanner.go` is a pure-Go port of its external scanner.
+The pinned source commit and checksums are recorded in
+`internal/csharpgrammar/README.md`. The upstream software is licensed under the
+MIT License reproduced in
+`internal/csharpgrammar/LICENSE.tree-sitter-c-sharp`.
+
 ## Unicode Character Database 17.0.0
 
 `repoview/java_lex.go` contains compact Java identifier-property ranges, and
