@@ -12,8 +12,8 @@ skip_analyze=false
 judge_model_mode="${LSP_JUDGE_MODEL_MODE:-router}"
 judge_model=""
 judge_codex_version="codex-cli 0.144.0"
-judge_cache_schema=6
-legacy_judge_attestation_schema=1
+judge_cache_schema=8
+legacy_judge_attestation_schema=2
 metrics_formula="effective = (input - cached_input) + 0.1 * cached_input + output"
 required_generation_isolation="root-deny-explicit-read-inherit-none-go-env-v3"
 no_collaboration='Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark.'
@@ -569,6 +569,12 @@ if ! jq -se '
     and (.repo_view_command_shape_valid | type == "boolean")
     and (.repo_view_first_invocation_changed | type == "boolean")
     and (.repo_view_navigation_semantics_valid | type == "boolean")
+    and (.repo_view_simple_changed_command_exact | type == "boolean")
+    and (.repo_view_simple_core_inspect_command_exact | type == "boolean")
+    and (.repo_view_simple_consumer_inspect_command_exact | type == "boolean")
+    and (.repo_view_simple_inspect_outputs_untruncated | type == "boolean")
+    and (.repo_view_deep_command_sequence_exact | type == "boolean")
+    and (.repo_view_deep_dependency_awk_exact | type == "boolean")
     and (.mechanical_navigation_semantics_enforced | type == "boolean")
     and (.repo_view_navigation_semantic_violation_commands | type == "array")
     and all(
@@ -680,6 +686,7 @@ manifest_source="${run_dir_fd_path}/manifest.json"
 manifest=""
 manifest_valid=false
 manifest_selection_valid=false
+legacy_prompt_bindings_valid=false
 target_root=""
 target_commit=""
 target_base_commit=""
@@ -692,6 +699,7 @@ task_selection=""
 variant_selection=""
 selected_tasks=()
 selected_profiles=()
+dependency_snapshot_relatives=()
 if [[ -e "${manifest_source}" ]]; then
   snapshot_input "${manifest_source}" "manifest.json"
   manifest="${input_snapshot}/manifest.json"
@@ -799,6 +807,50 @@ if [[ -e "${manifest_source}" ]]; then
       and (.profiles | type == "array" and length > 0)
       and all(.profiles[]; safe_name)
       and ((.profiles | unique | length) == (.profiles | length))
+      and (
+        .case_prompt_digests
+        | type == "object"
+        and (
+          keys | sort
+          == ([
+            (
+              if $manifest.task_selection == "all" then
+                ["explain", "review"]
+              elif $manifest.task_selection == "deep" then
+                ["deep-explain", "deep-review"]
+              else
+                [$manifest.task_selection]
+              end
+            )[] as $task
+            | "baseline-\($task)",
+              (
+                if $manifest.variant_selection == "baseline" then
+                  empty
+                else
+                  $manifest.profiles[] as $profile
+                  | if $profile == "default" then
+                      "optimized-\($task)"
+                    else
+                      "optimized-\($profile)-\($task)"
+                    end
+                end
+              )
+          ] | sort)
+        )
+        and all(
+          .[];
+          type == "string" and test("^[0-9a-f]{64}$")
+        )
+      )
+      and (
+        .case_prompt_files
+        | type == "object"
+        and (keys | sort) == ($manifest.case_prompt_digests | keys | sort)
+        and all(
+          to_entries[];
+          .value == (.key + ".user-prompt.txt")
+        )
+      )
     )
   ' "${manifest}" >/dev/null 2>&1; then
     manifest_valid=true
@@ -911,9 +963,92 @@ if [[ -e "${manifest_source}" ]]; then
   fi
 fi
 
+if [[ -n "${manifest}" ]] &&
+  jq -e '.dependency_source != null' "${manifest}" >/dev/null 2>&1; then
+  dependency_snapshot_relatives=(
+    dependency-source/manifest.json
+    dependency-source/target-go.mod
+    dependency-source/target-go.sum
+    dependency-source/golang.org/x/time@v0.14.0/rate/rate.go
+    dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go
+  )
+  for dependency_relative in "${dependency_snapshot_relatives[@]}"; do
+    snapshot_input \
+      "${run_dir_fd_path}/${dependency_relative}" \
+      "${dependency_relative}"
+  done
+fi
+
+if "${bind_legacy_judges}" &&
+  "${manifest_selection_valid}" &&
+  ! "${manifest_valid}"; then
+  if ! jq -se '
+    length == 1
+    and (
+      .[0]
+      | . as $manifest
+      | (
+          if .task_selection == "all" then
+            ["explain", "review"]
+          elif .task_selection == "deep" then
+            ["deep-explain", "deep-review"]
+          else
+            [.task_selection]
+          end
+        ) as $tasks
+      | ([
+          $tasks[] as $task
+          | "baseline-\($task)",
+            (
+              if $manifest.variant_selection == "baseline" then
+                empty
+              else
+                $manifest.profiles[] as $profile
+                | if $profile == "default" then
+                    "optimized-\($task)"
+                  else
+                    "optimized-\($profile)-\($task)"
+                  end
+              end
+            )
+        ] | sort) as $cases
+      | (.prompt_digests | type == "object")
+      and ((.prompt_digests | keys | sort) == ($tasks | sort))
+      and all(
+        .prompt_digests[];
+        type == "string" and test("^[0-9a-f]{64}$")
+      )
+      and (.prompt_files | type == "object")
+      and ((.prompt_files | keys | sort) == ($tasks | sort))
+      and all(
+        .prompt_files | to_entries[];
+        .value == ("prompts/" + .key + ".txt")
+      )
+      and (.case_prompt_digests | type == "object")
+      and ((.case_prompt_digests | keys | sort) == $cases)
+      and all(
+        .case_prompt_digests[];
+        type == "string" and test("^[0-9a-f]{64}$")
+      )
+      and (.case_prompt_files | type == "object")
+      and ((.case_prompt_files | keys | sort) == $cases)
+      and all(
+        .case_prompt_files | to_entries[];
+        .value == (.key + ".user-prompt.txt")
+      )
+    )
+  ' "${manifest}" >/dev/null 2>&1; then
+    printf 'legacy judge binding requires exact prompt bindings: %s\n' \
+      "${manifest_source}" >&2
+    exit 1
+  fi
+  legacy_prompt_bindings_valid=true
+fi
+
 profiles_snapshot=""
 profiles_snapshot_source="${run_dir_fd_path}/profiles-snapshot.tsv"
 declare -A rendered_prompt_snapshot_for_task=()
+declare -A case_prompt_snapshot_for_case=()
 if [[ -e "${profiles_snapshot_source}" ]]; then
   snapshot_input "${profiles_snapshot_source}" "profiles-snapshot.tsv"
   profiles_snapshot="${input_snapshot}/profiles-snapshot.tsv"
@@ -935,6 +1070,50 @@ if "${manifest_selection_valid}"; then
       )"
     fi
   done
+fi
+if "${manifest_valid}" || "${legacy_prompt_bindings_valid}"; then
+  while IFS=$'\t' read -r case_name case_prompt_relative; do
+    [[ -n "${case_name}" && -n "${case_prompt_relative}" ]] || continue
+    snapshot_input \
+      "${run_dir_fd_path}/${case_prompt_relative}" \
+      "${case_prompt_relative}"
+    case_prompt_snapshot_for_case["${case_name}"]="$(
+      printf '%s/%s' "${input_snapshot}" "${case_prompt_relative}"
+    )"
+  done < <(
+    jq -r \
+      '.case_prompt_files | to_entries[] | [.key, .value] | @tsv' \
+      "${manifest}"
+  )
+fi
+
+if "${legacy_prompt_bindings_valid}"; then
+  for selected_task in "${selected_tasks[@]}"; do
+    rendered_prompt="${rendered_prompt_snapshot_for_task[${selected_task}]:-}"
+    expected_digest="$(
+      jq -r --arg task "${selected_task}" \
+        '.prompt_digests[$task]' "${manifest}"
+    )"
+    if [[ -z "${rendered_prompt}" ]] ||
+      [[ "$(file_digest "${rendered_prompt}")" != "${expected_digest}" ]]; then
+      printf 'legacy shared prompt is missing or disagrees with manifest: %s\n' \
+        "${selected_task}" >&2
+      exit 1
+    fi
+  done
+  while IFS=$'\t' read -r case_name expected_digest; do
+    case_prompt="${case_prompt_snapshot_for_case[${case_name}]:-}"
+    if [[ -z "${case_prompt}" ]] ||
+      [[ "$(file_digest "${case_prompt}")" != "${expected_digest}" ]]; then
+      printf 'legacy case prompt is missing or disagrees with manifest: %s\n' \
+        "${case_name}" >&2
+      exit 1
+    fi
+  done < <(
+    jq -r \
+      '.case_prompt_digests | to_entries[] | [.key, .value] | @tsv' \
+      "${manifest}"
+  )
 fi
 
 if "${require_strict_inputs}" && ! "${manifest_valid}"; then
@@ -972,6 +1151,19 @@ if "${require_strict_inputs}"; then
       exit 1
     fi
   done
+  while IFS=$'\t' read -r case_name expected_digest; do
+    case_prompt="${case_prompt_snapshot_for_case[${case_name}]:-}"
+    if [[ -z "${case_prompt}" ]] ||
+      [[ "$(file_digest "${case_prompt}")" != "${expected_digest}" ]]; then
+      printf 'case prompt is missing or disagrees with manifest: %s\n' \
+        "${case_name}" >&2
+      exit 1
+    fi
+  done < <(
+    jq -r \
+      '.case_prompt_digests | to_entries[] | [.key, .value] | @tsv' \
+      "${manifest}"
+  )
 fi
 
 generation_config_source="${run_dir_fd_path}/generation-config.json"
@@ -999,6 +1191,8 @@ if "${require_strict_inputs}"; then
         == [
           "auth_source_permission",
           "baseline_developer_instructions",
+          "case_prompt_digests",
+          "case_prompt_files",
           "codex_environment",
           "codex_isolation_flags",
           "feature_flags",
@@ -1073,6 +1267,8 @@ if "${require_strict_inputs}"; then
       )
       and .prompt_files == $run_manifest[0].prompt_files
       and .prompt_digests == $run_manifest[0].prompt_digests
+      and .case_prompt_files == $run_manifest[0].case_prompt_files
+      and .case_prompt_digests == $run_manifest[0].case_prompt_digests
       and .mechanical_navigation_semantics_enforced == true
       and .mechanical_navigation_contract == {
         required_root: "<worktree>",
@@ -1176,6 +1372,24 @@ if "${manifest_valid}"; then
           "${selected_task}" >&2
         exit 1
       fi
+      baseline_case_name="baseline-${selected_task}"
+      baseline_case_prompt_source="${run_dir_fd_path}/baseline-source-${baseline_case_name}.user-prompt.txt"
+      if [[ ! -f "${baseline_case_prompt_source}" ||
+        -L "${baseline_case_prompt_source}" ]]; then
+        printf 'imported baseline exact user prompt is missing: %s\n' \
+          "${baseline_case_prompt_source}" >&2
+        exit 1
+      fi
+      snapshot_input \
+        "${baseline_case_prompt_source}" \
+        "baseline-source-${baseline_case_name}.user-prompt.txt"
+      if ! cmp -s \
+        "${input_snapshot}/baseline-source-${baseline_case_name}.user-prompt.txt" \
+        "${case_prompt_snapshot_for_case[${baseline_case_name}]}"; then
+        printf 'imported baseline exact user prompt disagrees for %s\n' \
+          "${selected_task}" >&2
+        exit 1
+      fi
     done
     if ! jq -se \
       --slurpfile run_manifest "${manifest}" \
@@ -1183,6 +1397,7 @@ if "${manifest_valid}"; then
         length == 1
         and (
           .[0]
+          | . as $source_manifest
           | type == "object"
           and .schema_version == 1
           and (
@@ -1204,7 +1419,10 @@ if "${manifest_valid}"; then
           and (.model | type == "string" and length > 0)
           and (.codex_version | type == "string" and length > 0)
           and (.generation_isolation | type == "string" and length > 0)
-          and .mechanical_navigation_semantics_enforced == true
+          and (
+            .mechanical_navigation_semantics_enforced
+            | type == "boolean"
+          )
           and (
             .generation_config_sha256
             | type == "string"
@@ -1233,6 +1451,22 @@ if "${manifest_valid}"; then
               type == "string" and test("^[0-9a-f]{64}$")
             )
           )
+          and (
+            .case_prompt_files
+            | type == "object"
+            and all(
+              to_entries[];
+              .value == (.key + ".user-prompt.txt")
+            )
+          )
+          and (
+            .case_prompt_digests
+            | type == "object"
+            and all(
+              .[];
+              type == "string" and test("^[0-9a-f]{64}$")
+            )
+          )
           and .target_commit == $run_manifest[0].target_commit
           and .prompt_commit == $run_manifest[0].prompt_commit
           and .base_commit == $run_manifest[0].base_commit
@@ -1240,14 +1474,6 @@ if "${manifest_valid}"; then
           and .model == $run_manifest[0].model
           and .codex_version == $run_manifest[0].codex_version
           and .generation_isolation == $run_manifest[0].generation_isolation
-          and (
-            .mechanical_navigation_semantics_enforced
-            == $run_manifest[0].mechanical_navigation_semantics_enforced
-          )
-          and (
-            .generation_config_sha256
-            == $run_manifest[0].generation_config_sha256
-          )
           and (
             .profiles_snapshot_path
             == $run_manifest[0].profiles_snapshot_path
@@ -1259,16 +1485,64 @@ if "${manifest_valid}"; then
           and .go_version == $run_manifest[0].go_version
           and .prompt_files == $run_manifest[0].prompt_files
           and .prompt_digests == $run_manifest[0].prompt_digests
+          and .case_prompt_files == (
+            $run_manifest[0].case_prompt_files
+            | with_entries(select(.key | startswith("baseline-")))
+          )
+          and .case_prompt_digests == (
+            $run_manifest[0].case_prompt_digests
+            | with_entries(select(.key | startswith("baseline-")))
+          )
         )
       ' "${baseline_source_manifest}" >/dev/null 2>&1; then
       printf 'imported baseline source manifest disagrees with run manifest\n' >&2
       exit 1
     fi
+    baseline_source_generation_config_sha256="$(
+      jq -r '.generation_config_sha256' "${baseline_source_manifest}"
+    )"
     if [[ "$(file_digest "${baseline_source_generation_config}")" != \
-      "${manifest_generation_config_sha256}" ]] ||
-      ! cmp -s \
-        "${baseline_source_generation_config}" \
-        "${generation_config}"; then
+      "${baseline_source_generation_config_sha256}" ]] ||
+      ! jq -e -s \
+        --slurpfile source_manifest "${baseline_source_manifest}" \
+        '
+          length == 2
+          and ($source_manifest | length) == 1
+          and (.[0] | type) == "object"
+          and (.[1] | type) == "object"
+          and (.[0] | keys | sort) == (.[1] | keys | sort)
+          and .[0].generation_isolation
+            == $source_manifest[0].generation_isolation
+          and .[0].profiles_snapshot_path
+            == $source_manifest[0].profiles_snapshot_path
+          and .[0].profiles_snapshot_sha256
+            == $source_manifest[0].profiles_snapshot_sha256
+          and .[0].prompt_files == $source_manifest[0].prompt_files
+          and .[0].prompt_digests == $source_manifest[0].prompt_digests
+          and .[0].case_prompt_files
+            == $source_manifest[0].case_prompt_files
+          and .[0].case_prompt_digests
+            == $source_manifest[0].case_prompt_digests
+          and .[0].mechanical_navigation_semantics_enforced
+            == $source_manifest[0].mechanical_navigation_semantics_enforced
+          and (
+            .[0]
+            | del(
+                .case_prompt_files,
+                .case_prompt_digests,
+                .mechanical_navigation_semantics_enforced
+              )
+          ) == (
+            .[1]
+            | del(
+                .case_prompt_files,
+                .case_prompt_digests,
+                .mechanical_navigation_semantics_enforced
+              )
+          )
+        ' \
+        "${baseline_source_generation_config}" "${generation_config}" \
+        >/dev/null; then
       printf 'imported baseline generation config disagrees with run config\n' >&2
       exit 1
     fi
@@ -1701,6 +1975,12 @@ for metadata_name in \
       "${reanalyzed_dir}/${metadata_name}"
   fi
 done
+for dependency_relative in "${dependency_snapshot_relatives[@]}"; do
+  mkdir -p -- "$(dirname "${reanalyzed_dir}/${dependency_relative}")"
+  cp -- \
+    "${input_snapshot}/${dependency_relative}" \
+    "${reanalyzed_dir}/${dependency_relative}"
+done
 for packet_file in "${packet_files[@]}"; do
   packet_name="$(basename "${packet_file}")"
   cp -- \
@@ -1780,7 +2060,7 @@ done < <(
     sort -u
 )
 
-while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls command_cap cap_exceeded budget_tamper changed_calls find_calls inspect_calls outline_calls bound_violations tool_accounting invocation_accounting repo_view_tool_accounting budget_accounting command_shape_valid first_invocation_changed navigation_semantics_valid mechanical_semantics_enforced; do
+while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls command_cap cap_exceeded budget_tamper changed_calls find_calls inspect_calls outline_calls bound_violations tool_accounting invocation_accounting repo_view_tool_accounting budget_accounting command_shape_valid first_invocation_changed navigation_semantics_valid mechanical_semantics_enforced simple_changed_exact simple_core_exact simple_consumer_exact simple_untruncated deep_sequence_exact deep_dependency_exact; do
   answer_path="${input_snapshot}/${answer_file}"
   jq -n \
     --arg name "${name}" \
@@ -1804,6 +2084,12 @@ while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls co
     --argjson first_invocation_changed "${first_invocation_changed}" \
     --argjson navigation_semantics_valid "${navigation_semantics_valid}" \
     --argjson mechanical_semantics_enforced "${mechanical_semantics_enforced}" \
+    --argjson simple_changed_exact "${simple_changed_exact}" \
+    --argjson simple_core_exact "${simple_core_exact}" \
+    --argjson simple_consumer_exact "${simple_consumer_exact}" \
+    --argjson simple_untruncated "${simple_untruncated}" \
+    --argjson deep_sequence_exact "${deep_sequence_exact}" \
+    --argjson deep_dependency_exact "${deep_dependency_exact}" \
     --rawfile answer "${answer_path}" \
     --slurpfile rubric "${rubric}" \
     '
@@ -1815,11 +2101,11 @@ while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls co
             passed: (
               (
                 $criterion.all_of
-                | all(. as $pattern | $answer | test($pattern; "is"))
+                | all(. as $pattern | $answer | test($pattern; "im"))
               )
               and (
                 ($criterion.none_of // [])
-                | all(. as $pattern | ($answer | test($pattern; "is") | not))
+                | all(. as $pattern | ($answer | test($pattern; "im") | not))
               )
             )
           }
@@ -1849,13 +2135,32 @@ while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls co
             and $bound_violations == 0
             and $budget_tamper == 0
             and (
+              ($task != "explain" and $task != "review")
+              or (
+                $simple_changed_exact
+                and $simple_core_exact
+                and $simple_consumer_exact
+                and $simple_untruncated
+              )
+            )
+            and (
               (($task | startswith("deep-")) | not)
               or (
-                $find_calls >= 1
-                and ($inspect_calls + $outline_calls) >= 1
-                and $command_cap > 0
-                and ($cap_exceeded | not)
-                and $repo_view_calls <= $command_cap
+                if $profile == "investigative-verified-high" then
+                  $deep_sequence_exact
+                  and $deep_dependency_exact
+                  and $repo_view_calls == 8
+                  and $changed_calls == 1
+                  and $find_calls == 2
+                  and $inspect_calls == 4
+                  and $outline_calls == 1
+                else
+                  $find_calls >= 1
+                  and ($inspect_calls + $outline_calls) >= 1
+                  and $command_cap > 0
+                  and ($cap_exceeded | not)
+                  and $repo_view_calls <= $command_cap
+                end
               )
             )
           )
@@ -1893,7 +2198,17 @@ while IFS=$'\t' read -r name task variant profile answer_file repo_view_calls co
             find: $find_calls,
             inspect: $inspect_calls,
             outline: $outline_calls,
-            bound_violations: $bound_violations
+            bound_violations: $bound_violations,
+            simple_contract: {
+              changed_command_exact: $simple_changed_exact,
+              core_inspect_command_exact: $simple_core_exact,
+              consumer_inspect_command_exact: $simple_consumer_exact,
+              inspect_outputs_untruncated: $simple_untruncated
+            },
+            deep_contract: {
+              command_sequence_exact: $deep_sequence_exact,
+              dependency_awk_exact: $deep_dependency_exact
+            }
           },
           criteria: $criteria,
           passed_weight: ([$criteria[] | select(.passed) | .weight] | add // 0),
@@ -1935,7 +2250,13 @@ done < <(
         .repo_view_command_shape_valid,
         .repo_view_first_invocation_changed,
         .repo_view_navigation_semantics_valid,
-        .mechanical_navigation_semantics_enforced
+        .mechanical_navigation_semantics_enforced,
+        (.repo_view_simple_changed_command_exact // false),
+        (.repo_view_simple_core_inspect_command_exact // false),
+        (.repo_view_simple_consumer_inspect_command_exact // false),
+        (.repo_view_simple_inspect_outputs_untruncated // false),
+        (.repo_view_deep_command_sequence_exact // false),
+        (.repo_view_deep_dependency_awk_exact // false)
       ]
     | @tsv
   ' "${metrics}"
@@ -2593,25 +2914,31 @@ render_judge_prompt() {
   local prompt_target_root="$1"
   local prompt_target_commit="$2"
   local prompt_rubric="$3"
-  local prompt_baseline_answer="$4"
-  local prompt_baseline_transcript="$5"
-  local prompt_candidate_list="$6"
-  local prompt_task="$7"
-  local prompt_baseline_name="$8"
-  local prompt_candidate_names="$9"
+  local prompt_task_prompt="$4"
+  local prompt_baseline_user_prompt="$5"
+  local prompt_baseline_answer="$6"
+  local prompt_baseline_transcript="$7"
+  local prompt_candidate_list="$8"
+  local prompt_task="$9"
+  local prompt_baseline_name="${10}"
+  local prompt_candidate_names="${11}"
 
   cat <<EOF
-Act as an independent code-review quality evaluator. The authoritative source checkout is ${prompt_target_root} at commit ${prompt_target_commit}. Read the task rubric at ${prompt_rubric}, the baseline answer at ${prompt_baseline_answer}, its raw transcript at ${prompt_baseline_transcript}, and each candidate's answer, transcript, and changed packet:
+Act as an independent code-review quality evaluator. The authoritative source checkout is ${prompt_target_root} at commit ${prompt_target_commit}. Read the shared task prompt at ${prompt_task_prompt}, the task rubric at ${prompt_rubric}, the baseline's exact user prompt at ${prompt_baseline_user_prompt}, the baseline answer at ${prompt_baseline_answer}, its raw transcript at ${prompt_baseline_transcript}, and each candidate's exact user prompt, answer, transcript, and changed packet:
 ${prompt_candidate_list}
 Independently inspect any source in the authoritative checkout needed to verify claims. Each changed packet is that candidate profile's navigation output, not the evaluator's sole ground truth. A claim supported by the source or its answer's raw transcript is grounded even when it is absent from its changed packet. Validate claims about executed commands, tests, or sandbox failures from that answer's transcript. Do not treat a different checkout prefix as broken when the linked file exists at the same commit.
 
 Mandatory evaluator input protocol:
-1. Read the rubric, baseline answer, every candidate changed packet, each candidate answer, and transcripts in separate commands. Never concatenate multiple evaluator inputs into one command output. Issue exactly one shell command at a time and wait for its completed result before issuing the next; parallel command execution invalidates the audit.
+1. Read the shared task prompt, rubric, baseline exact user prompt, baseline answer, every candidate exact user prompt, changed packet, answer, and transcript in separate commands. Never concatenate multiple evaluator inputs into one command output. Issue exactly one shell command at a time and wait for its completed result before issuing the next; parallel command execution invalidates the audit.
 2. Read each baseline and candidate answer through EOF before scoring. Use a line count and bounded chunks when needed, and verify the final chunk was seen.
 3. If any command output is truncated, issue narrower reads for the missing content before drawing a conclusion.
 4. Before reporting a critical omission, unsupported negative claim, material contradiction, or baseline point omitted, search the candidate answer directly for each supposedly missing concept and read the matching section. Do not infer omission from an earlier truncated read.
 
-Score every answer against the authoritative source and requested ${prompt_task} task. The baseline is only a comparator, not ground truth. Do not reward verbosity. Penalize factual errors, genuinely unsupported claims, missed required behavior or findings, and failure to answer the task. For each candidate, also compare behavior to baseline: core_conclusion_matches_baseline is true when the main technical conclusion and finding set align; material_contradictions contains only candidate claims contradicted by authoritative source or by the candidate's own answer/transcript; baseline_material_points_omitted contains only correct material baseline content the candidate loses without equally strong substitute coverage; candidate_material_additions lists material correct content the candidate adds. A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction. Set not_worse_than_baseline true only when the candidate has no material correctness, completeness, grounding, or task-adherence regression. Output task exactly ${prompt_task}, baseline name exactly ${prompt_baseline_name}, and exactly these candidate names: ${prompt_candidate_names}. Every score must be an integer from 1 through 5; never emit zero placeholder scores or omit a candidate. Return JSON matching the provided schema. Read only and do not modify files.
+The shared task prompt and rubric define common answer scope. Each case's exact user prompt governs only that case's task adherence and claims about what was requested. Never apply an optimized profile's navigation constraints or answer instructions to the baseline or to another profile.
+
+Score every answer absolutely against the authoritative source, shared task prompt, rubric, and its own exact user prompt for the requested ${prompt_task} task. Assign correctness, completeness, grounding, and task-adherence scores against those requirements, never against the baseline's length or exploratory breadth. The baseline is only a comparator, not ground truth. Do not reward verbosity. A shorter answer can receive the same completeness score when it fully covers the requested scope. Penalize factual errors, genuinely unsupported claims, missed required behavior or findings, and failure to answer the task.
+
+For each candidate, also compare behavior to baseline: core_conclusion_matches_baseline is true when the main technical conclusion and finding set align; material_contradictions contains only candidate claims contradicted by authoritative source or by the candidate's own answer/transcript; baseline_material_points_omitted contains only correct baseline content that is required by the shared task prompt or rubric, or is necessary to make the candidate's own core conclusion correct and adequately grounded; candidate_material_additions lists material correct content the candidate adds. Do not count extra examples, optional breadth, exhaustive unaffected-method lists, or deeper call-chain tracing beyond an accurately stated evidence boundary as baseline material points omitted. Treat an explicit and accurate construction-only limitation as satisfying a construction-versus-consumption distinction unless the shared task prompt or rubric expressly requires a proven consuming chain. A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction. Set not_worse_than_baseline true only when the candidate has no material correctness, completeness, grounding, or task-adherence regression. Output task exactly ${prompt_task}, baseline name exactly ${prompt_baseline_name}, and exactly these candidate names: ${prompt_candidate_names}. Every score must be an integer from 1 through 5; never emit zero placeholder scores or omit a candidate. Return JSON matching the provided schema. Read only and do not modify files.
 EOF
 }
 
@@ -2643,12 +2970,14 @@ judge_input_digest() {
   local expected_candidates="$6"
   local rubric_file="$7"
   local schema_file="$8"
-  local baseline_answer_file="$9"
-  local baseline_transcript_file="${10}"
-  shift 10
-  local answer_file candidate_index input_hash packet_file transcript_file
+  local task_prompt_file="$9"
+  local baseline_user_prompt_file="${10}"
+  local baseline_answer_file="${11}"
+  local baseline_transcript_file="${12}"
+  shift 12
+  local answer_file candidate_index candidate_user_prompt_file input_hash packet_file transcript_file
 
-  if (( $# % 3 != 0 )); then
+  if (( $# % 4 != 0 )); then
     return 1
   fi
 
@@ -2674,6 +3003,10 @@ judge_input_digest() {
     printf 'json-input\0quality-rubric\0%s\0' "${input_hash}"
     input_hash="$(json_digest "${schema_file}")"
     printf 'json-input\0quality-output-schema\0%s\0' "${input_hash}"
+    input_hash="$(file_digest "${task_prompt_file}")"
+    printf 'file-input\0task-prompt\0%s\0' "${input_hash}"
+    input_hash="$(file_digest "${baseline_user_prompt_file}")"
+    printf 'file-input\0baseline-user-prompt\0%s\0' "${input_hash}"
     input_hash="$(file_digest "${baseline_answer_file}")"
     printf 'file-input\0baseline-answer\0%s\0' "${input_hash}"
     input_hash="$(file_digest "${baseline_transcript_file}")"
@@ -2681,10 +3014,14 @@ judge_input_digest() {
 
     candidate_index=0
     while [[ $# -gt 0 ]]; do
-      answer_file="$1"
-      transcript_file="$2"
-      packet_file="$3"
-      shift 3
+      candidate_user_prompt_file="$1"
+      answer_file="$2"
+      transcript_file="$3"
+      packet_file="$4"
+      shift 4
+      input_hash="$(file_digest "${candidate_user_prompt_file}")"
+      printf 'file-input\0candidate-user-prompt-%s\0%s\0' \
+        "${candidate_index}" "${input_hash}"
       input_hash="$(file_digest "${answer_file}")"
       printf 'file-input\0candidate-answer-%s\0%s\0' \
         "${candidate_index}" "${input_hash}"
@@ -2708,12 +3045,14 @@ legacy_judge_input_digest() {
   local expected_candidates="$6"
   local rubric_file="$7"
   local schema_file="$8"
-  local baseline_answer_file="$9"
-  local baseline_transcript_file="${10}"
-  shift 10
-  local answer_file candidate_index input_hash packet_file transcript_file
+  local task_prompt_file="$9"
+  local baseline_user_prompt_file="${10}"
+  local baseline_answer_file="${11}"
+  local baseline_transcript_file="${12}"
+  shift 12
+  local answer_file candidate_index candidate_user_prompt_file input_hash packet_file transcript_file
 
-  if (( $# % 3 != 0 )); then
+  if (( $# % 4 != 0 )); then
     return 1
   fi
 
@@ -2735,6 +3074,10 @@ legacy_judge_input_digest() {
     printf 'json-input\0quality-rubric\0%s\0' "${input_hash}"
     input_hash="$(json_digest "${schema_file}")"
     printf 'json-input\0quality-output-schema\0%s\0' "${input_hash}"
+    input_hash="$(file_digest "${task_prompt_file}")"
+    printf 'file-input\0task-prompt\0%s\0' "${input_hash}"
+    input_hash="$(file_digest "${baseline_user_prompt_file}")"
+    printf 'file-input\0baseline-user-prompt\0%s\0' "${input_hash}"
     input_hash="$(file_digest "${baseline_answer_file}")"
     printf 'file-input\0baseline-answer\0%s\0' "${input_hash}"
     input_hash="$(file_digest "${baseline_transcript_file}")"
@@ -2742,10 +3085,14 @@ legacy_judge_input_digest() {
 
     candidate_index=0
     while [[ $# -gt 0 ]]; do
-      answer_file="$1"
-      transcript_file="$2"
-      packet_file="$3"
-      shift 3
+      candidate_user_prompt_file="$1"
+      answer_file="$2"
+      transcript_file="$3"
+      packet_file="$4"
+      shift 4
+      input_hash="$(file_digest "${candidate_user_prompt_file}")"
+      printf 'file-input\0candidate-user-prompt-%s\0%s\0' \
+        "${candidate_index}" "${input_hash}"
       input_hash="$(file_digest "${answer_file}")"
       printf 'file-input\0candidate-answer-%s\0%s\0' \
         "${candidate_index}" "${input_hash}"
@@ -3032,7 +3379,10 @@ snapshot_judge_run() {
 }
 
 for task in "${evaluated_tasks[@]}"; do
-  baseline_answer="${input_snapshot}/answers/baseline-${task}.md"
+  task_prompt_file="${rendered_prompt_snapshot_for_task[${task}]:-}"
+  baseline_name="baseline-${task}"
+  baseline_user_prompt="${case_prompt_snapshot_for_case[${baseline_name}]:-}"
+  baseline_answer="${input_snapshot}/answers/${baseline_name}.md"
   [[ -f "${baseline_answer}" ]] || continue
   baseline_transcript="${input_snapshot}/baseline-${task}.jsonl"
   judge_inputs_complete=true
@@ -3044,9 +3394,28 @@ for task in "${evaluated_tasks[@]}"; do
   if [[ ! -s "${baseline_transcript}" ]]; then
     judge_inputs_complete=false
   fi
+  if [[ -z "${task_prompt_file}" || ! -s "${task_prompt_file}" ]]; then
+    judge_inputs_complete=false
+  fi
+  if [[ -z "${baseline_user_prompt}" || ! -s "${baseline_user_prompt}" ]]; then
+    judge_inputs_complete=false
+  fi
   if { [[ "${judge_repeats}" -gt 0 ]] || "${bind_legacy_judges}"; } &&
     [[ ! -s "${baseline_transcript}" ]]; then
     printf 'missing baseline transcript: %s\n' "${baseline_transcript}" >&2
+    exit 1
+  fi
+  if { [[ "${judge_repeats}" -gt 0 ]] || "${bind_legacy_judges}"; } &&
+    { [[ -z "${baseline_user_prompt}" ]] ||
+      [[ ! -s "${baseline_user_prompt}" ]]; }; then
+    printf 'missing exact baseline user prompt for judge task: %s\n' \
+      "${task}" >&2
+    exit 1
+  fi
+  if { [[ "${judge_repeats}" -gt 0 ]] || "${bind_legacy_judges}"; } &&
+    { [[ -z "${task_prompt_file}" ]] ||
+      [[ ! -s "${task_prompt_file}" ]]; }; then
+    printf 'missing shared task prompt for judge task: %s\n' "${task}" >&2
     exit 1
   fi
   mapfile -t candidate_records < <(
@@ -3076,16 +3445,26 @@ for task in "${evaluated_tasks[@]}"; do
       <<< "${candidate_record}"
     answer="${input_snapshot}/${answer_file}"
     candidate_names+=("${candidate_name}")
+    candidate_user_prompt="${case_prompt_snapshot_for_case[${candidate_name}]:-}"
     candidate_transcript="${input_snapshot}/${candidate_name}.jsonl"
     candidate_packet_name="${packet_for_profile[${candidate_profile}]:-}"
     candidate_packet=""
     if [[ -n "${candidate_packet_name}" ]]; then
       candidate_packet="${input_snapshot}/packets/${candidate_packet_name}"
     fi
-    if [[ ! -s "${answer}" ||
+    if [[ -z "${candidate_user_prompt}" ||
+      ! -s "${candidate_user_prompt}" ||
+      ! -s "${answer}" ||
       ! -s "${candidate_transcript}" ||
       -z "${candidate_packet}" ]]; then
       judge_inputs_complete=false
+    fi
+    if { [[ "${judge_repeats}" -gt 0 ]] || "${bind_legacy_judges}"; } &&
+      { [[ -z "${candidate_user_prompt}" ]] ||
+        [[ ! -s "${candidate_user_prompt}" ]]; }; then
+      printf 'missing exact candidate user prompt: %s\n' \
+        "${candidate_name}" >&2
+      exit 1
     fi
     if { [[ "${judge_repeats}" -gt 0 ]] || "${bind_legacy_judges}"; } &&
       [[ ! -s "${answer}" ]]; then
@@ -3105,12 +3484,13 @@ for task in "${evaluated_tasks[@]}"; do
       exit 1
     fi
     candidate_input_files+=(
+      "${candidate_user_prompt}"
       "${answer}"
       "${candidate_transcript}"
       "${candidate_packet}"
     )
-    candidate_list+="- ${candidate_name}: answer=${answer}; transcript=${candidate_transcript}; changed_packet=${candidate_packet}"$'\n'
-    candidate_semantic_list+="- ${candidate_name}: answer=<candidate-answer-${candidate_index}>; transcript=<candidate-transcript-${candidate_index}>; changed_packet=<candidate-packet-${candidate_index}>"$'\n'
+    candidate_list+="- ${candidate_name}: exact_user_prompt=${candidate_user_prompt}; answer=${answer}; transcript=${candidate_transcript}; changed_packet=${candidate_packet}"$'\n'
+    candidate_semantic_list+="- ${candidate_name}: exact_user_prompt=<candidate-user-prompt-${candidate_index}>; answer=<candidate-answer-${candidate_index}>; transcript=<candidate-transcript-${candidate_index}>; changed_packet=<candidate-packet-${candidate_index}>"$'\n'
     candidate_index=$((candidate_index + 1))
   done
   candidate_names_json="$(
@@ -3124,11 +3504,13 @@ for task in "${evaluated_tasks[@]}"; do
         "${judge_source_root:-${target_root}}" \
         "${target_commit}" \
         "${rubric}" \
+        "${task_prompt_file}" \
+        "${baseline_user_prompt}" \
         "${baseline_answer}" \
         "${baseline_transcript}" \
         "${candidate_list}" \
         "${task}" \
-        "baseline-${task}" \
+        "${baseline_name}" \
         "${candidate_names[*]}"
     )"
     prompt_semantics="$(
@@ -3136,11 +3518,13 @@ for task in "${evaluated_tasks[@]}"; do
         "<target-root>" \
         "${target_commit}" \
         "<quality-rubric>" \
+        "<task-prompt>" \
+        "<baseline-user-prompt>" \
         "<baseline-answer>" \
         "<baseline-transcript>" \
         "${candidate_semantic_list}" \
         "${task}" \
-        "baseline-${task}" \
+        "${baseline_name}" \
         "${candidate_names[*]}"
     )"
   fi
@@ -3172,10 +3556,12 @@ for task in "${evaluated_tasks[@]}"; do
           "${prompt_semantics}" \
           "${target_commit}" \
           "${task}" \
-          "baseline-${task}" \
+          "${baseline_name}" \
           "${candidate_names_json}" \
           "${rubric}" \
           "${output_schema}" \
+          "${task_prompt_file}" \
+          "${baseline_user_prompt}" \
           "${baseline_answer}" \
           "${baseline_transcript}" \
           "${candidate_input_files[@]}"
@@ -3218,10 +3604,12 @@ for task in "${evaluated_tasks[@]}"; do
             "${prompt_semantics}" \
             "${target_commit}" \
             "${task}" \
-            "baseline-${task}" \
+            "${baseline_name}" \
             "${candidate_names_json}" \
             "${rubric}" \
             "${output_schema}" \
+            "${task_prompt_file}" \
+            "${baseline_user_prompt}" \
             "${baseline_answer}" \
             "${baseline_transcript}" \
             "${candidate_input_files[@]}"
@@ -3263,7 +3651,7 @@ for task in "${evaluated_tasks[@]}"; do
         "${parked_judge_exit}" \
         "${expected_judge_digest}" \
         "${task}" \
-        "baseline-${task}" \
+        "${baseline_name}" \
         "${candidate_names_json}"; then
         continue
       fi
@@ -3291,6 +3679,8 @@ for task in "${evaluated_tasks[@]}"; do
         "${candidate_names_json}" \
         "${rubric}" \
         "${output_schema}" \
+        "${task_prompt_file}" \
+        "${baseline_user_prompt}" \
         "${baseline_answer}" \
         "${baseline_transcript}" \
         "${candidate_input_files[@]}"
@@ -3865,6 +4255,9 @@ fi
 if [[ -f "${input_snapshot}/run-complete.json" ]]; then
   record_bundle_input "run-complete.json" "run-complete.json"
 fi
+for dependency_relative in "${dependency_snapshot_relatives[@]}"; do
+  record_bundle_input "${dependency_relative}" "${dependency_relative}"
+done
 if [[ -f "${input_snapshot}/profiles-snapshot.tsv" ]]; then
   record_bundle_input "profiles-snapshot.tsv" "profiles-snapshot.tsv"
 fi
@@ -3882,6 +4275,16 @@ for selected_task in "${selected_tasks[@]}"; do
       "${rendered_prompt_relative}"
   fi
 done
+if "${manifest_valid}"; then
+  while IFS= read -r case_prompt_relative; do
+    [[ -n "${case_prompt_relative}" ]] || continue
+    if [[ -f "${input_snapshot}/${case_prompt_relative}" ]]; then
+      record_bundle_input \
+        "${case_prompt_relative}" \
+        "${case_prompt_relative}"
+    fi
+  done < <(jq -r '.case_prompt_files[]' "${manifest}" | LC_ALL=C sort)
+fi
 if [[ -f "${input_snapshot}/baseline-source-manifest.json" ]]; then
   record_bundle_input \
     "baseline-source-manifest.json" \
@@ -3903,6 +4306,13 @@ for selected_task in "${selected_tasks[@]}"; do
     record_bundle_input \
       "baseline-source-prompts/${selected_task}.txt" \
       "baseline-source-prompts/${selected_task}.txt"
+  fi
+  baseline_case_name="baseline-${selected_task}"
+  if [[ -f \
+    "${input_snapshot}/baseline-source-${baseline_case_name}.user-prompt.txt" ]]; then
+    record_bundle_input \
+      "baseline-source-${baseline_case_name}.user-prompt.txt" \
+      "baseline-source-${baseline_case_name}.user-prompt.txt"
   fi
 done
 while IFS= read -r name; do

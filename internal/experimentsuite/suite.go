@@ -139,6 +139,8 @@ type EvidenceMetric struct {
 	JudgeBaselinePointsOmitted    int        `json:"judge_baseline_points_omitted"`
 	JudgeUnsupportedClaims        int        `json:"judge_unsupported_claims"`
 	RepoViewFirstChanged          bool       `json:"repo_view_first_invocation_changed"`
+	RepoViewDeepSequenceExact     bool       `json:"repo_view_deep_command_sequence_exact"`
+	RepoViewDeepDependencyExact   bool       `json:"repo_view_deep_dependency_awk_exact"`
 	JudgeCoreConclusionMatch      bool       `json:"judge_core_conclusion_match"`
 	JudgeNotWorse                 bool       `json:"judge_not_worse"`
 	Completed                     bool       `json:"completed"`
@@ -557,10 +559,17 @@ var sourceChecksumArtifacts = []string{
 	"repo-view-source.tar.gz",
 }
 
+var dependencySourceChecksumArtifacts = []string{
+	"dependency-source/manifest.json",
+	"dependency-source/target-go.mod",
+	"dependency-source/target-go.sum",
+	"dependency-source/golang.org/x/time@v0.14.0/rate/rate.go",
+	"dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go",
+}
+
 func validateSourceChecksums(runDir string, trackedDigest ...string) CheckResult {
 	result := CheckResult{
 		Description: "source artifacts match source-SHA256SUMS",
-		Expected:    append([]string(nil), sourceChecksumArtifacts...),
 	}
 	checksumPath := filepath.Join(runDir, "source-SHA256SUMS")
 	checksumBytes, err := readRegularSnapshot(checksumPath)
@@ -578,7 +587,7 @@ func validateSourceChecksums(runDir string, trackedDigest ...string) CheckResult
 		}
 	}
 
-	expected := make(map[string]string, len(sourceChecksumArtifacts))
+	expected := make(map[string]string, len(sourceChecksumArtifacts)+len(dependencySourceChecksumArtifacts))
 	var problems []string
 	scanner := bufio.NewScanner(strings.NewReader(string(checksumBytes)))
 	for lineNumber := 1; scanner.Scan(); lineNumber++ {
@@ -612,8 +621,29 @@ func validateSourceChecksums(runDir string, trackedDigest ...string) CheckResult
 		problems = append(problems, "read source-SHA256SUMS: "+err.Error())
 	}
 
-	actual := make(map[string]string, len(sourceChecksumArtifacts))
-	for _, name := range sourceChecksumArtifacts {
+	requiredArtifacts := append([]string(nil), sourceChecksumArtifacts...)
+	dependencySnapshotDeclared := false
+	if manifestBytes, err := readRegularSnapshot(filepath.Join(runDir, "manifest.json")); err == nil {
+		var manifestFields map[string]json.RawMessage
+		if json.Unmarshal(manifestBytes, &manifestFields) == nil {
+			if raw, ok := manifestFields["dependency_source"]; ok &&
+				string(bytes.TrimSpace(raw)) != "null" {
+				dependencySnapshotDeclared = true
+			}
+		}
+	}
+	for _, name := range dependencySourceChecksumArtifacts {
+		if _, ok := expected[name]; ok {
+			dependencySnapshotDeclared = true
+		}
+	}
+	if dependencySnapshotDeclared {
+		requiredArtifacts = append(requiredArtifacts, dependencySourceChecksumArtifacts...)
+	}
+	result.Expected = append([]string(nil), requiredArtifacts...)
+
+	actual := make(map[string]string, len(requiredArtifacts))
+	for _, name := range requiredArtifacts {
 		expectedDigest, ok := expected[name]
 		if !ok {
 			problems = append(problems, "missing checksum entry for "+name)
@@ -811,12 +841,19 @@ func sourceArtifactName(recordedPath string) (string, error) {
 	clean := filepath.Clean(path)
 	// Older evidence recorded either the source run's absolute path or a path
 	// beneath a relative --evidence-root, including parent-relative roots.
-	// Promotion relocates the files. The recorded path is never opened, so
-	// resolve only its clean basename and open that allowed name inside runDir.
+	// Promotion relocates the files. The recorded path is never opened: resolve
+	// core artifacts by basename and dependency artifacts by an exact allowed
+	// suffix, then open only that fixed name inside runDir.
 	path = filepath.Base(clean)
 	for _, allowed := range sourceChecksumArtifacts {
 		if path == allowed {
 			return path, nil
+		}
+	}
+	cleanSlash := filepath.ToSlash(clean)
+	for _, allowed := range dependencySourceChecksumArtifacts {
+		if cleanSlash == allowed || strings.HasSuffix(cleanSlash, "/"+allowed) {
+			return allowed, nil
 		}
 	}
 	return "", fmt.Errorf("unexpected source artifact %q", recordedPath)
@@ -901,6 +938,8 @@ type qualityAnalysisEnvironment struct {
 type qualityGenerationConfig struct {
 	PromptFiles                  map[string]string `json:"prompt_files"`
 	PromptDigests                map[string]string `json:"prompt_digests"`
+	CasePromptFiles              map[string]string `json:"case_prompt_files"`
+	CasePromptDigests            map[string]string `json:"case_prompt_digests"`
 	MechanicalNavigationContract struct {
 		RequiredRoot           string `json:"required_root"`
 		RequiredBaseCommit     string `json:"required_base_commit"`
@@ -918,6 +957,15 @@ type qualityGenerationConfig struct {
 	CodexIsolationFlags          []string `json:"codex_isolation_flags"`
 	FeatureFlags                 []string `json:"feature_flags"`
 	MechanicalNavigationEnforced bool     `json:"mechanical_navigation_semantics_enforced"`
+}
+
+func sharedQualityGenerationConfig(
+	config qualityGenerationConfig,
+) qualityGenerationConfig {
+	config.CasePromptFiles = nil
+	config.CasePromptDigests = nil
+	config.MechanicalNavigationEnforced = false
+	return config
 }
 
 func readQualityAggregate(
@@ -1129,7 +1177,7 @@ func validateQualityInputCommitment(commitment qualityInputCommitment) error {
 	}
 	if commitment.Validation.MetricsSchemaVersion != 2 ||
 		commitment.Validation.MetricsFormula != qualityMetricsFormula ||
-		commitment.Validation.JudgeCacheSchema != 6 ||
+		commitment.Validation.JudgeCacheSchema != 8 ||
 		commitment.Validation.JudgeRepeats < 0 {
 		return fmt.Errorf("quality input commitment has incompatible validation semantics")
 	}
@@ -1463,7 +1511,7 @@ func validateMaterialQualityInputs(
 		); err != nil {
 			return fmt.Errorf("decode generation-config.json fields: %w", err)
 		}
-		if len(generationConfigFields) != 13 ||
+		if len(generationConfigFields) != 15 ||
 			generationConfig.GenerationIsolation != qualityGenerationIsolation ||
 			generationConfig.DeveloperInstructions != qualityNoCollaboration ||
 			!reflect.DeepEqual(
@@ -1509,6 +1557,9 @@ func validateMaterialQualityInputs(
 			len(generationConfig.PromptFiles) == 0 ||
 			len(generationConfig.PromptFiles) !=
 				len(generationConfig.PromptDigests) ||
+			len(generationConfig.CasePromptFiles) == 0 ||
+			len(generationConfig.CasePromptFiles) !=
+				len(generationConfig.CasePromptDigests) ||
 			!generationConfig.MechanicalNavigationEnforced ||
 			generationConfig.MechanicalNavigationContract.RequiredRoot !=
 				"<worktree>" ||
@@ -1560,6 +1611,23 @@ func validateMaterialQualityInputs(
 				)
 			}
 		}
+		for name, relative := range generationConfig.CasePromptFiles {
+			if relative != name+".user-prompt.txt" ||
+				!validSuiteSlug(name) ||
+				!validSHA256Digest(generationConfig.CasePromptDigests[name]) {
+				return fmt.Errorf(
+					"generation-config.json has an invalid case prompt binding",
+				)
+			}
+			content, ok := snapshot.inputs[relative]
+			if !ok ||
+				sha256Bytes(content) != generationConfig.CasePromptDigests[name] {
+				return fmt.Errorf(
+					"strict quality input omits case prompt %s",
+					name,
+				)
+			}
+		}
 		runCompleteBytes, ok := snapshot.inputs["run-complete.json"]
 		if !ok {
 			return fmt.Errorf(
@@ -1591,6 +1659,8 @@ func validateMaterialQualityInputs(
 			BaselineFrom           *string           `json:"baseline_from"`
 			PromptDigests          map[string]string `json:"prompt_digests"`
 			PromptFiles            map[string]string `json:"prompt_files"`
+			CasePromptDigests      map[string]string `json:"case_prompt_digests"`
+			CasePromptFiles        map[string]string `json:"case_prompt_files"`
 			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
 			VariantSelection       string            `json:"variant_selection"`
 			GenerationIsolation    string            `json:"generation_isolation"`
@@ -1646,6 +1716,14 @@ func validateMaterialQualityInputs(
 				!reflect.DeepEqual(
 					manifest.PromptDigests,
 					generationConfig.PromptDigests,
+				) ||
+				!reflect.DeepEqual(
+					manifest.CasePromptFiles,
+					generationConfig.CasePromptFiles,
+				) ||
+				!reflect.DeepEqual(
+					manifest.CasePromptDigests,
+					generationConfig.CasePromptDigests,
 				) {
 				return fmt.Errorf(
 					"snapshotted manifest disagrees with bound profile or prompt inputs",
@@ -1680,6 +1758,33 @@ func validateMaterialQualityInputs(
 				if !validSHA256Digest(manifest.PromptDigests[task]) {
 					return fmt.Errorf(
 						"snapshotted manifest has the wrong prompt digest set",
+					)
+				}
+			}
+			expectedCasePrompts := make(map[string]bool)
+			for _, task := range expectedPromptTasks {
+				expectedCasePrompts["baseline-"+task] = true
+				if manifest.VariantSelection != "baseline" {
+					for _, profile := range manifest.Profiles {
+						name := "optimized-" + profile + "-" + task
+						if profile == "default" {
+							name = "optimized-" + task
+						}
+						expectedCasePrompts[name] = true
+					}
+				}
+			}
+			if len(manifest.CasePromptFiles) != len(expectedCasePrompts) ||
+				len(manifest.CasePromptDigests) != len(expectedCasePrompts) {
+				return fmt.Errorf(
+					"snapshotted manifest has the wrong case prompt set",
+				)
+			}
+			for name := range expectedCasePrompts {
+				if manifest.CasePromptFiles[name] != name+".user-prompt.txt" ||
+					!validSHA256Digest(manifest.CasePromptDigests[name]) {
+					return fmt.Errorf(
+						"snapshotted manifest has the wrong case prompt set",
 					)
 				}
 			}
@@ -1720,6 +1825,8 @@ func validateMaterialQualityInputs(
 			var baselineManifest struct {
 				PromptFiles            map[string]string `json:"prompt_files"`
 				PromptDigests          map[string]string `json:"prompt_digests"`
+				CasePromptFiles        map[string]string `json:"case_prompt_files"`
+				CasePromptDigests      map[string]string `json:"case_prompt_digests"`
 				ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
 				ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
 				GenerationConfigSHA256 string            `json:"generation_config_sha256"`
@@ -1743,14 +1850,10 @@ func validateMaterialQualityInputs(
 			if baselineManifest.SchemaVersion != 1 ||
 				baselineManifest.GenerationIsolation !=
 					manifest.GenerationIsolation ||
-				baselineManifest.GenerationConfigSHA256 !=
-					manifest.GenerationConfigSHA256 ||
 				baselineManifest.ProfilesSnapshotPath !=
 					manifest.ProfilesSnapshotPath ||
 				baselineManifest.ProfilesSnapshotSHA256 !=
 					manifest.ProfilesSnapshotSHA256 ||
-				baselineManifest.MechanicalNavigation !=
-					manifest.MechanicalNavigation ||
 				!reflect.DeepEqual(
 					baselineManifest.PromptFiles,
 					manifest.PromptFiles,
@@ -1770,6 +1873,27 @@ func validateMaterialQualityInputs(
 					"baseline source manifest disagrees with quality manifest",
 				)
 			}
+			expectedBaselinePromptFiles := make(map[string]string)
+			expectedBaselinePromptDigests := make(map[string]string)
+			for name, relative := range manifest.CasePromptFiles {
+				if !strings.HasPrefix(name, "baseline-") {
+					continue
+				}
+				expectedBaselinePromptFiles[name] = relative
+				expectedBaselinePromptDigests[name] =
+					manifest.CasePromptDigests[name]
+			}
+			if !reflect.DeepEqual(
+				baselineManifest.CasePromptFiles,
+				expectedBaselinePromptFiles,
+			) || !reflect.DeepEqual(
+				baselineManifest.CasePromptDigests,
+				expectedBaselinePromptDigests,
+			) {
+				return fmt.Errorf(
+					"baseline source case prompt set disagrees with quality run",
+				)
+			}
 			baselineConfigBytes, ok :=
 				snapshot.inputs["baseline-source-generation-config.json"]
 			if !ok {
@@ -1777,9 +1901,63 @@ func validateMaterialQualityInputs(
 					"imported quality input omits baseline source generation config",
 				)
 			}
-			if sha256Bytes(baselineConfigBytes) !=
-				manifest.GenerationConfigSHA256 ||
-				!bytes.Equal(baselineConfigBytes, generationConfigBytes) {
+			if !validSHA256Digest(
+				baselineManifest.GenerationConfigSHA256,
+			) || sha256Bytes(baselineConfigBytes) !=
+				baselineManifest.GenerationConfigSHA256 {
+				return fmt.Errorf(
+					"baseline source generation config digest disagrees with source manifest",
+				)
+			}
+			var baselineConfig qualityGenerationConfig
+			var baselineConfigFields map[string]json.RawMessage
+			if err := json.Unmarshal(
+				baselineConfigBytes,
+				&baselineConfig,
+			); err != nil {
+				return fmt.Errorf(
+					"decode baseline source generation config: %w",
+					err,
+				)
+			}
+			if err := json.Unmarshal(
+				baselineConfigBytes,
+				&baselineConfigFields,
+			); err != nil {
+				return fmt.Errorf(
+					"decode baseline source generation config fields: %w",
+					err,
+				)
+			}
+			if len(baselineConfigFields) != 15 ||
+				baselineConfig.GenerationIsolation !=
+					baselineManifest.GenerationIsolation ||
+				baselineConfig.ProfilesSnapshotPath !=
+					baselineManifest.ProfilesSnapshotPath ||
+				baselineConfig.ProfilesSnapshotSHA256 !=
+					baselineManifest.ProfilesSnapshotSHA256 ||
+				!reflect.DeepEqual(
+					baselineConfig.PromptFiles,
+					baselineManifest.PromptFiles,
+				) ||
+				!reflect.DeepEqual(
+					baselineConfig.PromptDigests,
+					baselineManifest.PromptDigests,
+				) ||
+				!reflect.DeepEqual(
+					baselineConfig.CasePromptFiles,
+					baselineManifest.CasePromptFiles,
+				) ||
+				!reflect.DeepEqual(
+					baselineConfig.CasePromptDigests,
+					baselineManifest.CasePromptDigests,
+				) ||
+				baselineConfig.MechanicalNavigationEnforced !=
+					baselineManifest.MechanicalNavigation ||
+				!reflect.DeepEqual(
+					sharedQualityGenerationConfig(baselineConfig),
+					sharedQualityGenerationConfig(generationConfig),
+				) {
 				return fmt.Errorf(
 					"baseline source generation config disagrees with quality run",
 				)
@@ -1804,6 +1982,23 @@ func validateMaterialQualityInputs(
 					return fmt.Errorf(
 						"baseline source rendered prompt disagrees for %s",
 						task,
+					)
+				}
+			}
+			for name, relative := range manifest.CasePromptFiles {
+				if !strings.HasPrefix(name, "baseline-") {
+					continue
+				}
+				baselineRelative := "baseline-source-" + relative
+				baselinePromptBytes, ok := snapshot.inputs[baselineRelative]
+				if !ok ||
+					!bytes.Equal(
+						baselinePromptBytes,
+						snapshot.inputs[relative],
+					) {
+					return fmt.Errorf(
+						"baseline source case prompt disagrees for %s",
+						name,
 					)
 				}
 			}
@@ -2012,6 +2207,8 @@ func summarizeEvidenceWithProvenance(
 			MechanicalNavigationEnforced     bool       `json:"mechanical_navigation_semantics_enforced"`
 			RepoViewNavigationSemanticsValid bool       `json:"repo_view_navigation_semantics_valid"`
 			RepoViewFirstInvocationChanged   bool       `json:"repo_view_first_invocation_changed"`
+			RepoViewDeepSequenceExact        bool       `json:"repo_view_deep_command_sequence_exact"`
+			RepoViewDeepDependencyExact      bool       `json:"repo_view_deep_dependency_awk_exact"`
 			RepoViewInvocationCapExceeded    bool       `json:"repo_view_invocation_cap_exceeded"`
 			Completed                        bool       `json:"completed"`
 		} `json:"cases"`
@@ -2127,6 +2324,8 @@ func summarizeEvidenceWithProvenance(
 			RepoViewBudgetTamperCommands:  current.RepoViewBudgetTamperCommandCount,
 			RepoViewChangedInvocations:    current.RepoViewChangedInvocationCount,
 			RepoViewFirstChanged:          current.RepoViewFirstInvocationChanged,
+			RepoViewDeepSequenceExact:     current.RepoViewDeepSequenceExact,
+			RepoViewDeepDependencyExact:   current.RepoViewDeepDependencyExact,
 			RepoViewNavigationValid:       current.RepoViewNavigationSemanticsValid,
 			MechanicalNavigationEnforced:  current.MechanicalNavigationEnforced,
 			RepoViewFindInvocations:       current.RepoViewFindInvocationCount,
@@ -2328,6 +2527,33 @@ func ValidatePromotion(
 				0,
 			),
 		)
+		if strings.HasPrefix(candidate.Task, "deep-") &&
+			candidate.Profile == "investigative-verified-high" {
+			results = append(results,
+				promotionCheck(
+					prefix+"uses the exact verified deep tool trace",
+					map[string]any{
+						"repo_view_invocations": candidate.RepoViewInvocations,
+						"changed":               candidate.RepoViewChangedInvocations,
+						"find":                  candidate.RepoViewFindInvocations,
+						"inspect":               candidate.RepoViewInspectInvocations,
+						"outline":               candidate.RepoViewOutlineInvocations,
+						"other_tool_calls":      candidate.OtherToolCalls,
+						"sequence_exact":        candidate.RepoViewDeepSequenceExact,
+						"dependency_awk_exact":  candidate.RepoViewDeepDependencyExact,
+					},
+					"repo-view=8, changed=1, find=2, inspect=4, outline=1, other=1, exact=true",
+					candidate.RepoViewInvocations == 8 &&
+						candidate.RepoViewChangedInvocations == 1 &&
+						candidate.RepoViewFindInvocations == 2 &&
+						candidate.RepoViewInspectInvocations == 4 &&
+						candidate.RepoViewOutlineInvocations == 1 &&
+						candidate.OtherToolCalls == 1 &&
+						candidate.RepoViewDeepSequenceExact &&
+						candidate.RepoViewDeepDependencyExact,
+				),
+			)
+		}
 		if minimumJudgeCount > 0 {
 			results = append(results,
 				promotionCheck(
@@ -2486,6 +2712,27 @@ func validateToolAccounting(
 			current["repo_view_changed_invocation_count"],
 		)
 		variant, _ := current["variant"].(string)
+		task, _ := current["task"].(string)
+		profile, _ := current["profile"].(string)
+		repoViewInvocations, repoViewInvocationsOK := number(
+			current["repo_view_invocation_count"],
+		)
+		findInvocations, findInvocationsOK := number(
+			current["repo_view_find_invocation_count"],
+		)
+		inspectInvocations, inspectInvocationsOK := number(
+			current["repo_view_inspect_invocation_count"],
+		)
+		outlineInvocations, outlineInvocationsOK := number(
+			current["repo_view_outline_invocation_count"],
+		)
+		deepSequenceExact, deepSequencePresent :=
+			current["repo_view_deep_command_sequence_exact"].(bool)
+		deepDependencyExact, deepDependencyPresent :=
+			current["repo_view_deep_dependency_awk_exact"].(bool)
+		verifiedDeep := enforceCurrentNavigation && variant == "optimized" &&
+			strings.HasPrefix(task, "deep-") &&
+			profile == "investigative-verified-high"
 		invocationCap, invocationCapOK := number(
 			current["repo_view_invocation_cap"],
 		)
@@ -2493,7 +2740,11 @@ func validateToolAccounting(
 			!outputReferencesOK || !budgetAccountingPresent ||
 			!commandShapePresent || !firstInvocationPresent ||
 			!navigationSemanticsPresent || !mechanicalSemanticsPresent ||
-			!changedInvocationsOK || !invocationCapOK {
+			!changedInvocationsOK || !invocationCapOK ||
+			(verifiedDeep &&
+				(!repoViewInvocationsOK || !findInvocationsOK ||
+					!inspectInvocationsOK || !outlineInvocationsOK ||
+					!deepSequencePresent || !deepDependencyPresent)) {
 			results = append(results, CheckResult{
 				Description: description,
 				Passed:      false,
@@ -2503,6 +2754,15 @@ func validateToolAccounting(
 		}
 
 		maxTemporal := math.Max(total-1, 0)
+		verifiedDeepValid := !verifiedDeep ||
+			(repoViewInvocations == 8 &&
+				changedInvocations == 1 &&
+				findInvocations == 2 &&
+				inspectInvocations == 4 &&
+				outlineInvocations == 1 &&
+				other == 1 &&
+				deepSequenceExact &&
+				deepDependencyExact)
 		passed := total == repoView+other &&
 			temporal <= maxTemporal &&
 			accountingValid &&
@@ -2515,7 +2775,8 @@ func validateToolAccounting(
 						(mechanicalSemanticsEnforced &&
 							firstInvocationChanged &&
 							navigationSemanticsValid &&
-							changedInvocations == 1))))
+							changedInvocations == 1)))) &&
+			verifiedDeepValid
 		var problems []string
 		if total != repoView+other {
 			problems = append(problems, "total != repo-view + other")
@@ -2547,6 +2808,12 @@ func validateToolAccounting(
 		}
 		if enforceCurrentNavigation && invocationCap > 0 && !budgetAccountingValid {
 			problems = append(problems, "repo-view budget accounting is invalid")
+		}
+		if !verifiedDeepValid {
+			problems = append(
+				problems,
+				"verified deep trace is not the exact 8 repo-view plus 1 awk contract",
+			)
 		}
 
 		for _, field := range []string{"call_graph_dot_file", "call_graph_markdown_file"} {

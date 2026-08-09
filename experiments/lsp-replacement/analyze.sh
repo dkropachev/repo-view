@@ -221,6 +221,22 @@ for metadata_name in \
     printf '%s\n' "${metadata_name}" >> "${input_names}"
   fi
 done
+for dependency_input_spec in \
+  'dependency-source/manifest.json:dependency-source-manifest.json' \
+  'dependency-source/target-go.mod:dependency-source-target-go.mod' \
+  'dependency-source/target-go.sum:dependency-source-target-go.sum' \
+  'dependency-source/golang.org/x/time@v0.14.0/rate/rate.go:dependency-source-rate.go' \
+  'dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go:dependency-source-rate_test.go'; do
+  dependency_relative="${dependency_input_spec%%:*}"
+  dependency_input_name="${dependency_input_spec##*:}"
+  if [[ -e "${run_dir}/${dependency_relative}" ||
+    -L "${run_dir}/${dependency_relative}" ]]; then
+    snapshot_file \
+      "${run_dir}/${dependency_relative}" \
+      "${inputs_dir}/${dependency_input_name}"
+    printf '%s\n' "${dependency_input_name}" >> "${input_names}"
+  fi
+done
 for source_input in "${run_dir}"/changed-packet*.json; do
   input_name="$(basename "${source_input}")"
   if [[ ! "${input_name}" =~ ^changed-packet(-[a-z0-9][a-z0-9-]*)?\.json$ ]]; then
@@ -373,7 +389,17 @@ recognized_cases=0
 manifest_worktree=""
 manifest_base_commit=""
 manifest_target_commit=""
+manifest_go_mod_cache=""
 mechanical_navigation_semantics_enforced=false
+simple_core_inspect_command='repo-view inspect common/quotas/rate_limiter.go:12 common/quotas/reservation.go:11 common/quotas/rate_limiter_impl.go:13 common/quotas/rate_limiter_impl.go:26 common/quotas/rate_limiter_impl.go:80 common/quotas/rate_limiter_impl.go:114 common/quotas/dynamic_rate_limiter_impl.go:28 common/quotas/dynamic_rate_limiter_impl.go:57 common/quotas/clocked_rate_limiter.go:54 common/quotas/clocked_rate_limiter.go:62 common/quotas/clocked_rate_limiter.go:70 common/clock/time_source.go:38 --root . --include scope --return scope --context 4 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+simple_consumer_inspect_command='repo-view inspect service/worker/scheduler/fx.go:120 service/worker/scheduler/activities.go:95 service/worker/pernamespaceworker.go:123 service/worker/pernamespaceworker.go:430 common/quotas/request_rate_limiter_adapter_impl.go:16 common/quotas/request_rate_limiter_adapter_impl.go:31 service/frontend/configs/quotas.go:346 common/persistence/client/health_request_rate_limiter.go:56 common/persistence/client/health_request_rate_limiter.go:82 service/matching/ratelimit_manager.go:81 service/history/replication/stream_sender_flow_controller.go:59 --root . --include scope --return context --context 4 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_reference_find_command='repo-view find ClockedReservation --root . --include refs --return locations --context 6 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_contract_inspect_command='repo-view inspect common/quotas/reservation.go:11 common/quotas/rate_limiter.go:12 common/clock/time_source.go:35 common/quotas/rate_limiter_impl.go:22 common/quotas/rate_limiter_impl.go:49 common/quotas/clocked_rate_limiter.go:45 common/quotas/clocked_rate_limiter.go:50 common/quotas/clocked_rate_limiter.go:54 common/quotas/clocked_rate_limiter.go:58 common/quotas/clocked_rate_limiter.go:62 common/quotas/clocked_rate_limiter.go:66 common/quotas/clocked_rate_limiter.go:70 common/quotas/clocked_rate_limiter.go:74 common/quotas/multi_reservation_impl.go:30 common/quotas/multi_reservation_impl.go:42 common/quotas/multi_reservation_impl.go:54 common/quotas/multi_reservation_impl.go:61 go.mod:76 --root . --include scope --return context --context 6 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_path_find_command='repo-view find startWorkflowRateLimiter NewDefaultOutgoingRateLimiter newShardReaderRateLimiter ReaderImpl loadAndSubmitTasks MultiRequestRateLimiterImpl --root . --include both --return locations --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_path_outline_command='repo-view outline service/worker/scheduler/fx.go service/worker/scheduler/activities.go service/worker/pernamespaceworker.go common/quotas/dynamic_rate_limiter_impl.go common/quotas/rate_limiter_impl.go service/history/queues/reader_quotas.go service/history/queues/queue_base.go service/history/queues/reader.go common/quotas/multi_request_rate_limiter_impl.go common/quotas/priority_rate_limiter_impl.go common/quotas/request_rate_limiter_adapter_impl.go --root . --return locations --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_worker_inspect_command='repo-view inspect service/worker/scheduler/fx.go:120 service/worker/scheduler/fx.go:133 service/worker/scheduler/activities.go:89 service/worker/pernamespaceworker.go:123 service/worker/pernamespaceworker.go:430 common/quotas/dynamic_rate_limiter_impl.go:99 common/quotas/rate_limiter_impl.go:54 --root . --include scope --return context --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_reader_inspect_command='repo-view inspect service/history/queues/reader_quotas.go:14 service/history/queues/reader_quotas.go:39 service/history/queues/queue_base.go:136 service/history/queues/queue_base.go:150 service/history/queues/reader.go:58 service/history/queues/reader.go:426 common/quotas/multi_request_rate_limiter_impl.go:17 common/quotas/multi_request_rate_limiter_impl.go:56 common/quotas/multi_request_rate_limiter_impl.go:70 common/quotas/priority_rate_limiter_impl.go:77 common/quotas/request_rate_limiter_adapter_impl.go:31 common/quotas/request_rate_limiter_adapter_impl.go:35 common/quotas/dynamic_rate_limiter_impl.go:99 common/quotas/rate_limiter_impl.go:54 --root . --include scope --return context --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_test_inspect_command='repo-view inspect common/quotas/clocked_rate_limiter_test.go:77 common/quotas/clocked_rate_limiter_test.go:91 common/quotas/clocked_rate_limiter_test.go:108 common/quotas/clocked_rate_limiter_test.go:118 common/quotas/clocked_rate_limiter_test.go:133 common/quotas/clocked_rate_limiter_test.go:160 common/quotas/priority_reservation_impl_test.go:64 common/quotas/priority_reservation_impl_test.go:73 common/quotas/multi_reservation_impl_test.go:55 common/quotas/multi_reservation_impl_test.go:62 common/quotas/multi_reservation_impl_test.go:77 common/quotas/multi_reservation_impl_test.go:86 common/quotas/multi_rate_limiter_impl_test.go:68 common/quotas/multi_rate_limiter_impl_test.go:85 common/quotas/multi_rate_limiter_impl_test.go:133 common/quotas/rate_limiter_impl_test.go:23 common/quotas/bench_test.go:38 --root . --include scope --return context --context 4 --limit 20 --max-code-lines 40 --max-patch-lines 300 --json'
 optimized_inputs=("${inputs_dir}"/optimized-*.jsonl)
 if ((${#optimized_inputs[@]} > 0)); then
   if [[ ! -f "${inputs_dir}/manifest.json" ]]; then
@@ -394,6 +420,14 @@ if ((${#optimized_inputs[@]} > 0)); then
       and test("^([0-9a-f]{40}|[0-9a-f]{64})$")
     )
     and (
+      (has("go_mod_cache") | not)
+      or (
+        .go_mod_cache
+        | type == "string"
+        and test("^/[A-Za-z0-9._/-]+$")
+      )
+    )
+    and (
       (has("mechanical_navigation_semantics_enforced") | not)
       or (.mechanical_navigation_semantics_enforced | type == "boolean")
     )
@@ -404,6 +438,9 @@ if ((${#optimized_inputs[@]} > 0)); then
   manifest_worktree="$(jq -r '.worktree' "${inputs_dir}/manifest.json")"
   manifest_base_commit="$(jq -r '.base_commit' "${inputs_dir}/manifest.json")"
   manifest_target_commit="$(jq -r '.target_commit' "${inputs_dir}/manifest.json")"
+  manifest_go_mod_cache="$(
+    jq -r '.go_mod_cache // ""' "${inputs_dir}/manifest.json"
+  )"
   manifest_mechanical="$(
     jq -r '.mechanical_navigation_semantics_enforced // false' \
       "${inputs_dir}/manifest.json"
@@ -442,6 +479,108 @@ if ((${#optimized_inputs[@]} > 0)); then
       exit 1
     fi
     mechanical_navigation_semantics_enforced=true
+  fi
+fi
+deep_dependency_snapshot_verified=false
+deep_dependency_command_root='$HOME/dependencies/golang.org/x/time@v0.14.0'
+deep_dependency_awk_command='awk -v OFS=: "((FILENAME == ARGV[1]) && FNR >= 120 && FNR <= 230) || ((FILENAME == ARGV[2]) && FNR >= 343 && FNR <= 420) { print FILENAME, FNR; print }" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate.go" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate_test.go"'
+dependency_snapshot_inputs=(
+  dependency-source-manifest.json
+  dependency-source-target-go.mod
+  dependency-source-target-go.sum
+  dependency-source-rate.go
+  dependency-source-rate_test.go
+)
+dependency_snapshot_complete=true
+for dependency_input_name in "${dependency_snapshot_inputs[@]}"; do
+  if [[ ! -f "${inputs_dir}/${dependency_input_name}" ]]; then
+    dependency_snapshot_complete=false
+  fi
+done
+if "${dependency_snapshot_complete}" &&
+  [[ -f "${inputs_dir}/manifest.json" ]]; then
+  dependency_manifest_digest_output="$(
+    sha256sum -- "${inputs_dir}/dependency-source-manifest.json"
+  )"
+  dependency_manifest_digest="${dependency_manifest_digest_output%% *}"
+  dependency_target_go_mod_digest_output="$(
+    sha256sum -- "${inputs_dir}/dependency-source-target-go.mod"
+  )"
+  dependency_target_go_mod_digest="${dependency_target_go_mod_digest_output%% *}"
+  dependency_target_go_sum_digest_output="$(
+    sha256sum -- "${inputs_dir}/dependency-source-target-go.sum"
+  )"
+  dependency_target_go_sum_digest="${dependency_target_go_sum_digest_output%% *}"
+  dependency_rate_go_digest_output="$(
+    sha256sum -- "${inputs_dir}/dependency-source-rate.go"
+  )"
+  dependency_rate_go_digest="${dependency_rate_go_digest_output%% *}"
+  dependency_rate_test_go_digest_output="$(
+    sha256sum -- "${inputs_dir}/dependency-source-rate_test.go"
+  )"
+  dependency_rate_test_go_digest="${dependency_rate_test_go_digest_output%% *}"
+  if jq -e \
+    --arg command_root "${deep_dependency_command_root}" \
+    --arg target_go_mod_sha256 "${dependency_target_go_mod_digest}" \
+    --arg target_go_sum_sha256 "${dependency_target_go_sum_digest}" \
+    --arg rate_go_sha256 "${dependency_rate_go_digest}" \
+    --arg rate_test_go_sha256 "${dependency_rate_test_go_digest}" '
+      type == "object"
+      and .schema_version == 1
+      and .module == "golang.org/x/time"
+      and .version == "v0.14.0"
+      and (.module_sum | type == "string" and test("^h1:[A-Za-z0-9+/]+=$"))
+      and (.go_mod_sum | type == "string" and test("^h1:[A-Za-z0-9+/]+=$"))
+      and .authentication
+        == "fresh-private-gomodcache-go-mod-download-target-go.sum"
+      and .command_root == $command_root
+      and .source_root == "dependency-source"
+      and .files == {
+        "target-go.mod": $target_go_mod_sha256,
+        "target-go.sum": $target_go_sum_sha256,
+        "golang.org/x/time@v0.14.0/rate/rate.go": $rate_go_sha256,
+        "golang.org/x/time@v0.14.0/rate/rate_test.go":
+          $rate_test_go_sha256
+      }
+    ' "${inputs_dir}/dependency-source-manifest.json" >/dev/null &&
+    jq -e -s \
+      --arg manifest_sha256 "${dependency_manifest_digest}" '
+        length == 2
+        and .[1].dependency_source == {
+          manifest_path: "dependency-source/manifest.json",
+          manifest_sha256: $manifest_sha256,
+          module: "golang.org/x/time",
+          version: "v0.14.0",
+          sum: .[0].module_sum
+        }
+      ' \
+      "${inputs_dir}/dependency-source-manifest.json" \
+      "${inputs_dir}/manifest.json" >/dev/null; then
+    deep_dependency_module_sum="$(
+      jq -r '.module_sum' "${inputs_dir}/dependency-source-manifest.json"
+    )"
+    deep_dependency_go_mod_sum="$(
+      jq -r '.go_mod_sum' "${inputs_dir}/dependency-source-manifest.json"
+    )"
+    dependency_go_mod_requirement_count="$(LC_ALL=C awk '
+        $1 == "golang.org/x/time" && $2 == "v0.14.0" { matches++ }
+        END { print matches + 0 }
+      ' "${inputs_dir}/dependency-source-target-go.mod")"
+    dependency_module_sum_count="$(LC_ALL=C awk \
+      -v expected="golang.org/x/time v0.14.0 ${deep_dependency_module_sum}" '
+        $0 == expected { matches++ }
+        END { print matches + 0 }
+      ' "${inputs_dir}/dependency-source-target-go.sum")"
+    dependency_go_mod_sum_count="$(LC_ALL=C awk \
+      -v expected="golang.org/x/time v0.14.0/go.mod ${deep_dependency_go_mod_sum}" '
+        $0 == expected { matches++ }
+        END { print matches + 0 }
+      ' "${inputs_dir}/dependency-source-target-go.sum")"
+    if [[ "${dependency_go_mod_requirement_count}" == 1 &&
+      "${dependency_module_sum_count}" == 1 &&
+      "${dependency_go_mod_sum_count}" == 1 ]]; then
+      deep_dependency_snapshot_verified=true
+    fi
   fi
 fi
 for packet_input in "${inputs_dir}"/changed-packet*.json; do
@@ -642,6 +781,17 @@ for log in "${inputs_dir}"/*.jsonl; do
       exit 1
     fi
   fi
+  simple_changed_command=""
+  deep_changed_command=""
+  if [[ "${variant}" == "optimized" ]] &&
+    [[ "${task}" == "explain" || "${task}" == "review" ]]; then
+    simple_changed_command="repo-view changed --root . --base ${manifest_base_commit} --return ${profile_return} --context ${profile_changed_context} --limit ${limit_cap} --max-code-lines ${max_code_lines_cap} --max-patch-lines ${max_patch_lines_cap} --json"
+  fi
+  if [[ "${variant}" == "optimized" ]] &&
+    [[ "${task}" == "deep-explain" || "${task}" == "deep-review" ]] &&
+    [[ "${profile}" == "investigative-verified-high" ]]; then
+    deep_changed_command="repo-view changed --root . --base ${manifest_base_commit} --return ${profile_return} --context ${profile_changed_context} --limit ${limit_cap} --max-code-lines ${max_code_lines_cap} --max-patch-lines ${max_patch_lines_cap} --json"
+  fi
 
   jq -s \
     --arg name "${stem}" \
@@ -665,6 +815,20 @@ for log in "${inputs_dir}"/*.jsonl; do
     --arg manifest_worktree "${manifest_worktree}" \
     --arg manifest_base_commit "${manifest_base_commit}" \
     --arg manifest_target_commit "${manifest_target_commit}" \
+    --arg simple_changed_command "${simple_changed_command}" \
+    --arg simple_core_inspect_command "${simple_core_inspect_command}" \
+    --arg simple_consumer_inspect_command "${simple_consumer_inspect_command}" \
+    --arg deep_changed_command "${deep_changed_command}" \
+    --arg deep_reference_find_command "${deep_reference_find_command}" \
+    --arg deep_contract_inspect_command "${deep_contract_inspect_command}" \
+    --arg deep_path_find_command "${deep_path_find_command}" \
+    --arg deep_path_outline_command "${deep_path_outline_command}" \
+    --arg deep_worker_inspect_command "${deep_worker_inspect_command}" \
+    --arg deep_reader_inspect_command "${deep_reader_inspect_command}" \
+    --arg deep_test_inspect_command "${deep_test_inspect_command}" \
+    --arg deep_dependency_awk_command "${deep_dependency_awk_command}" \
+    --argjson deep_dependency_snapshot_verified \
+      "${deep_dependency_snapshot_verified}" \
     --argjson mechanical_navigation_semantics_enforced \
       "${mechanical_navigation_semantics_enforced}" \
     '
@@ -701,6 +865,128 @@ for log in "${inputs_dir}"/*.jsonl; do
           $command;
           "(?:changed|find|inspect|outline)"
         );
+      def repo_view_command_payload($command):
+        def normalize_binary:
+          if startswith("repo-view ") then
+            .
+          elif startswith("repo-view.bin ") then
+            "repo-view " + ltrimstr("repo-view.bin ")
+          else
+            null
+          end;
+        if (
+          ($command | startswith("repo-view "))
+          or ($command | startswith("repo-view.bin "))
+        ) then
+          ($command | normalize_binary)
+        else
+          (
+            [
+              "/usr/bin/zsh -lc ",
+              "/bin/zsh -lc ",
+              "/usr/bin/bash -lc ",
+              "/bin/bash -lc ",
+              "/bin/sh -lc ",
+              "zsh -lc ",
+              "bash -lc ",
+              "sh -lc "
+            ]
+            | map(. as $candidate_prefix | select(
+                $command | startswith($candidate_prefix)
+              ))
+            | first // null
+          ) as $prefix
+          | if $prefix == null then
+              null
+            else
+              ($command | ltrimstr($prefix)) as $quoted
+              | if (
+                  ($quoted | length) >= 2
+                  and (
+                    (
+                      ($quoted | .[0:1]) == "\u0027"
+                      and ($quoted | endswith("\u0027"))
+                    )
+                    or (
+                      ($quoted | .[0:1]) == "\u0022"
+                      and ($quoted | endswith("\u0022"))
+                    )
+                  )
+                ) then
+                  ($quoted | .[1:-1] | normalize_binary)
+                else
+                  null
+                end
+            end
+        end;
+      def shell_command_payload($command):
+        if (
+          ($command | startswith("repo-view "))
+          or ($command | startswith("repo-view.bin "))
+          or ($command | startswith("awk "))
+        ) then
+          $command
+        else
+          (
+            [
+              "/usr/bin/zsh -lc ",
+              "/bin/zsh -lc ",
+              "/usr/bin/bash -lc ",
+              "/bin/bash -lc ",
+              "/bin/sh -lc ",
+              "zsh -lc ",
+              "bash -lc ",
+              "sh -lc "
+            ]
+            | map(. as $candidate_prefix | select(
+                $command | startswith($candidate_prefix)
+              ))
+            | first // null
+          ) as $prefix
+          | if $prefix == null then
+              null
+            else
+              ($command | ltrimstr($prefix)) as $quoted
+              | if (
+                  ($quoted | length) >= 2
+                  and (
+                    (
+                      ($quoted | .[0:1]) == "\u0027"
+                      and ($quoted | endswith("\u0027"))
+                    )
+                    or (
+                      ($quoted | .[0:1]) == "\u0022"
+                      and ($quoted | endswith("\u0022"))
+                    )
+                  )
+                ) then
+                  ($quoted | .[1:-1])
+                else
+                  null
+                end
+            end
+        end;
+      def inspect_output_untruncated($execution; $expected_locations):
+        (
+          if (($execution.aggregated_output // null) | type) == "string" then
+            try ($execution.aggregated_output | fromjson) catch null
+          else
+            null
+          end
+        ) as $output
+        | ($output | type) == "array"
+          and ($output | length) == $expected_locations
+          and all(
+            $output[];
+            type == "object"
+            and .results_truncated == false
+            and (.results | type) == "array"
+            and (.results | length) > 0
+            and all(
+              .results[];
+              type == "object" and .code_truncated == false
+            )
+          );
       def option_occurrences($command; $option):
         [
           $command
@@ -886,6 +1172,109 @@ for log in "${inputs_dir}"/*.jsonl; do
           | select(all_repo_view_invocations(.item.command // "") > 0)
           | .item.command
         ]) as $repo_view_started_commands
+      | (
+          $variant == "optimized"
+          and ($task == "explain" or $task == "review")
+        ) as $optimized_simple
+      | (
+          $variant == "optimized"
+          and ($task == "deep-explain" or $task == "deep-review")
+          and $profile == "investigative-verified-high"
+        ) as $optimized_verified_deep
+      | (
+          $repo_view_started_commands
+          | map(repo_view_command_payload(.))
+        ) as $repo_view_started_payloads
+      | (
+          $repo_view_executions
+          | map(repo_view_command_payload(.command))
+        ) as $repo_view_completed_payloads
+      | (
+          if ($optimized_simple | not) then
+            true
+          else
+            $simple_changed_command != ""
+            and ($repo_view_started_payloads | length) == 3
+            and ($repo_view_completed_payloads | length) == 3
+            and $repo_view_started_payloads[0] == $simple_changed_command
+            and $repo_view_completed_payloads[0] == $simple_changed_command
+          end
+        ) as $simple_changed_command_exact
+      | (
+          if ($optimized_simple | not) then
+            true
+          else
+            ($repo_view_started_payloads | length) == 3
+            and ($repo_view_completed_payloads | length) == 3
+            and $repo_view_started_payloads[1] == $simple_core_inspect_command
+            and $repo_view_completed_payloads[1] == $simple_core_inspect_command
+          end
+        ) as $simple_core_inspect_command_exact
+      | (
+          if ($optimized_simple | not) then
+            true
+          else
+            ($repo_view_started_payloads | length) == 3
+            and ($repo_view_completed_payloads | length) == 3
+            and $repo_view_started_payloads[2]
+              == $simple_consumer_inspect_command
+            and $repo_view_completed_payloads[2]
+              == $simple_consumer_inspect_command
+          end
+        ) as $simple_consumer_inspect_command_exact
+      | (
+          if ($optimized_simple | not) then
+            true
+          else
+            ($repo_view_executions | length) >= 3
+            and inspect_output_untruncated($repo_view_executions[1]; 12)
+            and inspect_output_untruncated($repo_view_executions[2]; 11)
+          end
+        ) as $simple_inspect_outputs_untruncated
+      | (
+          if ($optimized_verified_deep | not) then
+            true
+          else
+            ($repo_view_started_payloads | length) == 8
+            and ($repo_view_completed_payloads | length) == 8
+            and $repo_view_started_payloads == [
+              $deep_changed_command,
+              $deep_reference_find_command,
+              $deep_contract_inspect_command,
+              $deep_path_find_command,
+              $deep_path_outline_command,
+              $deep_worker_inspect_command,
+              $deep_reader_inspect_command,
+              $deep_test_inspect_command
+            ]
+            and $repo_view_completed_payloads == $repo_view_started_payloads
+          end
+        ) as $deep_command_sequence_exact
+      | (
+          if ($optimized_verified_deep | not) then
+            true
+          else
+            $deep_dependency_snapshot_verified
+            and $tools.total_tool_calls == 9
+            and $tools.command_execution_tool_calls == 9
+            and $tools.repo_view_tool_calls == 8
+            and $tools.other_tool_calls == 1
+            and ($tools.calls | length) == 9
+            and (
+              $tools.calls[8]
+              | .index == 9
+              and .tool_type == "command_execution"
+              and .primary_operation == "awk"
+              and .operations == ["awk"]
+              and .status == "completed"
+              and .exit_code == 0
+              and (
+                shell_command_payload(.command)
+                == $deep_dependency_awk_command
+              )
+            )
+          end
+        ) as $deep_dependency_awk_exact
       | ([
           $repo_view_executions[]
           | select(repo_view_invocations(.command; "changed") > 0)
@@ -959,6 +1348,8 @@ for log in "${inputs_dir}"/*.jsonl; do
             and ($changed_executions | length) == 1
             and ($navigation_option_violations | length) == 0
             and $changed_output_semantics_valid
+            and $deep_command_sequence_exact
+            and $deep_dependency_awk_exact
           )
         ) as $navigation_semantics_valid
       | {
@@ -1021,6 +1412,18 @@ for log in "${inputs_dir}"/*.jsonl; do
           repo_view_command_shape_valid: $tools.repo_view_command_shape_valid,
           repo_view_first_invocation_changed: $first_invocation_changed,
           repo_view_navigation_semantics_valid: $navigation_semantics_valid,
+          repo_view_simple_changed_command_exact:
+            $simple_changed_command_exact,
+          repo_view_simple_core_inspect_command_exact:
+            $simple_core_inspect_command_exact,
+          repo_view_simple_consumer_inspect_command_exact:
+            $simple_consumer_inspect_command_exact,
+          repo_view_simple_inspect_outputs_untruncated:
+            $simple_inspect_outputs_untruncated,
+          repo_view_deep_command_sequence_exact:
+            $deep_command_sequence_exact,
+          repo_view_deep_dependency_awk_exact:
+            $deep_dependency_awk_exact,
           mechanical_navigation_semantics_enforced: (
             $variant == "optimized"
             and $mechanical_navigation_semantics_enforced
@@ -1165,6 +1568,13 @@ jq -s \
                 else (1 - ($optimized.effective_tokens / $baseline.effective_tokens)) * 100
                 end
               ),
+              baseline_raw_total_tokens: $baseline.raw_total_tokens,
+              optimized_raw_total_tokens: $optimized.raw_total_tokens,
+              raw_reduction_percent: (
+                if $baseline.raw_total_tokens == 0 then null
+                else (1 - ($optimized.raw_total_tokens / $baseline.raw_total_tokens)) * 100
+                end
+              ),
               baseline_regular_input_tokens: $baseline.regular_input_tokens,
               optimized_regular_input_tokens: $optimized.regular_input_tokens,
               regular_input_reduction_percent: (
@@ -1174,6 +1584,19 @@ jq -s \
               ),
               baseline_cached_input_tokens: $baseline.cached_input_tokens,
               optimized_cached_input_tokens: $optimized.cached_input_tokens,
+              baseline_cached_input_percent: $baseline.cached_input_percent,
+              optimized_cached_input_percent: $optimized.cached_input_percent,
+              cached_input_percent_delta: (
+                if (
+                  $baseline.cached_input_percent == null
+                  or $optimized.cached_input_percent == null
+                ) then null
+                else (
+                  $optimized.cached_input_percent
+                  - $baseline.cached_input_percent
+                )
+                end
+              ),
               baseline_output_tokens: $baseline.output_tokens,
               optimized_output_tokens: $optimized.output_tokens,
               baseline_tool_calls: $baseline.tool_call_count,
@@ -1246,6 +1669,18 @@ jq -s \
     | "- " + (.task | ascii_upcase) + " / " + .profile
       + ": " + (.effective_reduction_percent | tostring)
       + "% effective-token reduction; "
+      + (.raw_reduction_percent | tostring)
+      + "% raw-token reduction; cached-input rate "
+      + (.baseline_cached_input_percent | tostring) + "% -> "
+      + (.optimized_cached_input_percent | tostring) + "% ("
+      + (
+          if .cached_input_percent_delta == null then "n/a"
+          elif .cached_input_percent_delta >= 0 then
+            "+" + (.cached_input_percent_delta | tostring)
+          else (.cached_input_percent_delta | tostring)
+          end
+        )
+      + " percentage points); "
       + (.regular_input_reduction_percent | tostring)
       + "% regular-input reduction; "
       + (.baseline_tool_calls | tostring) + " -> "
@@ -1327,6 +1762,19 @@ for metadata_name in \
   profiles-snapshot.tsv; do
   if [[ -e "${run_dir}/${metadata_name}" || -L "${run_dir}/${metadata_name}" ]]; then
     printf '%s\n' "${metadata_name}" >> "${current_input_names}"
+  fi
+done
+for dependency_input_spec in \
+  'dependency-source/manifest.json:dependency-source-manifest.json' \
+  'dependency-source/target-go.mod:dependency-source-target-go.mod' \
+  'dependency-source/target-go.sum:dependency-source-target-go.sum' \
+  'dependency-source/golang.org/x/time@v0.14.0/rate/rate.go:dependency-source-rate.go' \
+  'dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go:dependency-source-rate_test.go'; do
+  dependency_relative="${dependency_input_spec%%:*}"
+  dependency_input_name="${dependency_input_spec##*:}"
+  if [[ -e "${run_dir}/${dependency_relative}" ||
+    -L "${run_dir}/${dependency_relative}" ]]; then
+    printf '%s\n' "${dependency_input_name}" >> "${current_input_names}"
   fi
 done
 for current_input in "${run_dir}"/changed-packet*.json; do

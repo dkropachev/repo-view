@@ -1,6 +1,7 @@
 package experimentsuite
 
 import (
+	"archive/zip"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -20,6 +21,415 @@ import (
 const runScriptCompletedJSONL = `{"type":"thread.started","thread_id":"test"}` + "\n" +
 	`{"type":"turn.started"}` + "\n" +
 	`{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}` + "\n"
+
+const runScriptDependencyRateSource = "package rate\n\nconst authenticatedFixture = \"rate\"\n"
+
+const runScriptDependencyRateTestSource = "package rate\n\nconst authenticatedTestFixture = \"rate_test\"\n"
+
+func simpleCoreInspectCommand() string {
+	return "repo-view inspect " +
+		"common/quotas/rate_limiter.go:12 " +
+		"common/quotas/reservation.go:11 " +
+		"common/quotas/rate_limiter_impl.go:13 " +
+		"common/quotas/rate_limiter_impl.go:26 " +
+		"common/quotas/rate_limiter_impl.go:80 " +
+		"common/quotas/rate_limiter_impl.go:114 " +
+		"common/quotas/dynamic_rate_limiter_impl.go:28 " +
+		"common/quotas/dynamic_rate_limiter_impl.go:57 " +
+		"common/quotas/clocked_rate_limiter.go:54 " +
+		"common/quotas/clocked_rate_limiter.go:62 " +
+		"common/quotas/clocked_rate_limiter.go:70 " +
+		"common/clock/time_source.go:38 --root . --include scope --return scope " +
+		"--context 4 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json"
+}
+
+func simpleConsumerInspectCommand() string {
+	return "repo-view inspect " +
+		"service/worker/scheduler/fx.go:120 " +
+		"service/worker/scheduler/activities.go:95 " +
+		"service/worker/pernamespaceworker.go:123 " +
+		"service/worker/pernamespaceworker.go:430 " +
+		"common/quotas/request_rate_limiter_adapter_impl.go:16 " +
+		"common/quotas/request_rate_limiter_adapter_impl.go:31 " +
+		"service/frontend/configs/quotas.go:346 " +
+		"common/persistence/client/health_request_rate_limiter.go:56 " +
+		"common/persistence/client/health_request_rate_limiter.go:82 " +
+		"service/matching/ratelimit_manager.go:81 " +
+		"service/history/replication/stream_sender_flow_controller.go:59 " +
+		"--root . --include scope --return context --context 4 --limit 20 --max-code-lines 60 " +
+		"--max-patch-lines 300 --json"
+}
+
+func TestGuardedHighProfileDefinesAdaptiveThreeCallBudget(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(
+		repoRoot,
+		"experiments", "lsp-replacement", "profiles.tsv",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(content)), "\n") {
+		fields := strings.Split(line, "\t")
+		if len(fields) == 0 || fields[0] != "guarded-high" {
+			continue
+		}
+		if len(fields) != 11 {
+			t.Fatalf("guarded-high field count = %d, want 11: %q", len(fields), line)
+		}
+		if fields[8] != "adaptive" || fields[9] != "3" {
+			t.Fatalf(
+				"guarded-high navigation policy/cap = %q/%q, want adaptive/3",
+				fields[8],
+				fields[9],
+			)
+		}
+		return
+	}
+	t.Fatal("guarded-high profile is missing")
+}
+
+func TestSharedExplainPromptRequiresCompletePerformanceEvidence(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptContent, err := os.ReadFile(filepath.Join(
+		repoRoot,
+		"experiments", "lsp-replacement", "prompts", "explain.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(promptContent)
+	for _, required := range []string{
+		"all changed performance documentation",
+		"every quantitative measurement",
+		"activity",
+		"write-admission",
+		"read/drain",
+		"workflow",
+		"node-health",
+		"error-validation",
+		"no-argument methods",
+		"injected service",
+		"exact native dependency implementation is outside the inspected evidence",
+		"public RateLimiter and Reservation method sets",
+		"NewRateLimiter and NewDynamicRateLimiter constructor signatures",
+		"material embedded or delegated operations that remain unchanged",
+		"concrete Reserve and ReserveN consumers",
+		"persistence health, matching, replication",
+		"concrete inspected source paths",
+		"measured results from inference",
+		"do not claim semantic equivalence",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("shared explain prompt is missing %q", required)
+		}
+	}
+	for _, leakedFixtureValue := range []string{"3.49%", "19.45%", "4.49%"} {
+		if strings.Contains(prompt, leakedFixtureValue) {
+			t.Errorf("shared explain prompt leaks fixture value %q", leakedFixtureValue)
+		}
+	}
+}
+
+func TestSharedReviewPromptRequiresBoundedCompatibilityEvidence(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	promptContent, err := os.ReadFile(filepath.Join(
+		repoRoot,
+		"experiments", "lsp-replacement", "prompts", "review.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(promptContent)
+	for _, required := range []string{
+		"exact native dependency implementation is outside the inspected evidence",
+		"public RateLimiter and Reservation method sets",
+		"NewRateLimiter and NewDynamicRateLimiter constructor signatures",
+		"material embedded or delegated operations that remain unchanged",
+		"concrete Reserve and ReserveN consumers",
+		"persistence health, matching, replication",
+		"distinguishing construction from a proven consuming call chain",
+		"do not modify files or run tests",
+	} {
+		if !strings.Contains(prompt, required) {
+			t.Errorf("shared review prompt is missing %q", required)
+		}
+	}
+}
+
+func TestRunScriptBuildsSourceGroundedSimplePrompt(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(
+		t,
+		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"awk", "date", "find", "mktemp", "sort", "uname",
+	)
+	sourceRepo, head := initializeRunScriptGitTarget(t)
+	tempRoot := t.TempDir()
+	evidenceRoot := filepath.Join(tempRoot, "evidence")
+	runDir := filepath.Join(evidenceRoot, "simple-grounding")
+	command := exec.Command(
+		bashPath,
+		runScript,
+		"--task", "explain",
+		"--variant", "all",
+		"--profile", "guarded-high",
+		"--run-id", "simple-grounding",
+		"--source", sourceRepo,
+		"--commit", head,
+		"--base", head,
+		"--worktree", filepath.Join(tempRoot, "target"),
+		"--evidence-root", evidenceRoot,
+	)
+	command.Env = runScriptTestEnvironment(t, false)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("simple grounding run failed: %v\n%s", err, output)
+	}
+	prompt, err := os.ReadFile(filepath.Join(runDir, "codex-prompt.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	optimizedPromptRelative := "optimized-guarded-high-explain.user-prompt.txt"
+	optimizedPrompt, err := os.ReadFile(filepath.Join(runDir, optimizedPromptRelative))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(optimizedPrompt, prompt) {
+		t.Fatal("captured optimized Codex prompt differs from committed case prompt")
+	}
+	baselinePrompt, err := os.ReadFile(filepath.Join(
+		runDir, "baseline-explain.user-prompt.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedPrompt, err := os.ReadFile(filepath.Join(runDir, "prompts", "explain.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(baselinePrompt, sharedPrompt) {
+		t.Fatal("baseline case prompt differs from committed shared prompt")
+	}
+	type casePromptBindings struct {
+		Files   map[string]string `json:"case_prompt_files"`
+		Digests map[string]string `json:"case_prompt_digests"`
+	}
+	readBindings := func(path string) casePromptBindings {
+		t.Helper()
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bindings casePromptBindings
+		if err := json.Unmarshal(content, &bindings); err != nil {
+			t.Fatal(err)
+		}
+		return bindings
+	}
+	manifestBindings := readBindings(filepath.Join(runDir, "manifest.json"))
+	configBindings := readBindings(filepath.Join(runDir, "generation-config.json"))
+	for name, content := range map[string][]byte{
+		"baseline-explain":               baselinePrompt,
+		"optimized-guarded-high-explain": optimizedPrompt,
+	} {
+		relative := name + ".user-prompt.txt"
+		digest := sha256Bytes(content)
+		if manifestBindings.Files[name] != relative ||
+			manifestBindings.Digests[name] != digest ||
+			configBindings.Files[name] != relative ||
+			configBindings.Digests[name] != digest {
+			t.Errorf("case prompt binding for %s is incomplete or inconsistent", name)
+		}
+	}
+	changedCommand := "repo-view changed --root . --base " + head +
+		" --return context --context 4 --limit 20 --max-code-lines 60 " +
+		"--max-patch-lines 300 --json"
+	coreInspectCommand := simpleCoreInspectCommand()
+	consumerInspectCommand := simpleConsumerInspectCommand()
+	for _, required := range []string{
+		"Use exactly three repo-view commands for this simple task",
+		changedCommand,
+		coreInspectCommand,
+		consumerInspectCommand,
+		"both fixed inspect responses report no code or result truncation",
+		"Report the persistence-health, matching, replication, and worker or scheduler construction paths",
+		"Cite the exact inspected file path for each category",
+		"Distinguish construction evidence from proven reservation consumption",
+		"unchanged Allow, AllowN, Wait, WaitN, rate and burst configuration, TokensAt, and RecycleToken operations",
+		"every measurement and validation outcome in the changed performance documentation",
+		"These repo-view invocations are commands; do not describe the run as command-free",
+		"Do not run tests or any shell command other than the three required repo-view commands",
+		"no-argument methods that previously consulted an injected service",
+		"concrete inspected source paths rather than category labels alone",
+	} {
+		if !bytes.Contains(prompt, []byte(required)) {
+			t.Errorf("optimized simple prompt is missing %q:\n%s", required, prompt)
+		}
+	}
+	if bytes.Contains(prompt, []byte("complete navigation budget for this simple task")) {
+		t.Fatalf("optimized simple prompt retained the one-call contract:\n%s", prompt)
+	}
+	if bytes.Contains(prompt, []byte("do not run shell commands or tests")) {
+		t.Fatalf("optimized simple prompt contradicts its required repo-view commands:\n%s", prompt)
+	}
+	promptText := string(prompt)
+	contractStart := strings.Index(
+		promptText,
+		"Use exactly three repo-view commands for this simple task",
+	)
+	contractEnd := strings.Index(promptText, "\n\nExplain changes in commit ")
+	if contractStart < 0 || contractEnd <= contractStart {
+		t.Fatalf("cannot isolate optimized simple contract:\n%s", prompt)
+	}
+	contract := promptText[contractStart:contractEnd]
+	if strings.Count(contract, coreInspectCommand) != 1 ||
+		strings.Count(contract, consumerInspectCommand) != 1 ||
+		strings.Count(contract, "repo-view inspect ") != 2 ||
+		strings.Contains(contract, "repo-view find ") ||
+		strings.Contains(contract, "repo-view changed ") ||
+		strings.Contains(contract, "repo-view outline ") {
+		t.Fatalf("simple contract does not contain exactly two fixed follow-ups:\n%s", contract)
+	}
+	changedIndex := strings.Index(promptText, changedCommand)
+	coreInspectIndex := strings.Index(promptText, coreInspectCommand)
+	consumerInspectIndex := strings.Index(promptText, consumerInspectCommand)
+	if changedIndex < 0 ||
+		changedIndex >= coreInspectIndex ||
+		coreInspectIndex >= consumerInspectIndex {
+		t.Fatalf(
+			"simple command order = changed:%d core-inspect:%d consumer-inspect:%d",
+			changedIndex,
+			coreInspectIndex,
+			consumerInspectIndex,
+		)
+	}
+	for _, leakedAnswer := range []string{
+		"88 to 64 B/op",
+		"+3.49%",
+		"+19.45%",
+		"+4.49%",
+		"166 MiB",
+		"-0.75%",
+		"narrow observable correctness/compatibility regression",
+		"no incorrect behavior or failure was found",
+		"all three nodes remained up",
+		"rejected-reservation cancellation is a no-op",
+	} {
+		if strings.Contains(promptText, leakedAnswer) {
+			t.Errorf("optimized simple prompt leaks expected answer %q", leakedAnswer)
+		}
+	}
+	invocation, err := os.ReadFile(filepath.Join(
+		runDir,
+		"optimized-guarded-high-explain.invocation",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"REPO_VIEW_NAVIGATION_POLICY=adaptive",
+		"REPO_VIEW_NAVIGATION_COMMAND_CAP=3",
+	} {
+		if bytes.Count(invocation, []byte(required)) != 1 {
+			t.Errorf(
+				"optimized invocation does not contain exactly one %q:\n%s",
+				required,
+				invocation,
+			)
+		}
+	}
+}
+
+func TestRunScriptBuildsSourceGroundedSimpleReviewPrompt(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(
+		t,
+		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"awk", "date", "find", "mktemp", "sort", "uname",
+	)
+	sourceRepo, head := initializeRunScriptGitTarget(t)
+	tempRoot := t.TempDir()
+	evidenceRoot := filepath.Join(tempRoot, "evidence")
+	runDir := filepath.Join(evidenceRoot, "simple-review-grounding")
+	command := exec.Command(
+		bashPath,
+		runScript,
+		"--task", "review",
+		"--variant", "all",
+		"--profile", "guarded-high",
+		"--run-id", "simple-review-grounding",
+		"--source", sourceRepo,
+		"--commit", head,
+		"--base", head,
+		"--worktree", filepath.Join(tempRoot, "target"),
+		"--evidence-root", evidenceRoot,
+	)
+	command.Env = runScriptTestEnvironment(t, false)
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("simple review grounding run failed: %v\n%s", err, output)
+	}
+	capturedPrompt, err := os.ReadFile(filepath.Join(runDir, "codex-prompt.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	committedPrompt, err := os.ReadFile(filepath.Join(
+		runDir, "optimized-guarded-high-review.user-prompt.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(capturedPrompt, committedPrompt) {
+		t.Fatal("captured review prompt differs from committed case prompt")
+	}
+	prompt := string(committedPrompt)
+	changedCommand := "repo-view changed --root . --base " + head +
+		" --return context --context 4 --limit 20 --max-code-lines 60 " +
+		"--max-patch-lines 300 --json"
+	coreInspectCommand := simpleCoreInspectCommand()
+	consumerInspectCommand := simpleConsumerInspectCommand()
+	contractStart := strings.Index(
+		prompt,
+		"Use exactly three repo-view commands for this simple task",
+	)
+	contractEnd := strings.Index(prompt, "\n\nReview commit ")
+	if contractStart < 0 || contractEnd <= contractStart {
+		t.Fatalf("cannot isolate optimized simple-review contract:\n%s", prompt)
+	}
+	contract := prompt[contractStart:contractEnd]
+	if strings.Count(contract, "repo-view inspect ") != 2 ||
+		strings.Count(contract, coreInspectCommand) != 1 ||
+		strings.Count(contract, consumerInspectCommand) != 1 ||
+		strings.Contains(contract, "repo-view find ") ||
+		strings.Contains(contract, "repo-view outline ") ||
+		!strings.Contains(
+			contract,
+			"These repo-view invocations are commands; do not describe the run as command-free",
+		) ||
+		!strings.Contains(
+			contract,
+			"Do not run tests or any shell command other than the three required repo-view commands",
+		) {
+		t.Fatalf("simple-review contract is incomplete:\n%s", contract)
+	}
+	changedIndex := strings.Index(prompt, changedCommand)
+	coreIndex := strings.Index(prompt, coreInspectCommand)
+	consumerIndex := strings.Index(prompt, consumerInspectCommand)
+	if changedIndex < 0 || changedIndex >= coreIndex || coreIndex >= consumerIndex {
+		t.Fatalf(
+			"simple-review order = changed:%d core:%d consumer:%d",
+			changedIndex,
+			coreIndex,
+			consumerIndex,
+		)
+	}
+}
 
 func TestRunScriptRejectsMissingValues(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(t, "bash")
@@ -1680,16 +2090,18 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		task            string
-		manifest        bool
-		manifestContent string
-		mutate          func(map[string]any)
-		removeConfig    bool
-		configContent   *string
-		jsonl           *string
-		exitCode        *string
-		wantOutput      string
+		name              string
+		task              string
+		manifest          bool
+		manifestContent   string
+		mutate            func(map[string]any)
+		removeConfig      bool
+		configContent     *string
+		removeCasePrompt  bool
+		casePromptContent *string
+		jsonl             *string
+		exitCode          *string
+		wantOutput        string
 	}{
 		{
 			name:       "missing manifest",
@@ -1707,6 +2119,35 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 			jsonl:        stringPointer(runScriptCompletedJSONL),
 			exitCode:     stringPointer("0\n"),
 			wantOutput:   "baseline generation config missing:",
+		},
+		{
+			name:             "missing exact case prompt",
+			manifest:         true,
+			removeCasePrompt: true,
+			jsonl:            stringPointer(runScriptCompletedJSONL),
+			exitCode:         stringPointer("0\n"),
+			wantOutput:       "baseline case prompt missing for explain:",
+		},
+		{
+			name:              "exact case prompt bytes mismatch",
+			manifest:          true,
+			casePromptContent: stringPointer("tampered prompt"),
+			jsonl:             stringPointer(runScriptCompletedJSONL),
+			exitCode:          stringPointer("0\n"),
+			wantOutput:        "baseline exact case prompt bytes mismatch for baseline-explain:",
+		},
+		{
+			name:     "missing exact case prompt digest",
+			manifest: true,
+			mutate: func(manifest map[string]any) {
+				delete(
+					manifest["case_prompt_digests"].(map[string]string),
+					"baseline-explain",
+				)
+			},
+			jsonl:      stringPointer(runScriptCompletedJSONL),
+			exitCode:   stringPointer("0\n"),
+			wantOutput: "baseline manifest is missing case prompt digest for baseline-explain:",
 		},
 		{
 			name:          "generation config bytes mismatch",
@@ -1933,7 +2374,7 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 			},
 			jsonl:      stringPointer(runScriptCompletedJSONL),
 			exitCode:   stringPointer("0\n"),
-			wantOutput: "baseline manifest generation_config_sha256 mismatch:",
+			wantOutput: "baseline generation config digest mismatch:",
 		},
 		{
 			name:     "missing prompt digest",
@@ -2033,6 +2474,12 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 						t.Fatal(err)
 					}
 					for _, promptTask := range manifestTasks {
+						rendered := runScriptRenderedPrompt(
+							t,
+							promptTask,
+							head[:9],
+							head,
+						)
 						writeRunScriptFile(
 							t,
 							filepath.Join(
@@ -2040,12 +2487,15 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 								"prompts",
 								promptTask+".txt",
 							),
-							runScriptRenderedPrompt(
-								t,
-								promptTask,
-								head[:9],
-								head,
+							rendered,
+						)
+						writeRunScriptFile(
+							t,
+							filepath.Join(
+								baselineDir,
+								"baseline-"+promptTask+".user-prompt.txt",
 							),
+							rendered,
 						)
 					}
 				} else {
@@ -2087,6 +2537,16 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 					filepath.Join(baselineDir, "baseline-explain.exit-code"),
 					*test.exitCode,
 				)
+			}
+			casePromptPath := filepath.Join(
+				baselineDir, "baseline-explain.user-prompt.txt",
+			)
+			if test.removeCasePrompt {
+				if err := os.Remove(casePromptPath); err != nil {
+					t.Fatal(err)
+				}
+			} else if test.casePromptContent != nil {
+				writeRunScriptFile(t, casePromptPath, *test.casePromptContent)
 			}
 
 			evidenceRoot := filepath.Join(tempRoot, "evidence")
@@ -2674,18 +3134,35 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
 		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
-		"awk", "date", "find", "mktemp", "sort", "uname",
+		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
 	)
-	sourceRepo, head := initializeRunScriptGitTarget(t)
+	sourceRepo, head := initializeRunScriptDeepGitTarget(t)
 	tempRoot := t.TempDir()
+	dependencyZip := filepath.Join(tempRoot, "x-time-v0.14.0.zip")
+	writeRunScriptDependencyZip(t, dependencyZip)
 	evidenceRoot := filepath.Join(tempRoot, "evidence")
 	runDir := filepath.Join(evidenceRoot, "optimized-cache")
+	hostileModCache := filepath.Join(tempRoot, "hostile-mod-cache")
+	hostileRateDir := filepath.Join(
+		hostileModCache,
+		"golang.org", "x", "time@v0.14.0", "rate",
+	)
+	if err := os.MkdirAll(hostileRateDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"rate.go", "rate_test.go"} {
+		writeRunScriptFile(
+			t,
+			filepath.Join(hostileRateDir, name),
+			"hostile ambient module cache must never be read\n",
+		)
+	}
 	command := exec.Command(
 		bashPath,
 		runScript,
 		"--task", "deep-explain",
 		"--variant", "all",
-		"--profile", "guarded-high",
+		"--profile", "investigative-verified-high",
 		"--run-id", "optimized-cache",
 		"--source", sourceRepo,
 		"--commit", head,
@@ -2694,13 +3171,18 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 		"--evidence-root", evidenceRoot,
 	)
 	command.Env = append(
-		runScriptTestEnvironment(t, false),
+		runScriptDependencyDownloadEnvironment(
+			t,
+			runScriptTestEnvironment(t, false),
+			dependencyZip,
+		),
 		"GOENV="+filepath.Join(tempRoot, "hostile-goenv"),
 		"GOTOOLCHAIN=go0.0.0+auto",
 		"GOOS=plan9",
 		"GOARCH=386",
 		"CGO_ENABLED=1",
 		"GOPROXY=http://hostile.invalid",
+		"GOMODCACHE="+hostileModCache,
 		"GIT_CONFIG='malformed",
 		"GIT_CONFIG_PARAMETERS='malformed",
 		"GIT_DIR="+filepath.Join(tempRoot, "ambient-git-dir"),
@@ -2717,7 +3199,7 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 		t.Fatalf("optimized snapshot run failed: %v\n%s", err, output)
 	}
 	invocation, err := os.ReadFile(
-		filepath.Join(runDir, "optimized-guarded-high-deep-explain.invocation"),
+		filepath.Join(runDir, "optimized-investigative-verified-high-deep-explain.invocation"),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -2729,12 +3211,23 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	committedDeepPrompt, err := os.ReadFile(filepath.Join(
+		runDir,
+		"optimized-investigative-verified-high-deep-explain.user-prompt.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(capturedPrompt, committedDeepPrompt) {
+		t.Fatal("captured deep prompt differs from committed case prompt")
+	}
 	for _, required := range []string{
 		"MANDATORY experiment navigation protocol",
 		"repo-view changed --root . --base " + head,
 		"Do not use git, rg, grep, sed, cat, nl, head, tail, find, ls",
 		"Do not run repo-view --help or any subcommand --help",
 		"Every find, inspect, and outline command must include --root .",
+		"repo-view outline PATH... --root . --return locations|line|context|scope",
 		"Issue exactly one repo-view command at a time",
 		"Positional inputs to repo-view find must be identifiers",
 		"use --include scope on inspect; do not use --include all",
@@ -2754,12 +3247,14 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 		"repo-view find ClockedReservation --root . --include refs --return locations",
 		"Do not combine it with other symbols",
 		"directly inspect the TestClockedRateLimiter_WaitN_NoRecycle scope",
-		"Use exactly eight repo-view commands and at most one dependency-source shell command",
-		"The eight repository commands are",
-		"After the eight repository calls, use at most one bounded awk command",
-		"For command 6, directly inspect service/worker/scheduler/fx.go:120",
-		"For command 7, directly inspect service/history/queues/reader_quotas.go:14",
-		"common/quotas/multi_request_rate_limiter_impl.go:17, :56, and :70",
+		"Use exactly eight repo-view commands and exactly one dependency-source shell command",
+		"Commands 2 through 8 must be exactly",
+		"repo-view outline service/worker/scheduler/fx.go service/worker/scheduler/activities.go",
+		"Then run this exact command 9, the only non-repo-view command",
+		`awk -v OFS=: "((FILENAME == ARGV[1]) && FNR >= 120 && FNR <= 230) || ((FILENAME == ARGV[2]) && FNR >= 343 && FNR <= 420) { print FILENAME, FNR; print }" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate.go" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate_test.go"`,
+		"repo-view inspect service/worker/scheduler/fx.go:120 service/worker/scheduler/fx.go:133",
+		"repo-view inspect service/history/queues/reader_quotas.go:14 service/history/queues/reader_quotas.go:39",
+		"common/quotas/multi_request_rate_limiter_impl.go:17 common/quotas/multi_request_rate_limiter_impl.go:56",
 		"common/quotas/rate_limiter_impl_test.go:23",
 		"Use the exact labels \"Measured results\" and \"Inferred downstream benefit\"",
 		"the Reservation interface does not promise a particular zero-argument clock source",
@@ -2813,6 +3308,55 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 			)
 		}
 	}
+	manifestContent, err := os.ReadFile(filepath.Join(runDir, "manifest.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifestMetadata struct {
+		DependencySource struct {
+			ManifestPath   string `json:"manifest_path"`
+			ManifestDigest string `json:"manifest_sha256"`
+			Module         string `json:"module"`
+			Version        string `json:"version"`
+			Sum            string `json:"sum"`
+		} `json:"dependency_source"`
+	}
+	if err := json.Unmarshal(manifestContent, &manifestMetadata); err != nil {
+		t.Fatal(err)
+	}
+	if manifestMetadata.DependencySource.ManifestPath !=
+		"dependency-source/manifest.json" ||
+		len(manifestMetadata.DependencySource.ManifestDigest) != 64 ||
+		manifestMetadata.DependencySource.Module != "golang.org/x/time" ||
+		manifestMetadata.DependencySource.Version != "v0.14.0" ||
+		manifestMetadata.DependencySource.Sum !=
+			"h1:MRx4UaLrDotUKUdCIqzPC48t1Y9hANFKIRpNx+Te8PI=" {
+		t.Fatalf("authenticated dependency provenance missing: %+v", manifestMetadata)
+	}
+	for _, relative := range []string{
+		"dependency-source/manifest.json",
+		"dependency-source/target-go.mod",
+		"dependency-source/target-go.sum",
+		"dependency-source/golang.org/x/time@v0.14.0/rate/rate.go",
+		"dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go",
+	} {
+		if info, err := os.Lstat(filepath.Join(runDir, filepath.FromSlash(relative))); err != nil || !info.Mode().IsRegular() {
+			t.Errorf("published dependency source %s is missing or unsafe: %v", relative, err)
+		}
+	}
+	publishedRateSource, err := os.ReadFile(filepath.Join(
+		runDir,
+		"dependency-source", "golang.org", "x", "time@v0.14.0", "rate", "rate.go",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(publishedRateSource, []byte(runScriptDependencyRateSource)) {
+		t.Fatalf(
+			"authenticated dependency snapshot did not come from the pinned archive: %q",
+			publishedRateSource,
+		)
+	}
 	for _, internalPath := range []string{
 		".repo-view-cache",
 		".source-snapshot",
@@ -2825,14 +3369,135 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 		}
 	}
 	if _, err := os.Stat(
-		filepath.Join(runDir, "changed-packet-guarded-high.json"),
+		filepath.Join(runDir, "changed-packet-investigative-verified-high.json"),
 	); err != nil {
 		t.Fatal(err)
+	}
+	qualityCheck := filepath.Join(filepath.Dir(runScript), "quality-check.sh")
+	qualityCommand := exec.Command(
+		bashPath,
+		qualityCheck,
+		runDir,
+		"--judge-repeats", "0",
+	)
+	qualityCommand.Env = runScriptTestEnvironment(t, false)
+	if output, err := qualityCommand.CombinedOutput(); err != nil {
+		t.Fatalf("quality reanalysis of dependency evidence failed: %v\n%s", err, output)
+	}
+	qualityInputsContent, err := os.ReadFile(
+		filepath.Join(runDir, "quality", "inputs.json"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var qualityInputs struct {
+		Inputs    map[string]string `json:"inputs"`
+		Snapshots map[string]string `json:"snapshots"`
+	}
+	if err := json.Unmarshal(qualityInputsContent, &qualityInputs); err != nil {
+		t.Fatal(err)
+	}
+	for _, relative := range []string{
+		"dependency-source/manifest.json",
+		"dependency-source/target-go.mod",
+		"dependency-source/target-go.sum",
+		"dependency-source/golang.org/x/time@v0.14.0/rate/rate.go",
+		"dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go",
+	} {
+		if len(qualityInputs.Inputs[relative]) != 64 ||
+			len(qualityInputs.Snapshots[relative]) != 64 {
+			t.Errorf("quality inputs do not bind dependency source %s", relative)
+		}
 	}
 	assertRunCompletionMarker(t, runDir, "success", 0)
 }
 
-func TestRunScriptImportsCompatibleCompleteBaseline(t *testing.T) {
+func TestRunScriptRejectsDependencySnapshotMutationDuringCodexRun(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(
+		t,
+		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
+	)
+	sourceRepo, head := initializeRunScriptDeepGitTarget(t)
+	tempRoot := t.TempDir()
+	dependencyZip := filepath.Join(tempRoot, "x-time-v0.14.0.zip")
+	writeRunScriptDependencyZip(t, dependencyZip)
+	evidenceRoot := filepath.Join(tempRoot, "evidence")
+	command := exec.Command(
+		bashPath,
+		runScript,
+		"--task", "deep-explain",
+		"--variant", "all",
+		"--profile", "investigative-verified-high",
+		"--run-id", "dependency-snapshot-race",
+		"--source", sourceRepo,
+		"--commit", head,
+		"--base", head,
+		"--worktree", filepath.Join(tempRoot, "target"),
+		"--evidence-root", evidenceRoot,
+		"--order", "optimized-first",
+	)
+	command.Env = runScriptDependencyDownloadEnvironment(
+		t,
+		runScriptTestEnvironment(t, false),
+		dependencyZip,
+	)
+	output, err := command.CombinedOutput()
+	assertRunScriptExit(t, err, 1, output)
+	if !strings.Contains(
+		string(output),
+		"generation dependency snapshot changed:",
+	) {
+		t.Fatalf("dependency snapshot race diagnostic = %q", output)
+	}
+	assertRunNotPublished(t, evidenceRoot, "dependency-snapshot-race")
+	assertNoRunScriptPartialDirectories(
+		t,
+		evidenceRoot,
+		"dependency-snapshot-race",
+	)
+}
+
+func TestRunScriptRejectsVerifiedDeepTargetWithoutDependencyChecksums(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(
+		t,
+		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
+	)
+	sourceRepo, head := initializeRunScriptGitTarget(t)
+	tempRoot := t.TempDir()
+	evidenceRoot := filepath.Join(tempRoot, "evidence")
+	command := exec.Command(
+		bashPath,
+		runScript,
+		"--task", "deep-explain",
+		"--variant", "all",
+		"--profile", "investigative-verified-high",
+		"--run-id", "missing-dependency-checksums",
+		"--source", sourceRepo,
+		"--commit", head,
+		"--base", head,
+		"--worktree", filepath.Join(tempRoot, "target"),
+		"--evidence-root", evidenceRoot,
+	)
+	command.Env = runScriptTestEnvironment(t, false)
+	output, err := command.CombinedOutput()
+	assertRunScriptExit(t, err, 1, output)
+	if !strings.Contains(
+		string(output),
+		"verified dependency snapshot requires regular target go.mod and go.sum files",
+	) {
+		t.Fatalf("missing dependency checksum diagnostic = %q", output)
+	}
+	assertRunNotPublished(t, evidenceRoot, "missing-dependency-checksums")
+	assertNoRunScriptPartialDirectories(
+		t,
+		evidenceRoot,
+		"missing-dependency-checksums",
+	)
+}
+
+func TestRunScriptImportsBaselineOnlyIntoOptimizedRun(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
 		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
@@ -2878,7 +3543,7 @@ func TestRunScriptImportsCompatibleCompleteBaseline(t *testing.T) {
 		bashPath,
 		runScript,
 		"--task", "explain",
-		"--variant", "baseline",
+		"--variant", "optimized",
 		"--baseline-from", baselineDir,
 		"--run-id", "compatible",
 		"--source", sourceRepo,
@@ -2917,11 +3582,29 @@ func TestRunScriptImportsCompatibleCompleteBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(importedGenerationConfig, currentGenerationConfig) {
-		t.Fatalf(
-			"imported generation config changed:\n%s",
-			importedGenerationConfig,
-		)
+	if bytes.Equal(importedGenerationConfig, currentGenerationConfig) {
+		t.Fatal("baseline-only and optimized generation configs unexpectedly match")
+	}
+	if _, err := os.Stat(filepath.Join(
+		runDir,
+		"optimized-guarded-high-explain.jsonl",
+	)); err != nil {
+		t.Fatal(err)
+	}
+	importedBaselinePrompt, err := os.ReadFile(filepath.Join(
+		runDir, "baseline-source-baseline-explain.user-prompt.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	currentBaselinePrompt, err := os.ReadFile(filepath.Join(
+		runDir, "baseline-explain.user-prompt.txt",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(importedBaselinePrompt, currentBaselinePrompt) {
+		t.Fatal("imported baseline exact prompt differs from current commitment")
 	}
 	assertRunCompletionMarker(t, runDir, "success", 0)
 	checksumCommand := exec.Command("sha256sum", "-c", "source-SHA256SUMS")
@@ -2939,6 +3622,89 @@ func TestRunScriptImportsCompatibleCompleteBaseline(t *testing.T) {
 		bytes.Contains(archiveOutput, []byte("repo-view.bin")) {
 		t.Fatalf("source archive contains generated run artifacts:\n%s", archiveOutput)
 	}
+}
+
+func TestRunScriptRejectsBaselineSharedGenerationConfigMismatch(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(
+		t,
+		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"awk", "date", "mktemp", "uname",
+	)
+	sourceRepo, head := initializeRunScriptGitTarget(t)
+	tempRoot := t.TempDir()
+	baselineDir := filepath.Join(tempRoot, "baseline")
+	if err := os.Mkdir(baselineDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	manifest := runScriptBaselineManifest(
+		t,
+		head,
+		head[:9],
+		head,
+		head,
+		runScriptFakeGoVersion,
+	)
+	configContent := runScriptGenerationConfig(t, manifest)
+	var config map[string]any
+	if err := json.Unmarshal(configContent, &config); err != nil {
+		t.Fatal(err)
+	}
+	config["auth_source_permission"] = "different-policy"
+	configContent, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configDigest := sha256.Sum256(configContent)
+	manifest["generation_config_sha256"] = fmt.Sprintf("%x", configDigest)
+	writeRunScriptJSON(
+		t,
+		filepath.Join(baselineDir, "manifest.json"),
+		manifest,
+	)
+	if err := os.WriteFile(
+		filepath.Join(baselineDir, "generation-config.json"),
+		configContent,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	writeRunScriptFile(
+		t,
+		filepath.Join(baselineDir, "baseline-explain.jsonl"),
+		runScriptCompletedJSONL,
+	)
+	writeRunScriptFile(
+		t,
+		filepath.Join(baselineDir, "baseline-explain.exit-code"),
+		"0\n",
+	)
+
+	evidenceRoot := filepath.Join(tempRoot, "evidence")
+	command := exec.Command(
+		bashPath,
+		runScript,
+		"--task", "explain",
+		"--variant", "optimized",
+		"--baseline-from", baselineDir,
+		"--run-id", "shared-mismatch",
+		"--source", sourceRepo,
+		"--commit", head,
+		"--prompt-commit", head[:9],
+		"--base", head,
+		"--worktree", filepath.Join(tempRoot, "target"),
+		"--evidence-root", evidenceRoot,
+	)
+	command.Env = runScriptTestEnvironment(t, true)
+	output, err := command.CombinedOutput()
+	assertRunScriptExit(t, err, 1, output)
+	if !strings.Contains(
+		string(output),
+		"baseline shared generation config mismatch:",
+	) {
+		t.Fatalf("shared-config diagnostic = %q", output)
+	}
+	assertRunNotPublished(t, evidenceRoot, "shared-mismatch")
+	assertNoRunScriptPartialDirectories(t, evidenceRoot, "shared-mismatch")
 }
 
 func requireRunScriptTestTools(t *testing.T, tools ...string) (string, string) {
@@ -3050,13 +3816,26 @@ case "${CODEX_HOME-}" in
     ;;
 esac
 case "${CODEX_HOME-}" in
+  *.dependency-snapshot-race.partial.*)
+    printf '%s\n' 'mutated during Codex run' > \
+      "${CODEX_HOME}/../.shell-home/dependencies/golang.org/x/time@v0.14.0/rate/rate.go"
+    ;;
+esac
+case "${CODEX_HOME-}" in
   *.incomplete.partial.*) run_script_codex_mode=incomplete ;;
   *) run_script_codex_mode=completed ;;
+esac
+case "${CODEX_HOME-}" in
+  *.optimized-cache.partial.*) run_script_codex_answer=true ;;
+  *) run_script_codex_answer=false ;;
 esac
 case "$run_script_codex_mode" in
   completed)
     printf '%s\n' '{"type":"thread.started","thread_id":"test"}'
     printf '%s\n' '{"type":"turn.started"}'
+    if [ "$run_script_codex_answer" = "true" ]; then
+      printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"test answer"}}'
+    fi
     printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}'
     exit 0
     ;;
@@ -3143,6 +3922,95 @@ exit 99
 		environment = append(environment, "TMPDIR="+goTempDir)
 	}
 	return environment
+}
+
+func writeRunScriptDependencyZip(t *testing.T, path string) {
+	t.Helper()
+	archive, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zipWriter := zip.NewWriter(archive)
+	for _, fixture := range []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "golang.org/x/time@v0.14.0/rate/rate.go",
+			content: runScriptDependencyRateSource,
+		},
+		{
+			name:    "golang.org/x/time@v0.14.0/rate/rate_test.go",
+			content: runScriptDependencyRateTestSource,
+		},
+	} {
+		header := &zip.FileHeader{Name: fixture.name, Method: zip.Store}
+		header.SetMode(0o644)
+		entry, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := entry.Write([]byte(fixture.content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := zipWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := archive.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func runScriptDependencyDownloadEnvironment(
+	t *testing.T,
+	environment []string,
+	dependencyZip string,
+) []string {
+	t.Helper()
+	realGo, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	goPath := filepath.Join(fakeBin, "go")
+	writeRunScriptFile(t, goPath, `#!/bin/sh
+set -eu
+if [ "$#" -eq 4 ] &&
+  [ "$1" = "mod" ] &&
+  [ "$2" = "download" ] &&
+  [ "$3" = "-json" ] &&
+  [ "$4" = "golang.org/x/time@v0.14.0" ]; then
+  archive_dir="$GOMODCACHE/cache/download/golang.org/x/time/@v"
+  archive_path="$archive_dir/v0.14.0.zip"
+  mkdir -p -- "$archive_dir"
+  cp -- "$RUN_SCRIPT_GO_DEPENDENCY_ZIP" "$archive_path"
+  printf '%s\n' \
+    '{"Path":"golang.org/x/time","Version":"v0.14.0","Zip":"'"$archive_path"'","Sum":"h1:MRx4UaLrDotUKUdCIqzPC48t1Y9hANFKIRpNx+Te8PI=","GoModSum":"h1:eL/Oa2bBBK0TkX57Fyni+NgnyQQN4LitPmob2Hjnqw4="}'
+  exit 0
+fi
+exec "$RUN_SCRIPT_GO_REAL_BINARY" "$@"
+`)
+	if err := os.Chmod(goPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	result := make([]string, 0, len(environment)+3)
+	for _, variable := range environment {
+		if strings.HasPrefix(variable, "PATH=") {
+			result = append(
+				result,
+				"PATH="+fakeBin+string(os.PathListSeparator)+
+					strings.TrimPrefix(variable, "PATH="),
+			)
+			continue
+		}
+		result = append(result, variable)
+	}
+	return append(
+		result,
+		"RUN_SCRIPT_GO_REAL_BINARY="+realGo,
+		"RUN_SCRIPT_GO_DEPENDENCY_ZIP="+dependencyZip,
+	)
 }
 
 func runScriptTarPauseEnvironment(
@@ -3235,7 +4103,10 @@ func assertNoRunScriptPartialDirectories(t *testing.T, evidenceRoot, runID strin
 		t.Fatal(err)
 	}
 	if len(matches) != 0 {
-		t.Fatalf("private run stages remain after failure: %v", matches)
+		listing, _ := exec.Command(
+			"find", matches[0], "-maxdepth", "6", "-printf", "%m %y %p\n",
+		).CombinedOutput()
+		t.Fatalf("private run stages remain after failure: %v\n%s", matches, listing)
 	}
 }
 
@@ -3346,6 +4217,8 @@ func runScriptGenerationConfig(
 		"profiles_snapshot_sha256":                 profilesSnapshotSHA256,
 		"prompt_files":                             runScriptManifestStringMap(t, manifest, "prompt_files"),
 		"prompt_digests":                           runScriptManifestStringMap(t, manifest, "prompt_digests"),
+		"case_prompt_files":                        runScriptManifestStringMap(t, manifest, "case_prompt_files"),
+		"case_prompt_digests":                      runScriptManifestStringMap(t, manifest, "case_prompt_digests"),
 		"mechanical_navigation_semantics_enforced": mechanical,
 		"mechanical_navigation_contract": map[string]string{
 			"required_root":                "<worktree>",
@@ -3574,8 +4447,15 @@ func runScriptBaselineManifest(
 		tasks...,
 	)
 	promptFiles := make(map[string]string, len(tasks))
+	casePromptFiles := make(map[string]string, len(tasks))
+	casePromptDigests := make(map[string]string, len(tasks))
 	for _, task := range tasks {
 		promptFiles[task] = "prompts/" + task + ".txt"
+		caseName := "baseline-" + task
+		casePromptFiles[caseName] = caseName + ".user-prompt.txt"
+		rendered := runScriptRenderedPrompt(t, task, promptCommit, baseCommit)
+		digest := sha256.Sum256([]byte(rendered))
+		casePromptDigests[caseName] = fmt.Sprintf("%x", digest)
 	}
 	profilesSnapshot := runScriptProfilesSnapshot(t)
 	profilesDigest := sha256.Sum256(profilesSnapshot)
@@ -3597,6 +4477,8 @@ func runScriptBaselineManifest(
 		"go_cache":                                 goEnvironment.Cache,
 		"prompt_files":                             promptFiles,
 		"prompt_digests":                           promptDigests,
+		"case_prompt_files":                        casePromptFiles,
+		"case_prompt_digests":                      casePromptDigests,
 	}
 	generationConfig := runScriptGenerationConfig(t, manifest)
 	generationDigest := sha256.Sum256(generationConfig)
@@ -3676,6 +4558,48 @@ func runScriptRenderedPrompt(
 func initializeRunScriptGitTarget(t *testing.T) (string, string) {
 	t.Helper()
 	return initializeRunScriptGitTargetWithContent(t, "fixture\n")
+}
+
+func initializeRunScriptDeepGitTarget(t *testing.T) (string, string) {
+	t.Helper()
+	repo := t.TempDir()
+	writeRunScriptFile(t, filepath.Join(repo, "fixture.txt"), "fixture\n")
+	writeRunScriptFile(
+		t,
+		filepath.Join(repo, "go.mod"),
+		"module example.invalid/run-script-deep\n\n"+
+			"go 1.26\n\nrequire (\n\tgolang.org/x/time v0.14.0\n)\n",
+	)
+	writeRunScriptFile(
+		t,
+		filepath.Join(repo, "go.sum"),
+		"golang.org/x/time v0.14.0 "+
+			"h1:MRx4UaLrDotUKUdCIqzPC48t1Y9hANFKIRpNx+Te8PI=\n"+
+			"golang.org/x/time v0.14.0/go.mod "+
+			"h1:eL/Oa2bBBK0TkX57Fyni+NgnyQQN4LitPmob2Hjnqw4=\n",
+	)
+	for _, arguments := range [][]string{
+		{"init", "--quiet"},
+		{"add", "fixture.txt", "go.mod", "go.sum"},
+		{
+			"-c", "user.name=Run Script Test",
+			"-c", "user.email=run-script-test@example.invalid",
+			"-c", "commit.gpgSign=false",
+			"-c", "core.hooksPath=/dev/null",
+			"commit", "--quiet", "--no-gpg-sign", "--no-verify", "-m", "fixture",
+		},
+		{"branch", "-M", "main"},
+	} {
+		command := exec.Command("git", append([]string{"-C", repo}, arguments...)...)
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", arguments[0], err, output)
+		}
+	}
+	output, err := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return repo, strings.TrimSpace(string(output))
 }
 
 func initializeRunScriptGitTargetWithContent(
@@ -3865,6 +4789,26 @@ func writeRunScriptJSON(t *testing.T, path string, value any) {
 				t.Fatal(err)
 			}
 			for task, relative := range promptFiles {
+				rendered := runScriptRenderedPrompt(
+					t,
+					task,
+					manifest["prompt_commit"].(string),
+					manifest["base_commit"].(string),
+				)
+				writeRunScriptFile(
+					t,
+					filepath.Join(filepath.Dir(path), filepath.FromSlash(relative)),
+					rendered,
+				)
+			}
+			casePromptFiles := runScriptManifestStringMap(
+				t, manifest, "case_prompt_files",
+			)
+			for name, relative := range casePromptFiles {
+				task := strings.TrimPrefix(name, "baseline-")
+				if task == name {
+					t.Fatalf("unsupported fixture case prompt %q", name)
+				}
 				rendered := runScriptRenderedPrompt(
 					t,
 					task,

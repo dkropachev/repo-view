@@ -75,7 +75,8 @@ Prerequisites:
 
 - authenticated `codex` CLI
 - Bash 4+ on Linux, with `awk`, `cmp`, `find`, `git`, `go`, `gzip`, `jq`,
-  `mktemp`, `realpath -m`, `sha256sum`, `sort`, `stat`, `tar`, and `tee`
+  `mktemp`, `realpath -m`, `sha256sum`, `sort`, `stat`, `tar`, `tee`, and
+  `unzip`
 - the configured source repository and pinned commit
 
 Run the baseline and recommended `guarded-high` profile for both tasks:
@@ -140,7 +141,16 @@ default to `guarded-high`; deep tasks default to
 `investigative-verified-high`. The latter uses a mechanically enforced
 34-repo-view-invocation cap and requires Codex `--json` events. The current
 deep reservation protocol uses exactly eight targeted `repo-view` calls plus
-at most one bounded dependency-source read.
+exactly one bounded dependency-source `awk` read. Analyzer, quality, and
+promotion gates require the ordered command sequence and the exact dependency
+command; prompt-only compliance is not accepted. Before generation, the
+runner creates a fresh private `GOMODCACHE`, authenticates the exact
+`golang.org/x/time v0.14.0` module archive against the target commit's
+`go.sum`, and extracts only the two permitted rate-source files. Command 9
+reads those files through the stable `$HOME/dependencies/...` path, never the
+ambient module cache. The target `go.mod`/`go.sum`, extracted bytes, and a
+provenance manifest are retained under `dependency-source/` and bound by
+`source-SHA256SUMS`.
 
 `--commit` must be a full lowercase 40- or 64-hex object ID. The runner
 verifies it from a fresh fetch against `--source`, even when reusing an
@@ -207,15 +217,25 @@ experiments/lsp-replacement/run.sh \
 base, model mode/configuration, Codex version, Go version, and
 generation-isolation pins match
 the new run. Selected-task prompt digests and the normalized generation
-configuration digest must match too. Legacy `evidence/current/simple` and
-`current/deep` manifests do not carry those pins and are intentionally not
-reusable.
+configuration's shared environment projection must match too; baseline-only
+case-prompt bindings and the navigation-enforcement marker are self-bound to
+their source run and may differ from the optimized run. Legacy
+`evidence/current/simple` and `current/deep` manifests do not carry those pins
+and are intentionally not reusable.
 
 `--variant optimized` requires `--baseline-from`; use `--variant all` to
 generate a live same-run comparison. Optimized invocations pass the canonical
 root, resolved base commit, and profile return contract into the wrapper, and
 both the manifest and normalized generation config record whether those
 mechanical navigation semantics are enforced.
+
+Treat cache-adjusted effective-token results from different runs as directly
+comparable only when their `task_selection`, `variant_selection`, `order`, and
+baseline-import schedule match. Prompt-cache warmth depends on that execution
+schedule. Historical comparisons must therefore report raw-token change and
+the baseline and optimized cached-input percentages (including their delta)
+alongside effective-token change. A colder cache with lower raw token use is
+not, by itself, evidence of a navigation regression.
 
 ## Quality
 

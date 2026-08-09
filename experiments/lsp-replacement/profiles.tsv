@@ -7,7 +7,7 @@ patch-high	locations	0	20	60	300	high	off	terminal	1	Patch-only packet with lowe
 balanced-medium	context	4	20	60	300	medium	off	terminal	1	Balanced packet with medium reasoning effort
 context2-medium	context	2	20	60	300	medium	off	terminal	1	Smaller context with medium reasoning effort
 patch-medium	locations	0	20	60	300	medium	off	terminal	1	Patch-only packet with medium reasoning effort
-guarded-high	context	4	20	60	300	high	on	terminal	1	Recommended default: quality-confirmed lower-cost profile
+guarded-high	context	4	20	60	300	high	on	adaptive	3	Recommended default: bounded three-call source-grounded profile
 guarded-medium	context	4	20	60	300	medium	on	terminal	1	Balanced packet, medium reasoning, explicit answer completeness guard
 investigative-high	context	4	20	60	300	high	on	adaptive	0	Unbounded exploratory control; rejected on deep tasks
 investigative-batched-high	context	4	20	60	300	high	on	batched	20	Batched multi-stage navigation with a 20-repo-view-invocation ceiling
