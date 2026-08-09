@@ -744,7 +744,7 @@ func validModelIdentity(value string) bool {
 	if value == "" || len(value) > 256 || value[0] == '-' {
 		return false
 	}
-	for index := 0; index < len(value); index++ {
+	for index := range len(value) {
 		if value[index] < 0x21 || value[index] > 0x7e {
 			return false
 		}
@@ -1638,11 +1638,6 @@ func equivalentGenerationConfigsExceptMechanicalNavigation(
 	return reflect.DeepEqual(leftConfig, rightConfig), nil
 }
 
-func validateQualityAggregate(runDir string) error {
-	_, err := readQualityAggregate(runDir, "")
-	return err
-}
-
 func decodeStrictJSON(content []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(content))
 	decoder.DisallowUnknownFields()
@@ -1733,7 +1728,7 @@ func validQualityModelIdentity(value string) bool {
 	if value == "" || len(value) > 256 || value[0] == '-' {
 		return false
 	}
-	for index := 0; index < len(value); index++ {
+	for index := range len(value) {
 		if value[index] < 0x21 || value[index] > 0x7e {
 			return false
 		}
@@ -2289,9 +2284,10 @@ func validateJudgeMembership(
 		if !current.Completed {
 			continue
 		}
-		if current.Variant == "baseline" {
+		switch current.Variant {
+		case "baseline":
 			baselines[current.Task] = current.Name == "baseline-"+current.Task
-		} else if current.Variant == "optimized" {
+		case "optimized":
 			if candidates[current.Task] == nil {
 				candidates[current.Task] = make(map[string]bool)
 			}
@@ -4334,19 +4330,6 @@ func qualityManifestTasks(selection string) ([]string, bool) {
 	default:
 		return nil, false
 	}
-}
-
-func containsAll(values []string, required ...string) bool {
-	seen := make(map[string]bool, len(values))
-	for _, value := range values {
-		seen[value] = true
-	}
-	for _, value := range required {
-		if !seen[value] {
-			return false
-		}
-	}
-	return true
 }
 
 func SummarizeEvidence(runDir string, names []string) ([]EvidenceMetric, error) {
