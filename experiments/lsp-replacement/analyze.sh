@@ -851,11 +851,34 @@ for log in "${inputs_dir}"/*.jsonl; do
             )
         )
         end;
+      def command_executable_pattern($executables):
+        "(?:^|[\\n\\r;|&(){}\u0060])"
+        + "[\\t ]*"
+        + "(?:(?:time(?:[\\t ]+-[^\\t ]+)*|then|do|else|elif|if|while|until|builtin|command|exec|sudo|env|!)"
+        + "[\\t ]+)*"
+        + "(?:[A-Za-z_][A-Za-z0-9_]*\\+?=(?:"
+        + "\u0027[^\u0027]*\u0027"
+        + "|\u0022(?:\\\\.|[^\u0022])*\u0022"
+        + "|\\$\u0027[^\u0027]*\u0027"
+        + "|\\$\u0022(?:\\\\.|[^\u0022])*\u0022"
+        + "|(?:\\\\.|[^\\t \\n\\r;|&])*"
+        + ")[\\t ]+)*"
+        + "[\u0027\u0022]?"
+        + "(?:[^ \\t\\n\\r;|&(\u0027\u0022\u0060]+/)?"
+        + $executables
+        + "[\u0027\u0022]?";
+      def command_invocation($command; $executables):
+        $command | test(
+          command_executable_pattern($executables)
+          + "(?=[\\n\\r\\t ;|&)]|$)"
+        );
       def repo_view_invocations($command; $subcommand):
         [
           $command
           | scan(
-              "repo-view(?:\\.bin)?\\s+"
+              "(?:^|[\\n\\r\\t ;|&(\u0027\u0022\u0060])"
+              + "(?:[^ \\t\\n\\r;|&(\u0027\u0022\u0060]+/)?"
+              + "repo-view(?:\\.bin)?\\s+"
               + $subcommand
               + "(?:\\s|$)"
             )
@@ -987,6 +1010,887 @@ for log in "${inputs_dir}"/*.jsonl; do
               type == "object" and .code_truncated == false
             )
           );
+      def shell_segments($command):
+        (
+          reduce range(0; ($command | length)) as $index (
+            {
+              segments: [""],
+              quote: "",
+              escaped: false,
+              comment: false,
+              token_boundary: true
+            };
+            ($command[$index:$index + 1]) as $character
+            | if .comment then
+                if ($character | test("[\\n\\r]")) then
+                  .segments += [""]
+                  | .comment = false
+                  | .token_boundary = true
+                else
+                  .
+                end
+              elif .escaped then
+                .segments[-1] += (
+                  if ($character | test("[\\t \\n\\r;|&(){}#\u0060$]")) then
+                    "_"
+                  else
+                    $character
+                  end
+                )
+                | .escaped = false
+                | .token_boundary = false
+              elif $character == "\\" and .quote != "\u0027" then
+                .segments[-1] += $character
+                | .escaped = true
+                | .token_boundary = false
+              elif .quote != "" then
+                if $character == .quote then
+                  .segments[-1] += $character
+                  | .quote = ""
+                  | .token_boundary = false
+                elif .quote != "\u0060" and (
+                  ($character | test("[;\\n\\r|&{}]"))
+                  or (
+                    .quote == "\u0027"
+                    and $character == "\u0060"
+                  )
+                  or (
+                    ($character == "(" or $character == ")")
+                    and (
+                      .quote != "\u0022"
+                      or
+                      $character != "("
+                      or (.segments[-1] | endswith("$") | not)
+                    )
+                  )
+                ) then
+                  .segments[-1] += " "
+                  | .token_boundary = false
+                else
+                  .segments[-1] += $character
+                  | .token_boundary = false
+                end
+              elif (
+                $character == "\u0027"
+                or $character == "\u0022"
+                or $character == "\u0060"
+              ) then
+                .segments[-1] += $character
+                | .quote = $character
+                | .token_boundary = false
+              elif $character == "#" and .token_boundary then
+                .comment = true
+              elif ($character | test("[;\\n\\r|&]")) then
+                .segments += [""]
+                | .token_boundary = true
+              elif ($character | test("[\\t ]")) then
+                .segments[-1] += $character
+                | .token_boundary = true
+              elif ($character | test("[(){}]")) then
+                .segments[-1] += $character
+                | .token_boundary = (
+                    (
+                      .token_boundary
+                      and (
+                        $character != "{"
+                        or ($command[$index + 1:$index + 2] | test("^[\\t \\n\\r;|&}]?$"))
+                      )
+                    )
+                    or (
+                      $character == "("
+                      and (.segments[-1][0:-1] | endswith("$"))
+                    )
+                  )
+              else
+                .segments[-1] += $character
+                | .token_boundary = false
+              end
+          )
+          | .segments
+          | map(select(test("\\S")))
+        );
+      def repository_path_reference($command):
+        (
+          $manifest_worktree != ""
+          and ($command | contains($manifest_worktree + "/"))
+        )
+        or ($command | test(
+            "(?:^|[\\n\\r\\t \u0027\u0022(=,:])"
+            + "(?:(?:\\.\\.?/|[A-Za-z0-9_@+.-]+/)"
+            + "[A-Za-z0-9_@+./-]+"
+            + "|\\.[A-Za-z0-9_@+-][A-Za-z0-9_@+.-]*"
+            + "|[A-Za-z0-9_@+-]+\\."
+            + "(?:bash|c|cc|cfg|conf|cpp|cs|css|env|go|graphql|h|hpp|html|ini|java|js|json|jsx|kt|lock|md|mjs|mod|proto|py|rs|scss|sh|sql|sum|swift|toml|ts|tsx|txt|vue|xml|yaml|yml|zsh)"
+            + ")"
+            + "(?:[\\n\\r\\t ;|&<>)\u0027\u0022,]|$)"
+          ));
+      def radix_integer($digits; $radix):
+        "0123456789abcdef" as $alphabet
+        | reduce ($digits | ascii_downcase | explode[]) as $digit (
+            0;
+            (. * $radix) + ($alphabet | explode | index($digit))
+          );
+      def codepoint_text($digits; $radix):
+        radix_integer($digits; $radix) as $codepoint
+        | if $codepoint <= 1114111
+          and ($codepoint < 55296 or $codepoint > 57343) then
+            [$codepoint] | implode
+          else
+            ""
+          end;
+      def ansi_escape($suffix):
+        if $suffix | test("^x[0-9A-Fa-f]{1,2}") then
+          ($suffix | capture("^x(?<digits>[0-9A-Fa-f]{1,2})").digits) as $digits
+          | {
+              text: codepoint_text($digits; 16),
+              consumed: (1 + ($digits | length))
+            }
+        elif $suffix | test("^u[0-9A-Fa-f]{4}") then
+          ($suffix | capture("^u(?<digits>[0-9A-Fa-f]{4})").digits) as $digits
+          | {text: codepoint_text($digits; 16), consumed: 5}
+        elif $suffix | test("^U[0-9A-Fa-f]{8}") then
+          ($suffix | capture("^U(?<digits>[0-9A-Fa-f]{8})").digits) as $digits
+          | {text: codepoint_text($digits; 16), consumed: 9}
+        elif $suffix | test("^[0-7]{1,3}") then
+          ($suffix | capture("^(?<digits>[0-7]{1,3})").digits) as $digits
+          | {
+              text: codepoint_text($digits; 8),
+              consumed: ($digits | length)
+            }
+        elif ($suffix | length) == 0 then
+          {text: "\\", consumed: 0}
+        else
+          ($suffix[0:1]) as $character
+          | {
+              text: (
+                if $character == "a" then [7] | implode
+                elif $character == "b" then "\b"
+                elif $character == "e" or $character == "E" then
+                  [27] | implode
+                elif $character == "f" then "\f"
+                elif $character == "n" then "\n"
+                elif $character == "r" then "\r"
+                elif $character == "t" then "\t"
+                elif $character == "v" then [11] | implode
+                elif $character == "\\"
+                  or $character == "\u0027"
+                  or $character == "\u0022"
+                  or $character == "?" then
+                  $character
+                else
+                  "\\" + $character
+                end
+              ),
+              consumed: 1
+            }
+        end;
+      def normalized_shell_word:
+        . as $word
+        | reduce range(0; ($word | length)) as $index (
+            {
+              text: "",
+              quote: "",
+              escaped: false,
+              skip: 0
+            };
+            ($word[$index:$index + 1]) as $character
+            | if .skip > 0 then
+                .skip -= 1
+              elif .escaped then
+                .text += $character
+                | .escaped = false
+              elif .quote == "single" then
+                if $character == "\u0027" then
+                  .quote = ""
+                else
+                  .text += $character
+                end
+              elif .quote == "ansi" then
+                if $character == "\u0027" then
+                  .quote = ""
+                elif $character == "\\" then
+                  ansi_escape($word[$index + 1:]) as $escape
+                  | .text += $escape.text
+                  | .skip = $escape.consumed
+                else
+                  .text += $character
+                end
+              elif .quote == "double" then
+                if $character == "\u0022" then
+                  .quote = ""
+                elif $character == "\\" and (
+                  $word[$index + 1:$index + 2]
+                  | test("^[\\$\u0022\\\\\u0060]$")
+                ) then
+                  .escaped = true
+                else
+                  .text += $character
+                end
+              elif $character == "\\" then
+                .escaped = true
+              elif $character == "$"
+                and $word[$index + 1:$index + 2] == "\u0027" then
+                .quote = "ansi"
+                | .skip = 1
+              elif $character == "\u0027" then
+                .quote = "single"
+              elif $character == "\u0022" then
+                .quote = "double"
+              else
+                .text += $character
+              end
+          )
+        | if .escaped then .text + "\\" else .text end;
+      def shell_word_pattern:
+        "(?:\\$?\u0027[^\u0027]*\u0027"
+        + "|\u0022(?:\\\\.|[^\u0022])*\u0022"
+        + "|\\\\."
+        + "|[^\\t \u0027\u0022\\\\();{}<>])+";
+      def shell_words($command):
+        [
+          $command
+          | scan(shell_word_pattern)
+          | normalized_shell_word
+        ];
+      def executable_basename:
+        split("/") | last;
+      def tool_arguments($command; $executables):
+        shell_words($command) as $words
+        | (
+            [
+              range(0; ($words | length))
+              | . as $index
+              | select(
+                  $words[$index]
+                  | executable_basename
+                  | test("^(?:" + $executables + ")$")
+                )
+              | $index
+            ]
+            | first // -1
+          ) as $executable_index
+        | if $executable_index < 0 then
+            []
+          else
+            $words[$executable_index + 1:]
+          end;
+      def extensionless_repository_name:
+        . as $word
+        | [
+            "AUTHORS", "BUILD", "CHANGELOG", "COPYING", "Dockerfile",
+            "LICENSE", "Makefile", "NOTICE", "README", "VERSION",
+            "WORKSPACE", "configure", "gradlew", "mvnw"
+          ]
+        | index($word) != null;
+      def repository_file_operand:
+        extensionless_repository_name
+        or (
+          $manifest_worktree != ""
+          and startswith($manifest_worktree + "/")
+        )
+        or test(
+          "^(?:(?:\\.\\.?/|[A-Za-z0-9_@+.-]+/)"
+          + "[A-Za-z0-9_@+./-]+"
+          + "|\\.[A-Za-z0-9_@+-][A-Za-z0-9_@+.-]*"
+          + "|[A-Za-z0-9_@+-]+\\."
+          + "(?:bash|c|cc|cfg|conf|cpp|cs|css|env|go|graphql|h|hpp|html|ini|java|js|json|jsx|kt|lock|md|mjs|mod|proto|py|rs|scss|sh|sql|sum|swift|toml|ts|tsx|txt|vue|xml|yaml|yml|zsh))$"
+        );
+      def input_redirection_repository_read($command):
+        [
+          $command
+          | scan(
+              "<(?![<>&])[\\t ]*(?<operand>"
+              + shell_word_pattern
+              + ")"
+            )
+          | .[0]
+          | normalized_shell_word
+          | select(repository_file_operand)
+        ]
+        | length > 0;
+      def awk_extensionless_repository_read($arguments):
+        (
+          any(
+            range(0; (($arguments | length) - 1));
+            . as $index
+            |
+            ($arguments[$index] == "-f"
+              or $arguments[$index] == "--file"
+              or $arguments[$index] == "-E"
+              or $arguments[$index] == "--exec")
+            and ($arguments[$index + 1] | repository_file_operand)
+          )
+          or any(
+            $arguments[];
+            . as $argument
+            |
+            (
+              (($argument | startswith("-f")) and ($argument | length) > 2)
+              or (($argument | startswith("-E")) and ($argument | length) > 2)
+            )
+            and ($argument[2:] | repository_file_operand)
+          )
+          or any(
+            $arguments[];
+            . as $argument
+            |
+            (
+              ($argument | startswith("--file="))
+              or ($argument | startswith("--exec="))
+            )
+            and (
+              $argument
+              | split("=")[1:]
+              | join("=")
+              | repository_file_operand
+            )
+          )
+          or any(
+            range(0; (($arguments | length) - 2));
+            . as $index
+            | $arguments[$index] == "-W"
+              and $arguments[$index + 1] == "exec"
+              and ($arguments[$index + 2] | repository_file_operand)
+          )
+          or any(
+            range(0; (($arguments | length) - 1));
+            . as $index
+            | (
+                $arguments[$index] == "-Wexec"
+                and ($arguments[$index + 1] | repository_file_operand)
+              )
+              or (
+                $arguments[$index] == "-W"
+                and ($arguments[$index + 1] | startswith("exec="))
+                and (
+                  $arguments[$index + 1]
+                  | ltrimstr("exec=")
+                  | repository_file_operand
+                )
+              )
+          )
+          or any(
+            $arguments[];
+            startswith("-Wexec=")
+            and (ltrimstr("-Wexec=") | repository_file_operand)
+          )
+        ) as $program_file_read
+        | (
+            reduce $arguments[] as $argument (
+              {
+                skip: 0,
+                options: true,
+                program_supplied: false,
+                operands: []
+              };
+              if .skip > 0 then
+                .skip -= 1
+              elif .options and $argument == "--" then
+                .options = false
+              elif .options and (
+                $argument == "-f"
+                or $argument == "--file"
+                or $argument == "-E"
+                or $argument == "--exec"
+                or $argument == "-e"
+                or $argument == "--source"
+              ) then
+                .skip = 1
+                | .program_supplied = true
+              elif .options and (
+                $argument == "-F"
+                or $argument == "-v"
+                or $argument == "-W"
+                or $argument == "-i"
+                or $argument == "--include"
+                or $argument == "-l"
+                or $argument == "--load"
+                or $argument == "--assign"
+                or $argument == "--field-separator"
+              ) then
+                .skip = 1
+              elif .options and (
+                ($argument | test("^-(?:f|E|e).+"))
+                or ($argument | test("^--(?:file|exec|source)="))
+              ) then
+                .program_supplied = true
+              elif .options and ($argument | startswith("-")) then
+                .
+              else
+                .operands += [$argument]
+              end
+            )
+          ) as $parsed
+        | $program_file_read
+          or (
+            if $parsed.program_supplied then
+              any($parsed.operands[]; repository_file_operand)
+            else
+              any($parsed.operands[1:][]; repository_file_operand)
+            end
+          );
+      def jq_extensionless_repository_read($arguments):
+        (
+          any(
+            range(0; (($arguments | length) - 1));
+            . as $index
+            |
+            (
+              ($arguments[$index] | test("^-[A-Za-z]*f[A-Za-z]*$"))
+              or $arguments[$index] == "--from-file"
+            )
+            and ($arguments[$index + 1] | repository_file_operand)
+          )
+          or any(
+            range(0; (($arguments | length) - 2));
+            . as $index
+            |
+            (
+              $arguments[$index] == "--slurpfile"
+              or $arguments[$index] == "--rawfile"
+              or $arguments[$index] == "--argfile"
+            )
+            and ($arguments[$index + 2] | repository_file_operand)
+          )
+          or any(
+            $arguments[];
+            . as $argument
+            |
+            ($argument | startswith("--from-file="))
+            and (
+              $argument
+              | split("=")[1:]
+              | join("=")
+              | repository_file_operand
+            )
+          )
+        ) as $explicit_file_read
+        | (
+            reduce $arguments[] as $argument (
+              {
+                skip: 0,
+                options: true,
+                filter_supplied: false,
+                operands: []
+              };
+              if .skip > 0 then
+                .skip -= 1
+              elif .options and $argument == "--" then
+                .options = false
+              elif .options and (
+                ($argument | test("^-[A-Za-z]*f[A-Za-z]*$"))
+                or $argument == "--from-file"
+              ) then
+                .skip = 1
+                | .filter_supplied = true
+              elif .options and (
+                $argument == "--arg"
+                or $argument == "--argjson"
+                or $argument == "--slurpfile"
+                or $argument == "--rawfile"
+                or $argument == "--argfile"
+              ) then
+                .skip = 2
+              elif .options and (
+                $argument == "-L"
+                or $argument == "--library-path"
+                or $argument == "--indent"
+              ) then
+                .skip = 1
+              elif .options and (
+                $argument | startswith("--from-file=")
+              ) then
+                .filter_supplied = true
+              elif .options and ($argument | startswith("-")) then
+                .
+              else
+                .operands += [$argument]
+              end
+            )
+          ) as $parsed
+        | $explicit_file_read
+          or (
+            if $parsed.filter_supplied then
+              any($parsed.operands[]; repository_file_operand)
+            else
+              any($parsed.operands[1:][]; repository_file_operand)
+            end
+          );
+      def interpreter_code_option($interpreter; $argument):
+        if $interpreter | test("^(?:python|python3)$") then
+          $argument == "-c"
+          or $argument == "-m"
+          or ($argument | test("^-(?:c|m).+"))
+        elif $interpreter == "node" then
+          $argument == "-e"
+          or $argument == "--eval"
+          or $argument == "-p"
+          or $argument == "--print"
+          or ($argument | test("^-(?:e|p).+"))
+          or ($argument | test("^--(?:eval|print)="))
+        elif $interpreter | test("^(?:perl|ruby)$") then
+          $argument == "-e"
+          or $argument == "--eval"
+          or ($argument | test("^-e.+"))
+          or ($argument | startswith("--eval="))
+        elif $interpreter == "deno" then
+          $argument == "eval"
+        else
+          false
+        end;
+      def interpreter_option_takes_value($interpreter; $argument):
+        if $interpreter | test("^(?:python|python3)$") then
+          $argument == "-W"
+          or $argument == "-X"
+          or $argument == "--check-hash-based-pycs"
+        elif $interpreter == "node" then
+          $argument == "-r"
+          or $argument == "-C"
+          or $argument == "--require"
+          or $argument == "--loader"
+          or $argument == "--experimental-loader"
+          or $argument == "--import"
+          or $argument == "--conditions"
+          or $argument == "--inspect-port"
+          or $argument == "--title"
+        elif $interpreter == "ruby" then
+          $argument == "-I"
+          or $argument == "-r"
+          or $argument == "--require"
+          or $argument == "-C"
+          or $argument == "--directory"
+        elif $interpreter == "perl" then
+          $argument == "-I"
+        else
+          false
+        end;
+      def interpreter_loader_read($interpreter; $arguments):
+        if $interpreter == "node" then
+          any(
+            range(0; (($arguments | length) - 1));
+            . as $index
+            | (
+                $arguments[$index] == "-r"
+                or $arguments[$index] == "--require"
+                or $arguments[$index] == "--loader"
+                or $arguments[$index] == "--experimental-loader"
+                or $arguments[$index] == "--import"
+              )
+              and (
+                $arguments[$index + 1]
+                | repository_file_operand
+              )
+          )
+          or any(
+            $arguments[];
+            . as $argument
+            | (
+                ($argument | startswith("-r"))
+                and ($argument | length) > 2
+                and ($argument[2:] | repository_file_operand)
+              )
+              or (
+                $argument
+                | test("^--(?:require|loader|experimental-loader|import)=")
+              )
+              and (
+                $argument
+                | split("=")[1:]
+                | join("=")
+                | repository_file_operand
+              )
+          )
+        elif $interpreter == "ruby" then
+          any(
+            range(0; (($arguments | length) - 1));
+            . as $index
+            | (
+                $arguments[$index] == "-r"
+                or $arguments[$index] == "--require"
+              )
+              and (
+                $arguments[$index + 1]
+                | repository_file_operand
+              )
+          )
+          or any(
+            $arguments[];
+            . as $argument
+            | (
+                ($argument | startswith("-r"))
+                and ($argument | length) > 2
+                and ($argument[2:] | repository_file_operand)
+              )
+              or (
+                $argument | startswith("--require=")
+                and (
+                  $argument
+                  | split("=")[1:]
+                  | join("=")
+                  | repository_file_operand
+                )
+              )
+          )
+        else
+          false
+        end;
+      def interpreter_invalid_option($interpreter; $argument):
+        $interpreter == "perl"
+        and ($argument == "-r" or ($argument | test("^-r.+")));
+      def python_inline_repository_read($command):
+        ($command | test(
+            "(?:^|[^A-Za-z0-9_])open[\\t ]*"
+            + "(?:\\(|\u0027|\u0022)"
+          ))
+        and (
+          repository_path_reference($command)
+          or ($command | test(
+              "(?:^|[^A-Za-z0-9_])open[\\t ]*"
+              + "(?:\\([\\t ]*)?[\u0027\u0022]"
+              + "(?:AUTHORS|BUILD|CHANGELOG|COPYING|Dockerfile|LICENSE|Makefile|NOTICE|README|VERSION|WORKSPACE|configure|gradlew|mvnw)"
+              + "[\u0027\u0022]"
+            ))
+        );
+      def interpreter_extensionless_repository_read($interpreter; $arguments):
+        interpreter_loader_read($interpreter; $arguments)
+        or (
+          reduce $arguments[] as $argument (
+            {skip: 0, options: true, code: false, script: null};
+            if .code or .script != null then
+              .
+            elif .skip > 0 then
+              .skip -= 1
+            elif .options and $argument == "--" then
+              .options = false
+            elif .options and interpreter_code_option($interpreter; $argument) then
+              .code = true
+            elif .options and interpreter_invalid_option(
+              $interpreter;
+              $argument
+            ) then
+              .code = true
+            elif .options and interpreter_option_takes_value(
+              $interpreter;
+              $argument
+            ) then
+              .skip = 1
+            elif .options and ($argument | startswith("-")) then
+              .
+            else
+              .script = $argument
+            end
+          )
+          | (.code | not)
+            and (.script != null)
+            and (.script | repository_file_operand)
+        );
+      def deno_option_takes_value($argument):
+        $argument == "--config"
+        or $argument == "--import-map"
+        or $argument == "--lock"
+        or $argument == "--cert"
+        or $argument == "--location"
+        or $argument == "--seed"
+        or $argument == "--v8-flags"
+        or $argument == "--inspect"
+        or $argument == "--inspect-brk"
+        or $argument == "--inspect-wait"
+        or $argument == "--env-file";
+      def deno_configuration_read($arguments):
+        any(
+          range(0; (($arguments | length) - 1));
+          . as $index
+          | (
+              $arguments[$index] == "--config"
+              or $arguments[$index] == "--import-map"
+              or $arguments[$index] == "--lock"
+              or $arguments[$index] == "--cert"
+              or $arguments[$index] == "--env-file"
+            )
+            and ($arguments[$index + 1] | repository_file_operand)
+        )
+        or any(
+          $arguments[];
+          test("^--(?:config|import-map|lock|cert|env-file)=")
+          and (
+            split("=")[1:]
+            | join("=")
+            | repository_file_operand
+          )
+        );
+      def deno_extensionless_repository_read($arguments):
+        deno_configuration_read($arguments)
+        or (
+          reduce $arguments[] as $argument (
+            {
+              phase: "global",
+              skip: 0,
+              options: true,
+              done: false,
+              script: null
+            };
+            if .done then
+              .
+            elif .skip > 0 then
+              .skip -= 1
+            elif .options and $argument == "--" then
+              .options = false
+            elif .options and deno_option_takes_value($argument) then
+              .skip = 1
+            elif .options and ($argument | startswith("-")) then
+              .
+            elif .phase == "global" and $argument == "run" then
+              .phase = "run"
+              | .options = true
+            elif .phase == "global" and $argument == "eval" then
+              .done = true
+            elif .phase == "global" then
+              .script = $argument
+              | .done = true
+            else
+              .script = $argument
+              | .done = true
+            end
+          )
+          | (.script != null)
+            and (.script | repository_file_operand)
+        );
+      def source_extensionless_repository_read($arguments):
+        [
+          $arguments[]
+          | select(startswith("-") | not)
+        ]
+        | first // ""
+        | repository_file_operand;
+      def dd_extensionless_repository_read($arguments):
+        any(
+          $arguments[];
+          startswith("if=")
+          and (ltrimstr("if=") | repository_file_operand)
+        );
+      def cp_extensionless_repository_read($arguments):
+        reduce $arguments[] as $argument (
+          {
+            skip: 0,
+            options: true,
+            target_directory: false,
+            operands: []
+          };
+          if .skip > 0 then
+            .skip -= 1
+          elif .options and $argument == "--" then
+            .options = false
+          elif .options and (
+            $argument == "-t"
+            or $argument == "--target-directory"
+          ) then
+            .skip = 1
+            | .target_directory = true
+          elif .options and (
+            ($argument | test("^-t.+"))
+            or ($argument | startswith("--target-directory="))
+          ) then
+            .target_directory = true
+          elif .options and (
+            $argument == "-S"
+            or $argument == "--suffix"
+          ) then
+            .skip = 1
+          elif .options and ($argument | startswith("-")) then
+            .
+          else
+            .operands += [$argument]
+          end
+        )
+        | if .target_directory then
+            any(.operands[]; repository_file_operand)
+          else
+            any(.operands[0:-1][]; repository_file_operand)
+          end;
+      def extensionless_repository_read($command):
+        if command_invocation($command; "(?:awk|mawk)") then
+          awk_extensionless_repository_read(
+            tool_arguments($command; "(?:awk|mawk)")
+          )
+        elif command_invocation($command; "jq") then
+          jq_extensionless_repository_read(tool_arguments($command; "jq"))
+        elif command_invocation($command; "deno") then
+          deno_extensionless_repository_read(
+            tool_arguments($command; "deno")
+          )
+        elif command_invocation(
+          $command;
+          "(?:python|python3|perl|ruby|node)"
+        ) then
+          tool_arguments(
+            $command;
+            "(?:python|python3|perl|ruby|node)"
+          ) as $arguments
+          | (
+              shell_words($command)
+              | map(executable_basename)
+              | map(select(test("^(?:python|python3|perl|ruby|node)$")))
+              | first
+            ) as $interpreter
+          | interpreter_extensionless_repository_read(
+              $interpreter;
+              $arguments
+            )
+            or (
+              ($interpreter | test("^(?:python|python3)$"))
+              and python_inline_repository_read($command)
+            )
+        elif command_invocation($command; "(?:source|\\.)") then
+          source_extensionless_repository_read(
+            tool_arguments($command; "(?:source|\\.)")
+          )
+        elif command_invocation($command; "dd") then
+          dd_extensionless_repository_read(
+            tool_arguments($command; "dd")
+          )
+        elif command_invocation($command; "cp") then
+          cp_extensionless_repository_read(
+            tool_arguments($command; "cp")
+          )
+        elif command_invocation(
+          $command;
+          "(?:cut|sort|wc|strings|more|less)"
+        ) then
+          any(
+            tool_arguments(
+              $command;
+              "(?:cut|sort|wc|strings|more|less)"
+            )[];
+            repository_file_operand
+          )
+        else
+          false
+        end;
+      def direct_repository_read_segment($command):
+        (
+          extensionless_repository_read($command)
+          or input_redirection_repository_read($command)
+        )
+        and (
+          command_invocation(
+            $command;
+            "(?:awk|mawk|python|python3|perl|ruby|node|deno|jq|cut|sort|wc|strings|more|less|dd|cp|source|\\.)"
+          )
+          or ($command | test("<(?![<>&])"))
+        );
+      def forbidden_repository_read($command):
+        (shell_command_payload($command) // $command) as $payload
+        |
+        [
+          shell_segments($payload)[]
+          | select(
+              command_invocation(
+                .;
+                "(?:git|rg|grep|sed|cat|nl|head|tail|find|ls|time|env|xargs|parallel|eval|bash|dash|fish|ksh|sh|zsh)"
+              )
+              or direct_repository_read_segment(.)
+            )
+        ] | length > 0;
       def option_occurrences($command; $option):
         [
           $command
@@ -1162,6 +2066,11 @@ for log in "${inputs_dir}"/*.jsonl; do
       | ($turn.usage // null) as $usage
       | ([
           .[]
+          | select(.type == "item.started" and .item.type == "command_execution")
+          | (.item.command // "")
+        ]) as $started_commands
+      | ([
+          .[]
           | select(.type == "item.completed" and .item.type == "command_execution")
           | select(all_repo_view_invocations(.item.command // "") > 0)
           | .item
@@ -1276,14 +2185,18 @@ for log in "${inputs_dir}"/*.jsonl; do
           end
         ) as $deep_dependency_awk_exact
       | ([
+          $started_commands[]
+          | select(forbidden_repository_read(.))
+        ] | unique) as $repository_read_bypass_commands
+      | ([
           $repo_view_executions[]
           | select(repo_view_invocations(.command; "changed") > 0)
         ]) as $changed_executions
       | (
-          ($repo_view_started_commands | length) > 0
+          ($started_commands | length) > 0
           and (
             repo_view_invocations(
-              $repo_view_started_commands[0];
+              $started_commands[0];
               "changed"
             ) == 1
           )
@@ -1347,6 +2260,7 @@ for log in "${inputs_dir}"/*.jsonl; do
             $first_invocation_changed
             and ($changed_executions | length) == 1
             and ($navigation_option_violations | length) == 0
+            and ($repository_read_bypass_commands | length) == 0
             and $changed_output_semantics_valid
             and $deep_command_sequence_exact
             and $deep_dependency_awk_exact
@@ -1431,6 +2345,7 @@ for log in "${inputs_dir}"/*.jsonl; do
           repo_view_navigation_semantic_violation_commands: (
             (
               $navigation_option_violations
+              + $repository_read_bypass_commands
               + (
                   if (
                     $variant == "optimized"
@@ -1483,6 +2398,10 @@ for log in "${inputs_dir}"/*.jsonl; do
           ),
           repo_view_budget_tamper_command_count: ($budget_tamper_commands | length),
           repo_view_budget_tamper_commands: $budget_tamper_commands,
+          repository_read_bypass_command_count: (
+            $repository_read_bypass_commands | length
+          ),
+          repository_read_bypass_commands: $repository_read_bypass_commands,
           repo_view_bounds: {
             limit: $limit_cap,
             context: $context_cap,

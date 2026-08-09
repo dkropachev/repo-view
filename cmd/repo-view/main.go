@@ -385,6 +385,10 @@ func runChanged(args []string) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if flags.NArg() != 0 {
+		fmt.Fprintln(os.Stderr, "unexpected argument:", flags.Arg(0))
+		return 2
+	}
 	view, err := repoview.New(*common.root)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)

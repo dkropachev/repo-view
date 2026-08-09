@@ -194,6 +194,45 @@ func TestValidateRepoViewCommand(t *testing.T) {
 		subcommand != "" {
 		t.Fatalf("non-navigation subcommand = %q, %v", subcommand, err)
 	}
+	if count, err := ValidateRepoViewCommand(
+		"notrepo-view find Symbol --json",
+	); err != nil || count != 0 {
+		t.Fatalf("suffix command count = %d, error = %v", count, err)
+	}
+}
+
+func TestAnalyzeDoesNotCountExecutableSuffixAsRepoView(t *testing.T) {
+	transcript := strings.Join([]string{
+		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"notrepo-view find Symbol --json"}}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"notrepo-view find Symbol --json","aggregated_output":"not found","exit_code":127,"status":"failed"}}`,
+	}, "\n")
+	stats, err := Analyze(strings.NewReader(transcript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RepoViewToolCalls != 0 || stats.RepoViewInvocations != 0 ||
+		!stats.RepoViewCommandShapeValid {
+		t.Fatalf("stats = %#v", stats)
+	}
+}
+
+func TestAnalyzeDoesNotCountAssignmentValueAsRepoView(t *testing.T) {
+	const command = `/bin/bash -lc 'X=/usr/bin/repo-view find Symbol --json'`
+	transcript := strings.Join([]string{
+		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"` + command + `"}}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"` + command + `","aggregated_output":"","exit_code":0,"status":"completed"}}`,
+	}, "\n")
+	stats, err := Analyze(strings.NewReader(transcript))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.RepoViewToolCalls != 0 || stats.RepoViewInvocations != 0 ||
+		!stats.RepoViewCommandShapeValid {
+		t.Fatalf("stats = %#v", stats)
+	}
+	if got := stats.Calls[0].PrimaryOperation; got != "find" {
+		t.Fatalf("primary operation = %q, want find", got)
+	}
 }
 
 func TestWriteDOT(t *testing.T) {

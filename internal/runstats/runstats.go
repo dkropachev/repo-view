@@ -18,10 +18,14 @@ import (
 const SchemaVersion = 1
 
 var repoViewPattern = regexp.MustCompile(
-	`repo-view(?:\.bin)?\s+(changed|find|inspect|outline)(?:\s|$)`,
+	`(?:^|[\n\r\t ;|&('"` + "`" + `])(?:[^ \t\n\r;|&=('"` + "`" + `]+/)?` +
+		`repo-view(?:\.bin)?\s+(changed|find|inspect|outline)(?:\s|$)`,
 )
 
-var repoViewPrefixPattern = regexp.MustCompile(`repo-view(?:\.bin)?\s+$`)
+var repoViewPrefixPattern = regexp.MustCompile(
+	`(?:^|[\n\r\t ;|&('"` + "`" + `])(?:[^ \t\n\r;|&=('"` + "`" + `]+/)?` +
+		`repo-view(?:\.bin)?\s+$`,
+)
 
 var pathPattern = regexp.MustCompile(
 	`(?:[A-Za-z0-9_.@+-]+/)+[A-Za-z0-9_.@+-]+(?::[0-9]+)?`,
@@ -469,11 +473,7 @@ func standaloneShellBody(command string) (string, bool) {
 }
 
 func isRepoViewSubcommand(command string, operationStart int) bool {
-	prefixStart := operationStart - 32
-	if prefixStart < 0 {
-		prefixStart = 0
-	}
-	prefix := command[prefixStart:operationStart]
+	prefix := command[:operationStart]
 	return repoViewPrefixPattern.MatchString(prefix)
 }
 

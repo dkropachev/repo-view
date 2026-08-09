@@ -142,6 +142,17 @@ func TestReturnRejectsUnknownValues(t *testing.T) {
 	}
 }
 
+func TestChangedRejectsPositionalArguments(t *testing.T) {
+	if status := run([]string{
+		"changed",
+		"unexpected-positional",
+		"--root", "/definitely/not/a/repository",
+		"--json",
+	}); status != 2 {
+		t.Fatalf("changed status = %d, want 2", status)
+	}
+}
+
 func TestNavigationCapsRejectOversizedOptions(t *testing.T) {
 	t.Setenv("REPO_VIEW_LIMIT_CAP", "20")
 	t.Setenv("REPO_VIEW_CONTEXT_CAP", "10")

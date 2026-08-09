@@ -53,6 +53,10 @@ func run(args []string) int {
 	if err := flags.Parse(args); err != nil {
 		return 2
 	}
+	if *casesPerRepo < 1 {
+		fmt.Fprintln(os.Stderr, "--cases must be positive")
+		return 2
+	}
 
 	if *repoList != "" && *repoRoot != "" {
 		fmt.Fprintln(os.Stderr, "--repo-list and --repo-root are mutually exclusive")
@@ -207,10 +211,34 @@ func validateManagedRepository(path, expectedOrigin string) error {
 	if err != nil {
 		return fmt.Errorf("read origin for %s: %w", path, err)
 	}
-	if origin != expectedOrigin {
+	if !repositoryOriginsEqual(origin, expectedOrigin, path) {
 		return fmt.Errorf("managed repository %s has origin %q, expected %q", path, origin, expectedOrigin)
 	}
 	return nil
+}
+
+func repositoryOriginsEqual(actual, expected, repositoryPath string) bool {
+	actualPath, actualLocal := localRepositoryPath(actual, repositoryPath)
+	expectedPath, expectedLocal := localRepositoryPath(expected, "")
+	if actualLocal || expectedLocal {
+		return actualLocal && expectedLocal && actualPath == expectedPath
+	}
+	return actual == expected
+}
+
+func localRepositoryPath(value, relativeTo string) (string, bool) {
+	if value == "" || strings.Contains(value, "://") ||
+		(!filepath.IsAbs(value) && strings.Contains(value, ":")) {
+		return "", false
+	}
+	if !filepath.IsAbs(value) && relativeTo != "" {
+		value = filepath.Join(relativeTo, value)
+	}
+	absolute, err := filepath.Abs(value)
+	if err != nil {
+		return "", false
+	}
+	return filepath.Clean(absolute), true
 }
 
 func gitOutput(directory string, arguments ...string) (string, error) {
@@ -232,12 +260,14 @@ func discoverRepos(repoList, repoRoot string) ([]string, string, error) {
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() {
-			return nil
-		}
 		if d.Name() == ".git" {
-			repos = append(repos, filepath.Dir(path))
-			return filepath.SkipDir
+			if d.IsDir() {
+				repos = append(repos, filepath.Dir(path))
+				return filepath.SkipDir
+			}
+			if d.Type().IsRegular() {
+				repos = append(repos, filepath.Dir(path))
+			}
 		}
 		return nil
 	})
@@ -351,7 +381,7 @@ func readSourceFiles(root string) ([]fileData, error) {
 		}
 		lines, err := readLines(path)
 		if err != nil {
-			return nil //nolint:nilerr // Unreadable source files are skipped during discovery.
+			return fmt.Errorf("read source file %s: %w", path, err)
 		}
 		rel, err := filepath.Rel(root, path)
 		if err != nil {

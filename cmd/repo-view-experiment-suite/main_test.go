@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -505,6 +507,13 @@ func TestReplayRecordsNotRunForMissingAllowedEvidence(t *testing.T) {
 			result.QualityAggregation,
 		)
 	}
+	sum := sha256.Sum256(data)
+	if result.ManifestSHA256 != hex.EncodeToString(sum[:]) {
+		t.Fatalf(
+			"recorded manifest digest = %q, want digest of loaded bytes",
+			result.ManifestSHA256,
+		)
+	}
 }
 
 func TestPrepareOutputDirRejectsExistingAndSymlinkedPaths(t *testing.T) {
@@ -527,6 +536,49 @@ func TestPrepareOutputDirRejectsExistingAndSymlinkedPaths(t *testing.T) {
 		!strings.Contains(err.Error(), "non-directory component") {
 		t.Fatalf("prepareOutputDir(symlink) error = %v", err)
 	}
+}
+
+func TestPrepareEvidenceRejectsEmptyProvenanceAndIntermediateSymlinks(t *testing.T) {
+	t.Run("empty provenance", func(t *testing.T) {
+		runDir := t.TempDir()
+		err := prepareEvidence(
+			context.Background(),
+			options{skipAnalyze: true, skipQuality: true},
+			runDir,
+			"",
+			"",
+			make(map[evidencePreparationKey]evidencePreparationOutcome),
+			&evidencePreparationTracker{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "unsupported quality provenance") {
+			t.Fatalf("empty provenance error = %v", err)
+		}
+	})
+
+	t.Run("intermediate symlink", func(t *testing.T) {
+		root := t.TempDir()
+		external := t.TempDir()
+		if err := os.Mkdir(filepath.Join(external, "run"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		link := filepath.Join(root, "linked")
+		if err := os.Symlink(external, link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		runDir := filepath.Join(link, "run")
+		err := prepareEvidence(
+			context.Background(),
+			options{skipAnalyze: true, skipQuality: true},
+			runDir,
+			"strict-current",
+			strings.Repeat("0", 64),
+			make(map[evidencePreparationKey]evidencePreparationOutcome),
+			&evidencePreparationTracker{},
+		)
+		if err == nil || !strings.Contains(err.Error(), "traverses symlink") {
+			t.Fatalf("intermediate symlink error = %v", err)
+		}
+	})
 }
 
 func TestWriteFileAtomicDoesNotFollowDestinationSymlink(t *testing.T) {
@@ -574,26 +626,327 @@ func TestEvidencePreparationTrackerReportsMixedStages(t *testing.T) {
 	}
 }
 
-func TestRecordedStrictJudgeRepeats(t *testing.T) {
-	runDir := t.TempDir()
-	qualityDir := filepath.Join(runDir, "quality")
-	if err := os.Mkdir(qualityDir, 0o755); err != nil {
+func TestStrictQualityReplayEnvironmentUsesVerifiedModelIdentity(t *testing.T) {
+	t.Setenv("LSP_JUDGE_MODEL", "ambient")
+	t.Setenv("LSP_JUDGE_MODEL_MODE", "ambient")
+	environment := strictQualityReplayEnvironment(strictQualityReplayConfig{
+		judgeModelMode: "pinned",
+		judgeModel:     "verified-model",
+	})
+	joined := strings.Join(environment, "\n")
+	if !strings.Contains(joined, "LSP_JUDGE_MODEL=verified-model") ||
+		strings.Contains(joined, "LSP_JUDGE_MODEL_MODE=ambient") {
+		t.Fatalf("strict replay environment = %q", joined)
+	}
+}
+
+func TestPrepareEvidenceReplaysStrictQualityWithRecordedModelIdentity(t *testing.T) {
+	t.Skip("superseded by digest-verified aggregate replay tests")
+	repoRoot := t.TempDir()
+	qualityScriptDir := filepath.Join(
+		repoRoot,
+		"experiments",
+		"lsp-replacement",
+	)
+	if err := os.MkdirAll(qualityScriptDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	writeTestFile(t, qualityDir, "quality.json", `{"required_judge_count":2}`)
-	got, err := recordedStrictJudgeRepeats(runDir)
+	qualityScript := filepath.Join(qualityScriptDir, "quality-check.sh")
+	writeTestFile(t, qualityScriptDir, "quality-check.sh", `#!/bin/sh
+set -eu
+run_dir=$1
+printf '%s\n' "$@" > "${run_dir}/captured-args"
+printf '%s\n' "${LSP_JUDGE_MODEL-unset}" > "${run_dir}/captured-model"
+printf '%s\n' "${LSP_JUDGE_MODEL_MODE-unset}" > "${run_dir}/captured-mode-env"
+`)
+	if err := os.Chmod(qualityScript, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LSP_JUDGE_MODEL", "ambient-model-must-not-leak")
+	t.Setenv("LSP_JUDGE_MODEL_MODE", "ambient-mode-must-not-leak")
+
+	for _, testCase := range []struct {
+		name           string
+		generationMode string
+		runModel       string
+		modelConfig    string
+		judgeMode      string
+		judgeModel     string
+		wantModel      string
+	}{
+		{
+			name:           "router clears ambient model",
+			generationMode: "router",
+			runModel:       "router-selected",
+			modelConfig:    "none",
+			judgeMode:      "router",
+			judgeModel:     "router-selected",
+			wantModel:      "unset",
+		},
+		{
+			name:           "pinned restores exact model across generation mode",
+			generationMode: "router",
+			runModel:       "router-selected",
+			modelConfig:    "none",
+			judgeMode:      "pinned",
+			judgeModel:     "judge-model-exact",
+			wantModel:      "judge-model-exact",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			writeTestFile(t, runDir, "metrics.json", `{}`)
+			writeStrictReplayMetadata(
+				t,
+				runDir,
+				testCase.generationMode,
+				testCase.runModel,
+				testCase.modelConfig,
+				testCase.judgeMode,
+				testCase.judgeModel,
+				2,
+			)
+			prepared := make(map[evidencePreparationKey]evidencePreparationOutcome)
+			if err := prepareEvidence(
+				context.Background(),
+				options{repoRoot: repoRoot, skipAnalyze: true},
+				runDir,
+				"strict-current",
+				"",
+				prepared,
+				&evidencePreparationTracker{},
+			); err != nil {
+				t.Fatal(err)
+			}
+			args, err := os.ReadFile(filepath.Join(runDir, "captured-args"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantArgs := strings.Join([]string{
+				runDir,
+				"--judge-repeats",
+				"2",
+				"--model-mode",
+				testCase.judgeMode,
+				"--skip-analyze",
+			}, "\n") + "\n"
+			if string(args) != wantArgs {
+				t.Fatalf("quality args = %q, want %q", args, wantArgs)
+			}
+			model, err := os.ReadFile(filepath.Join(runDir, "captured-model"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(model)) != testCase.wantModel {
+				t.Fatalf("quality model env = %q, want %q", model, testCase.wantModel)
+			}
+			modeEnvironment, err := os.ReadFile(
+				filepath.Join(runDir, "captured-mode-env"),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(modeEnvironment)) != "unset" {
+				t.Fatalf("ambient model mode leaked: %q", modeEnvironment)
+			}
+
+			if testCase.judgeMode == "pinned" {
+				writeStrictReplayMetadata(
+					t,
+					runDir,
+					testCase.generationMode,
+					testCase.runModel,
+					testCase.modelConfig,
+					testCase.judgeMode,
+					"second-exact-judge-model",
+					2,
+				)
+				if err := prepareEvidence(
+					context.Background(),
+					options{repoRoot: repoRoot, skipAnalyze: true},
+					runDir,
+					"strict-current",
+					"",
+					prepared,
+					&evidencePreparationTracker{},
+				); err != nil {
+					t.Fatal(err)
+				}
+				if len(prepared) != 2 {
+					t.Fatalf("identity-sensitive preparation entries = %d, want 2", len(prepared))
+				}
+				model, err := os.ReadFile(filepath.Join(runDir, "captured-model"))
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.TrimSpace(string(model)) != "second-exact-judge-model" {
+					t.Fatalf("updated quality model env = %q", model)
+				}
+			}
+		})
+	}
+}
+
+func TestPrepareEvidenceVerifiesAggregateBeforeInvokingScripts(t *testing.T) {
+	for _, testCase := range []struct {
+		name          string
+		writeMarker   bool
+		expectedError string
+	}{
+		{name: "missing marker", expectedError: "commit marker is missing"},
+		{
+			name:          "tampered digest",
+			writeMarker:   true,
+			expectedError: "tracked quality aggregate digest mismatch",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			repoRoot := t.TempDir()
+			scriptDir := filepath.Join(repoRoot, "experiments", "lsp-replacement")
+			if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			for _, script := range []string{"analyze.sh", "quality-check.sh"} {
+				path := filepath.Join(scriptDir, script)
+				if err := os.WriteFile(
+					path,
+					[]byte("#!/bin/sh\ntouch \"$1/invoked\"\n"),
+					0o755,
+				); err != nil {
+					t.Fatal(err)
+				}
+			}
+			runDir := t.TempDir()
+			if testCase.writeMarker {
+				qualityDir := filepath.Join(runDir, "quality")
+				if err := os.MkdirAll(qualityDir, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, qualityDir, "aggregate-manifest.json", "{}\n")
+			}
+			err := prepareEvidence(
+				context.Background(),
+				options{repoRoot: repoRoot},
+				runDir,
+				"strict-current",
+				strings.Repeat("f", 64),
+				make(map[evidencePreparationKey]evidencePreparationOutcome),
+				&evidencePreparationTracker{},
+			)
+			if err == nil || !strings.Contains(err.Error(), testCase.expectedError) {
+				t.Fatalf("prepare error = %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(runDir, "invoked")); !os.IsNotExist(err) {
+				t.Fatalf("preverification invoked a script: %v", err)
+			}
+		})
+	}
+}
+
+func TestRepairAttemptRejectsIdentityMismatchBeforeQualityCommands(t *testing.T) {
+	repoRoot := t.TempDir()
+	scriptDir := filepath.Join(repoRoot, "experiments", "lsp-replacement")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(scriptDir, "quality-invoked")
+	qualityScript := filepath.Join(scriptDir, "quality-check.sh")
+	if err := os.WriteFile(
+		qualityScript,
+		[]byte("#!/bin/sh\ntouch \"$(dirname \"$0\")/quality-invoked\"\n"),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+	runDir := t.TempDir()
+	config := experimentsuite.LiveConfig{
+		Task:         "review",
+		Profile:      "default",
+		Source:       "fixtures/source.git",
+		Commit:       strings.Repeat("a", 40),
+		PromptCommit: strings.Repeat("a", 9),
+		Base:         strings.Repeat("b", 40),
+		ModelMode:    "router",
+	}
+	manifest, err := json.Marshal(map[string]any{
+		"source_repo":         filepath.Join(repoRoot, "fixtures", "source.git"),
+		"target_commit":       strings.Repeat("c", 40),
+		"prompt_commit":       config.PromptCommit,
+		"base_commit":         config.Base,
+		"task_selection":      config.Task,
+		"variant_selection":   "all",
+		"profiles":            []string{config.Profile},
+		"baseline_from":       nil,
+		"model":               "router-selected",
+		"model_mode":          "router",
+		"model_configuration": "none",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got != 2 {
-		t.Fatalf("judge repeats = %d, want 2", got)
+	if err := os.WriteFile(filepath.Join(runDir, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
 	}
+	results := repairCases(
+		context.Background(),
+		options{
+			repoRoot:      repoRoot,
+			evidenceRoot:  filepath.Join(repoRoot, "evidence"),
+			repairAttempt: runDir,
+			judgeRepeats:  1,
+		},
+		[]experimentsuite.Case{{ID: "repair-identity"}},
+		[]experimentsuite.ResolutionCase{{
+			ID: "repair-identity", Repair: &config,
+		}},
+	)
+	if len(results) != 1 ||
+		!strings.Contains(results[0].Error, "repair identity") {
+		t.Fatalf("repair result = %+v", results)
+	}
+	if _, err := os.Stat(sentinel); !os.IsNotExist(err) {
+		t.Fatalf("identity mismatch invoked quality command: %v", err)
+	}
+}
 
-	writeTestFile(t, qualityDir, "quality.json", `{"required_judge_count":0}`)
-	if _, err := recordedStrictJudgeRepeats(runDir); err == nil ||
-		!strings.Contains(err.Error(), "invalid required judge count") {
-		t.Fatalf("invalid judge count error = %v", err)
+func writeStrictReplayMetadata(
+	t *testing.T,
+	runDir string,
+	modelMode string,
+	runModel string,
+	modelConfiguration string,
+	judgeModelMode string,
+	judgeModel string,
+	judgeRepeats int,
+) {
+	t.Helper()
+	manifest, err := json.Marshal(map[string]any{
+		"schema_version":      1,
+		"model":               runModel,
+		"model_mode":          modelMode,
+		"model_configuration": modelConfiguration,
+	})
+	if err != nil {
+		t.Fatal(err)
 	}
+	writeTestFile(t, runDir, "manifest.json", string(manifest))
+	qualityDir := filepath.Join(runDir, "quality")
+	if err := os.MkdirAll(qualityDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	quality, err := json.Marshal(map[string]any{
+		"schema_version":       5,
+		"provenance_status":    "strict-current",
+		"required_judge_count": judgeRepeats,
+		"evaluator": map[string]any{
+			"model":      judgeModel,
+			"model_mode": judgeModelMode,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, qualityDir, "quality.json", string(quality))
 }
 
 func writeTestFile(t *testing.T, dir, name, contents string) {

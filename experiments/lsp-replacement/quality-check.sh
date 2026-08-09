@@ -9,6 +9,7 @@ judge_repeat_limit=100
 enforce=false
 bind_legacy_judges=false
 skip_analyze=false
+reuse_judges_only=false
 judge_model_mode="${LSP_JUDGE_MODEL_MODE:-router}"
 judge_model=""
 judge_codex_version="codex-cli 0.144.0"
@@ -30,6 +31,9 @@ Options:
                      Trust schema-valid numeric legacy judges and bind them to
                      the current inputs. Valid only with --judge-repeats 0.
   --skip-analyze     Require and reuse an existing metrics.json.
+  --reuse-judges-only
+                     Rebuild strict quality output only from the requested,
+                     already-valid judge cache entries. Never invoke Codex.
   --enforce          Require every optimized case to pass quality and show a
                      positive effective-token saving.
   -h, --help
@@ -68,6 +72,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --skip-analyze)
       skip_analyze=true
+      shift
+      ;;
+    --reuse-judges-only)
+      reuse_judges_only=true
       shift
       ;;
     -h|--help)
@@ -136,6 +144,14 @@ if "${bind_legacy_judges}" && "${enforce}"; then
   printf '%s\n' '--bind-legacy-judges cannot be combined with --enforce' >&2
   exit 2
 fi
+if "${reuse_judges_only}" && [[ "${judge_repeats}" -eq 0 ]]; then
+  printf '%s\n' '--reuse-judges-only requires --judge-repeats greater than 0' >&2
+  exit 2
+fi
+if "${reuse_judges_only}" && "${bind_legacy_judges}"; then
+  printf '%s\n' '--reuse-judges-only cannot bind legacy judges' >&2
+  exit 2
+fi
 case "${judge_model_mode}" in
   pinned)
     judge_model="${LSP_JUDGE_MODEL:-gpt-5.6-sol}"
@@ -144,6 +160,11 @@ case "${judge_model_mode}" in
     judge_model_configuration="model=${judge_model};model-reasoning-effort=high"
     ;;
   router)
+    if [[ -n "${LSP_JUDGE_MODEL:-}" ]]; then
+      printf '%s\n' \
+        'LSP_JUDGE_MODEL requires --model-mode pinned; router mode configures no model' >&2
+      exit 2
+    fi
     judge_model="router-selected"
     judge_model_args=()
     judge_reasoning_args=()
@@ -576,10 +597,37 @@ if ! jq -se '
     and (.repo_view_deep_command_sequence_exact | type == "boolean")
     and (.repo_view_deep_dependency_awk_exact | type == "boolean")
     and (.mechanical_navigation_semantics_enforced | type == "boolean")
+    and (.repository_read_bypass_command_count | nonnegative_integer)
+    and (.repository_read_bypass_commands | type == "array")
+    and all(.repository_read_bypass_commands[]; type == "string")
+    and (
+      .repository_read_bypass_command_count
+      == (.repository_read_bypass_commands | length)
+    )
+    and (
+      (.repository_read_bypass_commands | unique | length)
+      == (.repository_read_bypass_commands | length)
+    )
     and (.repo_view_navigation_semantic_violation_commands | type == "array")
     and all(
       .repo_view_navigation_semantic_violation_commands[];
       type == "string"
+    )
+    and (
+      . as $case
+      | all(
+          $case.repository_read_bypass_commands[];
+          . as $command
+          | (
+              $case.repo_view_navigation_semantic_violation_commands
+              | index($command)
+            ) != null
+        )
+    )
+    and (
+      .variant != "optimized"
+      or (.repo_view_navigation_semantics_valid | not)
+      or .repository_read_bypass_command_count == 0
     )
     and (.repo_view_invocation_cap_exceeded | type == "boolean")
     and (.tool_types | type == "array" and all(.[]; count_stat))
@@ -728,6 +776,17 @@ if [[ -e "${manifest_source}" ]]; then
       )
       and ($manifest.target_commit | startswith($manifest.prompt_commit))
       and (.model | type == "string" and length > 0)
+      and (
+        (
+          .model_mode == "router"
+          and .model == "router-selected"
+          and .model_configuration == "none"
+        )
+        or (
+          .model_mode == "pinned"
+          and .model_configuration == "pinned"
+        )
+      )
       and (.codex_version | type == "string" and length > 0)
       and (
         .generation_isolation
@@ -1417,6 +1476,17 @@ if "${manifest_valid}"; then
           )
           and (.base_ref | type == "string" and length > 0)
           and (.model | type == "string" and length > 0)
+          and (
+            (
+              .model_mode == "router"
+              and .model == "router-selected"
+              and .model_configuration == "none"
+            )
+            or (
+              .model_mode == "pinned"
+              and .model_configuration == "pinned"
+            )
+          )
           and (.codex_version | type == "string" and length > 0)
           and (.generation_isolation | type == "string" and length > 0)
           and (
@@ -1472,6 +1542,11 @@ if "${manifest_valid}"; then
           and .base_commit == $run_manifest[0].base_commit
           and .base_ref == $run_manifest[0].base_ref
           and .model == $run_manifest[0].model
+          and .model_mode == $run_manifest[0].model_mode
+          and (
+            .model_configuration
+            == $run_manifest[0].model_configuration
+          )
           and .codex_version == $run_manifest[0].codex_version
           and .generation_isolation == $run_manifest[0].generation_isolation
           and (
@@ -1498,9 +1573,15 @@ if "${manifest_valid}"; then
       printf 'imported baseline source manifest disagrees with run manifest\n' >&2
       exit 1
     fi
-    baseline_source_generation_config_sha256="$(
-      jq -r '.generation_config_sha256' "${baseline_source_manifest}"
-    )"
+    if ! baseline_source_generation_config_sha256="$(
+      jq -er \
+        '.generation_config_sha256
+         | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+        "${baseline_source_manifest}"
+    )"; then
+      printf 'imported baseline source manifest has invalid config digest\n' >&2
+      exit 1
+    fi
     if [[ "$(file_digest "${baseline_source_generation_config}")" != \
       "${baseline_source_generation_config_sha256}" ]] ||
       ! jq -e -s \
@@ -2505,69 +2586,71 @@ if [[ "${judge_repeats}" -gt 0 ]]; then
     printf 'judge target contains submodules that cannot be materialized reproducibly\n' >&2
     exit 1
   fi
-  codex_executable="$(command -v codex || true)"
-  if [[ -n "${codex_executable}" ]]; then
-    codex_executable="$(realpath -- "${codex_executable}")"
-    actual_codex_version="$(
-      env -i \
-        PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin" \
-        LANG=C \
-        LC_ALL=C \
-        TZ=UTC \
-        "${codex_executable}" --version 2>/dev/null ||
-        true
+  if ! "${reuse_judges_only}"; then
+    codex_executable="$(command -v codex || true)"
+    if [[ -n "${codex_executable}" ]]; then
+      codex_executable="$(realpath -- "${codex_executable}")"
+      actual_codex_version="$(
+        env -i \
+          PATH="/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin" \
+          LANG=C \
+          LC_ALL=C \
+          TZ=UTC \
+          "${codex_executable}" --version 2>/dev/null ||
+          true
+      )"
+    else
+      actual_codex_version=""
+    fi
+    if [[ "${actual_codex_version}" != "${judge_codex_version}" ]]; then
+      printf 'judge Codex version mismatch: %s != %s\n' \
+        "${actual_codex_version:-missing}" "${judge_codex_version}" >&2
+      exit 1
+    fi
+    judge_codex_home="$(
+      mktemp -d "${quality_scratch}/repo-view-quality-codex-home.XXXXXX"
     )"
-  else
-    actual_codex_version=""
+    if [[ -n "${CODEX_HOME:-}" ]]; then
+      codex_auth_source="${CODEX_HOME}/auth.json"
+    elif [[ -n "${HOME:-}" ]]; then
+      codex_auth_source="${HOME}/.codex/auth.json"
+    else
+      codex_auth_source=""
+    fi
+    codex_auth_canonical=""
+    if [[ -n "${codex_auth_source}" &&
+      -f "${codex_auth_source}" &&
+      ! -L "${codex_auth_source}" ]]; then
+      codex_auth_canonical="$(realpath -- "${codex_auth_source}")"
+      ln -s -- "${codex_auth_source}" "${judge_codex_home}/auth.json"
+    fi
+    judge_checkout="$(mktemp -d "${quality_scratch}/judge-checkout.XXXXXX")"
+    if ! isolated_git clone --quiet --no-hardlinks --no-checkout \
+      "${target_root}" "${judge_checkout}"; then
+      printf 'failed to create pristine judge checkout from %s\n' \
+        "${target_root}" >&2
+      exit 1
+    fi
+    isolated_git -C "${judge_checkout}" \
+      -c advice.detachedHead=false \
+      checkout --quiet --detach "${target_commit}"
+    checkout_head="$(
+      isolated_git -C "${judge_checkout}" rev-parse --verify 'HEAD^{commit}'
+    )"
+    checkout_status="$(
+      isolated_git -C "${judge_checkout}" status \
+        --porcelain=v1 \
+        --untracked-files=all \
+        --ignore-submodules=none
+    )"
+    if [[ "${checkout_head}" != "${target_commit}" ||
+      -n "${checkout_status}" ]]; then
+      printf 'pristine judge checkout verification failed: %s\n' \
+        "${judge_checkout}" >&2
+      exit 1
+    fi
+    judge_source_root="${judge_checkout}"
   fi
-  if [[ "${actual_codex_version}" != "${judge_codex_version}" ]]; then
-    printf 'judge Codex version mismatch: %s != %s\n' \
-      "${actual_codex_version:-missing}" "${judge_codex_version}" >&2
-    exit 1
-  fi
-  judge_codex_home="$(
-    mktemp -d "${quality_scratch}/repo-view-quality-codex-home.XXXXXX"
-  )"
-  if [[ -n "${CODEX_HOME:-}" ]]; then
-    codex_auth_source="${CODEX_HOME}/auth.json"
-  elif [[ -n "${HOME:-}" ]]; then
-    codex_auth_source="${HOME}/.codex/auth.json"
-  else
-    codex_auth_source=""
-  fi
-  codex_auth_canonical=""
-  if [[ -n "${codex_auth_source}" &&
-    -f "${codex_auth_source}" &&
-    ! -L "${codex_auth_source}" ]]; then
-    codex_auth_canonical="$(realpath -- "${codex_auth_source}")"
-    ln -s -- "${codex_auth_source}" "${judge_codex_home}/auth.json"
-  fi
-  judge_checkout="$(mktemp -d "${quality_scratch}/judge-checkout.XXXXXX")"
-  if ! isolated_git clone --quiet --no-hardlinks --no-checkout \
-    "${target_root}" "${judge_checkout}"; then
-    printf 'failed to create pristine judge checkout from %s\n' \
-      "${target_root}" >&2
-    exit 1
-  fi
-  isolated_git -C "${judge_checkout}" \
-    -c advice.detachedHead=false \
-    checkout --quiet --detach "${target_commit}"
-  checkout_head="$(
-    isolated_git -C "${judge_checkout}" rev-parse --verify 'HEAD^{commit}'
-  )"
-  checkout_status="$(
-    isolated_git -C "${judge_checkout}" status \
-      --porcelain=v1 \
-      --untracked-files=all \
-      --ignore-submodules=none
-  )"
-  if [[ "${checkout_head}" != "${target_commit}" ||
-    -n "${checkout_status}" ]]; then
-    printf 'pristine judge checkout verification failed: %s\n' \
-      "${judge_checkout}" >&2
-    exit 1
-  fi
-  judge_source_root="${judge_checkout}"
 fi
 
 verify_judge_checkout() {
@@ -2763,6 +2846,7 @@ jq -n \
       goroot: "read",
       gomodcache: "read",
       judge_tool_root: "write",
+      codex_executable: "read",
       codex_home: "deny",
       canonical_auth: "deny-when-present"
     },
@@ -2938,7 +3022,7 @@ The shared task prompt and rubric define common answer scope. Each case's exact 
 
 Score every answer absolutely against the authoritative source, shared task prompt, rubric, and its own exact user prompt for the requested ${prompt_task} task. Assign correctness, completeness, grounding, and task-adherence scores against those requirements, never against the baseline's length or exploratory breadth. The baseline is only a comparator, not ground truth. Do not reward verbosity. A shorter answer can receive the same completeness score when it fully covers the requested scope. Penalize factual errors, genuinely unsupported claims, missed required behavior or findings, and failure to answer the task.
 
-For each candidate, also compare behavior to baseline: core_conclusion_matches_baseline is true when the main technical conclusion and finding set align; material_contradictions contains only candidate claims contradicted by authoritative source or by the candidate's own answer/transcript; baseline_material_points_omitted contains only correct baseline content that is required by the shared task prompt or rubric, or is necessary to make the candidate's own core conclusion correct and adequately grounded; candidate_material_additions lists material correct content the candidate adds. Do not count extra examples, optional breadth, exhaustive unaffected-method lists, or deeper call-chain tracing beyond an accurately stated evidence boundary as baseline material points omitted. Treat an explicit and accurate construction-only limitation as satisfying a construction-versus-consumption distinction unless the shared task prompt or rubric expressly requires a proven consuming chain. A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction. Set not_worse_than_baseline true only when the candidate has no material correctness, completeness, grounding, or task-adherence regression. Output task exactly ${prompt_task}, baseline name exactly ${prompt_baseline_name}, and exactly these candidate names: ${prompt_candidate_names}. Every score must be an integer from 1 through 5; never emit zero placeholder scores or omit a candidate. Return JSON matching the provided schema. Read only and do not modify files.
+For each candidate, also compare behavior to baseline: core_conclusion_matches_baseline is true when the main technical conclusion and finding set align; material_contradictions contains only candidate claims contradicted by authoritative source or by the candidate's own answer/transcript; baseline_material_points_omitted contains only correct baseline content that is required by the shared task prompt or rubric, or is necessary to make the candidate's own core conclusion correct and adequately grounded, and that the candidate loses without equally strong substitute coverage; candidate_material_additions lists material correct content the candidate adds. Do not count extra examples, optional breadth, exhaustive unaffected-method lists, or deeper call-chain tracing beyond an accurately stated evidence boundary as baseline material points omitted. Treat an explicit and accurate construction-only limitation as satisfying a construction-versus-consumption distinction unless the shared task prompt or rubric expressly requires a proven consuming chain. A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction. Set not_worse_than_baseline true only when the candidate has no material correctness, completeness, grounding, or task-adherence regression. Output task exactly ${prompt_task}, baseline name exactly ${prompt_baseline_name}, and exactly these candidate names: ${prompt_candidate_names}. Every score must be an integer from 1 through 5; never emit zero placeholder scores or omit a candidate. Return JSON matching the provided schema. Read only and do not modify files.
 EOF
 }
 
@@ -3696,6 +3780,11 @@ for task in "${evaluated_tasks[@]}"; do
       "${task}" \
       "baseline-${task}" \
       "${candidate_names_json}"; then
+      if "${reuse_judges_only}"; then
+        printf 'required reusable judge artifact is missing or invalid: %s\n' \
+          "${stem}" >&2
+        exit 1
+      fi
       retain_invalid_judge "${stem}"
       for ((judge_attempt = 1; judge_attempt <= judge_attempt_limit; judge_attempt++)); do
         status=0
@@ -3891,17 +3980,19 @@ jq -n \
   --slurpfile judge_usage "${judge_usage_output}" \
   --argjson required_judges "${judge_repeats}" \
   --arg judge_model "${judge_model}" \
+  --arg judge_model_mode "${judge_model_mode}" \
   --arg judge_codex_version "${judge_codex_version}" \
   --arg provenance_status "${aggregate_status}" \
   --argjson judge_cache_schema "${judge_cache_schema}" \
   --slurpfile judge_environment "${judge_environment_metadata}" \
   '
     {
-      schema_version: 4,
+      schema_version: 5,
       provenance_status: $provenance_status,
       required_judge_count: $required_judges,
       evaluator: {
         model: $judge_model,
+        model_mode: $judge_model_mode,
         codex_version: $judge_codex_version,
         cache_schema: $judge_cache_schema,
         environment: $judge_environment[0]

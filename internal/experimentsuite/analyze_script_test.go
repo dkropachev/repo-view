@@ -146,6 +146,64 @@ func TestAnalyzeScriptDoesNotTrustNestedBudgetText(t *testing.T) {
 	}
 }
 
+func TestAnalyzeScriptDoesNotCountExecutableSuffixAsRepoView(t *testing.T) {
+	analyzeScript, shell := requireAnalyzeScript(t)
+	for _, testCase := range []struct {
+		name    string
+		command string
+		want    int
+	}{
+		{"hyphen suffix", "notrepo-view find Symbol --json", 0},
+		{"plus suffix", "fake+repo-view changed --json", 0},
+		{"at suffix path", "/tmp/fake@repo-view changed --json", 0},
+		{"longer executable", "repo-viewer changed --json", 0},
+		{"binary suffix", "repo-view.bin-extra changed --json", 0},
+		{"plain executable", "repo-view changed --json", 1},
+		{"path executable", "/usr/local/bin/repo-view.bin find Symbol --json", 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			writeAnalyzeTranscript(t, runDir, "baseline-explain", []any{
+				map[string]any{
+					"type":      "thread.started",
+					"thread_id": "thread-1",
+				},
+				map[string]any{"type": "turn.started"},
+				analyzeCommandEvent(
+					"item.started", "command-1", testCase.command, "", 0, "",
+				),
+				analyzeCommandEvent(
+					"item.completed", "command-1", testCase.command,
+					"completed", 0, "{}",
+				),
+				analyzeCompletedTurn(),
+			})
+
+			runAnalyzeScript(t, shell, analyzeScript, runDir, true)
+			var metrics struct {
+				Cases []struct {
+					RepoViewInvocations int  `json:"repo_view_invocation_count"`
+					RepoViewToolCalls   int  `json:"repo_view_tool_call_count"`
+					AccountingValid     bool `json:"repo_view_invocation_accounting_valid"`
+					ChangedInvocations  int  `json:"repo_view_changed_invocation_count"`
+					FindInvocations     int  `json:"repo_view_find_invocation_count"`
+				} `json:"cases"`
+			}
+			readAnalyzeJSON(t, filepath.Join(runDir, "metrics.json"), &metrics)
+			if len(metrics.Cases) != 1 {
+				t.Fatalf("metrics = %#v", metrics)
+			}
+			current := metrics.Cases[0]
+			if current.RepoViewInvocations != testCase.want ||
+				current.RepoViewToolCalls != testCase.want ||
+				current.ChangedInvocations+current.FindInvocations != testCase.want ||
+				!current.AccountingValid {
+				t.Fatalf("metrics = %#v", current)
+			}
+		})
+	}
+}
+
 func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 	analyzeScript, shell := requireAnalyzeScript(t)
 	runDir := t.TempDir()
@@ -156,13 +214,496 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 		"--context 4 --limit 20 --max-code-lines 60 --json"
 	locationCommand := "repo-view changed --root . --base HEAD^ --return locations " +
 		"--context 0 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json"
+	context2Command := "repo-view changed --root . --base HEAD^ --return context " +
+		"--context 2 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json"
 	for _, current := range []struct {
 		stem    string
 		command string
+		prefix  string
+		suffix  string
 	}{
-		{"optimized-guarded-high-explain", validCommand},
-		{"optimized-guarded-high-review", invalidCommand},
-		{"optimized-patch-only-deep-explain", locationCommand},
+		{"optimized-guarded-high-explain", validCommand, "", ""},
+		{"optimized-guarded-high-review", invalidCommand, "", ""},
+		{"optimized-patch-only-deep-explain", locationCommand, "", ""},
+		{
+			"optimized-guarded-high-deep-review",
+			validCommand,
+			"rg -n secret .",
+			"",
+		},
+		{
+			"optimized-guarded-medium-explain",
+			validCommand,
+			"awk 'NR == 1' repository/file.go",
+			"",
+		},
+		{
+			"optimized-balanced-review",
+			validCommand,
+			"python3 -c 'open(\"repository/file.go\").read()'",
+			"",
+		},
+		{
+			"optimized-patch-high-deep-explain",
+			validCommand,
+			"< repository/file.go",
+			"",
+		},
+		{
+			"optimized-balanced-high-deep-review",
+			validCommand,
+			"",
+			`"rg" -n secret .`,
+		},
+		{
+			"optimized-balanced-medium-explain",
+			validCommand,
+			"",
+			"awk 'NR == 1' repository/file.go",
+		},
+		{
+			"optimized-balanced-medium-review",
+			validCommand,
+			"",
+			`python3 -c 'open("repository/file.go").read()'`,
+		},
+		{
+			"optimized-balanced-medium-deep-explain",
+			validCommand,
+			"",
+			"while IFS= read -r line; do :; done < repository/file.go",
+		},
+		{
+			"optimized-balanced-medium-deep-review",
+			validCommand,
+			"",
+			"go test ./... -run find; printf '%s' cat; " +
+				"awk 'NR == 1' /tmp/dependency/data.txt",
+		},
+		{
+			"optimized-context2-explain",
+			context2Command,
+			"",
+			"awk 'NR == 1' go.mod",
+		},
+		{
+			"optimized-context2-review",
+			context2Command,
+			"",
+			`python3 -c 'open("README.md").read()'`,
+		},
+		{
+			"optimized-context2-deep-explain",
+			context2Command,
+			"",
+			"jq -R . go.mod",
+		},
+		{
+			"optimized-context2-deep-review",
+			context2Command,
+			"",
+			"env -i rg -n secret repository/file.go",
+		},
+		{
+			"optimized-patch-medium-explain",
+			locationCommand,
+			"",
+			"bash -lc 'rg -n secret repository/file.go'",
+		},
+		{
+			"optimized-guarded-medium-review",
+			validCommand + "; cat repository/file.go",
+			"",
+			"",
+		},
+		{
+			"optimized-guarded-medium-deep-explain",
+			validCommand,
+			"",
+			"FOO='a b' rg -n secret repository/file.go",
+		},
+		{
+			"optimized-guarded-medium-deep-review",
+			validCommand,
+			"",
+			"{ rg -n secret repository/file.go; }",
+		},
+		{
+			"optimized-patch-medium-review",
+			locationCommand,
+			"",
+			"time rg -n secret repository/file.go",
+		},
+		{
+			"optimized-patch-medium-deep-explain",
+			locationCommand,
+			"",
+			"awk 'NR == 1' .gitignore",
+		},
+		{
+			"optimized-patch-medium-deep-review",
+			locationCommand,
+			"",
+			"printf ok # note; awk NR README.md",
+		},
+		{
+			"optimized-patch-high-review",
+			locationCommand,
+			"",
+			"awk 'NR == 1' VERSION",
+		},
+		{
+			"optimized-patch-high-deep-review",
+			locationCommand,
+			"",
+			"printf %s '; rg repository/file.go'",
+		},
+		{
+			"optimized-patch-only-review",
+			locationCommand,
+			"",
+			"printf %s '`rg repository/file.go`'",
+		},
+		{
+			"optimized-context2-medium-explain",
+			context2Command,
+			"",
+			"FOO=$'a b' rg -n secret repository/file.go",
+		},
+		{
+			"optimized-context2-medium-review",
+			context2Command,
+			"",
+			`FOO=a\ b rg -n secret repository/file.go`,
+		},
+		{
+			"optimized-context2-medium-deep-explain",
+			context2Command,
+			"",
+			"time -p rg -n secret repository/file.go",
+		},
+		{
+			"optimized-context2-medium-deep-review",
+			context2Command,
+			"",
+			`printf ok \ # note; rg -n secret repository/file.go`,
+		},
+		{
+			"optimized-patch-high-explain",
+			locationCommand,
+			"",
+			`awk NR "configure"`,
+		},
+		{
+			"optimized-patch-only-explain",
+			locationCommand,
+			"",
+			`awk -F: NR "configure"`,
+		},
+		{
+			"optimized-investigative-high-explain",
+			validCommand,
+			"",
+			`jq -r . "configure"`,
+		},
+		{
+			"optimized-investigative-high-review",
+			validCommand,
+			"",
+			`awk NR $'configure'`,
+		},
+		{
+			"optimized-investigative-high-deep-explain",
+			validCommand,
+			"",
+			`awk -f "configure" /tmp/dependency/data`,
+		},
+		{
+			"optimized-investigative-high-deep-review",
+			validCommand,
+			"",
+			`jq --from-file "configure" /tmp/dependency/data`,
+		},
+		{
+			"optimized-investigative-batched-high-explain",
+			validCommand,
+			"",
+			`python "configure" --arg`,
+		},
+		{
+			"optimized-investigative-batched-high-review",
+			validCommand,
+			"",
+			`source "configure" argument`,
+		},
+		{
+			"optimized-investigative-batched-high-deep-explain",
+			validCommand,
+			"",
+			`python -u "configure"`,
+		},
+		{
+			"optimized-investigative-batched-high-deep-review",
+			validCommand,
+			"",
+			`node --trace-warnings "README" argument`,
+		},
+		{
+			"optimized-investigative-batched-medium-explain",
+			validCommand,
+			"",
+			`awk NR con"fig"ure`,
+		},
+		{
+			"optimized-investigative-batched-medium-review",
+			validCommand,
+			"",
+			`jq . con\figure`,
+		},
+		{
+			"optimized-investigative-batched-medium-deep-explain",
+			validCommand,
+			"",
+			`node -r configure /tmp/dependency/app.js`,
+		},
+		{
+			"optimized-investigative-batched-medium-deep-review",
+			validCommand,
+			"",
+			`node --require=configure /tmp/dependency/app.js`,
+		},
+		{
+			"optimized-investigative-budgeted-high-explain",
+			validCommand,
+			"",
+			`node --loader=configure /tmp/dependency/app.js`,
+		},
+		{
+			"optimized-investigative-budgeted-high-review",
+			validCommand,
+			"",
+			`node --import=configure /tmp/dependency/app.js`,
+		},
+		{
+			"optimized-investigative-budgeted-high-deep-explain",
+			validCommand,
+			"",
+			`ruby -rconfigure /tmp/dependency/app.rb`,
+		},
+		{
+			"optimized-investigative-budgeted-high-deep-review",
+			validCommand,
+			"",
+			`ruby --require=configure /tmp/dependency/app.rb`,
+		},
+		{
+			"optimized-investigative-budgeted-medium-explain",
+			validCommand,
+			"",
+			`perl -C configure /tmp/dependency/app.pl`,
+		},
+		{
+			"optimized-investigative-budgeted-medium-review",
+			validCommand,
+			"",
+			`deno run --allow-read configure`,
+		},
+		{
+			"optimized-investigative-budgeted-medium-deep-explain",
+			validCommand,
+			"",
+			`dd if=configure of=/tmp/dependency/copy`,
+		},
+		{
+			"optimized-investigative-budgeted-medium-deep-review",
+			validCommand,
+			"",
+			`cp -a /tmp/dependency/one configure /tmp/dependency/destination`,
+		},
+		{
+			"optimized-investigative-mandatory-high-explain",
+			validCommand,
+			"",
+			`jq -rf configure`,
+		},
+		{
+			"optimized-investigative-mandatory-high-review",
+			validCommand,
+			"",
+			`jq -nrf configure`,
+		},
+		{
+			"optimized-investigative-mandatory-high-deep-explain",
+			validCommand,
+			"",
+			`awk NR $'\x63onfigure'`,
+		},
+		{
+			"optimized-investigative-mandatory-high-deep-review",
+			validCommand,
+			"",
+			`awk NR $'\u0063onfigure'`,
+		},
+		{
+			"optimized-investigative-mandatory-medium-explain",
+			validCommand,
+			"",
+			`awk NR $'\U00000063onfigure'`,
+		},
+		{
+			"optimized-investigative-mandatory-medium-review",
+			validCommand,
+			"",
+			`awk NR $'\143onfigure'`,
+		},
+		{
+			"optimized-investigative-mandatory-medium-deep-explain",
+			validCommand,
+			"",
+			`node --experimental-loader=configure /tmp/dependency/app.js`,
+		},
+		{
+			"optimized-investigative-mandatory-medium-deep-review",
+			validCommand,
+			"",
+			`dd if=repository/file.go of=/tmp/dependency/copy`,
+		},
+		{
+			"optimized-investigative-confirmed-high-explain",
+			validCommand,
+			"",
+			`cp -a /tmp/dependency/one repository/file.go /tmp/dependency/destination`,
+		},
+		{
+			"optimized-investigative-confirmed-high-review",
+			validCommand,
+			"",
+			`mawk -W exec configure`,
+		},
+		{
+			"optimized-investigative-confirmed-high-deep-explain",
+			validCommand,
+			"",
+			`mawk -Wexec configure`,
+		},
+		{
+			"optimized-investigative-confirmed-high-deep-review",
+			validCommand,
+			"",
+			`mawk -W exec=configure`,
+		},
+		{
+			"optimized-investigative-confirmed-medium-explain",
+			validCommand,
+			"",
+			`deno --config repository/deno.json run /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-confirmed-medium-review",
+			validCommand,
+			"",
+			`deno run --import-map=repository/imports.json /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-confirmed-medium-deep-explain",
+			validCommand,
+			"",
+			`deno run --cert repository/cert.pem /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-confirmed-medium-deep-review",
+			validCommand,
+			"",
+			`deno run --env-file=repository/config.env /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-complete-high-explain",
+			validCommand,
+			"",
+			`deno run --lock repository/deno.lock /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-complete-high-review",
+			validCommand,
+			"",
+			`deno run --lock=repository/deno.lock /tmp/dependency/app.ts`,
+		},
+		{
+			"optimized-investigative-complete-high-deep-explain",
+			validCommand,
+			"",
+			`python -c 'open("configure")'`,
+		},
+		{
+			"optimized-investigative-complete-high-deep-review",
+			validCommand,
+			"",
+			`python3 -c 'open("README")'`,
+		},
+		{
+			"optimized-patch-only-deep-review",
+			locationCommand,
+			"",
+			"printf x{#y,z}; rg -n secret repository/file.go",
+		},
+		{
+			"optimized-guarded-high-deep-explain",
+			validCommand,
+			"",
+			"FOO+=x /usr/bin/time -f %E rg -n secret repository/file.go",
+		},
+		{
+			"optimized-balanced-high-explain",
+			validCommand,
+			"",
+			"printf '%s' '$(rg repository/file.go)'",
+		},
+		{
+			"optimized-balanced-high-review",
+			validCommand,
+			"",
+			`awk -v x=1 "configure"; jq --arg x y "configure"; ` +
+				`jq -L lib "configure"; awk -F: "configure"; ` +
+				`jq -r "configure"; awk "configure"; ` +
+				`python -c "configure"; node -e "README"; ` +
+				`deno eval "configure"; dd of=configure if=/tmp/input; ` +
+				`cp /tmp/dependency/source configure; ` +
+				`cp -t configure /tmp/dependency/source; ` +
+				`dd of=repository/file.go if=/tmp/dependency/input; ` +
+				`cp /tmp/dependency/source repository/file.go; ` +
+				`cp -t repository/target /tmp/dependency/source; ` +
+				`jq --arg x repository/file.go . /tmp/dependency/data.json; ` +
+				`awk 'BEGIN { print "repository/file.go" }' /tmp/dependency/data; ` +
+				`perl -r configure /tmp/dependency/app.pl; ` +
+				`node -C repository/file.go /tmp/dependency/app.js; ` +
+				`node --conditions repository/file.go /tmp/dependency/app.js; ` +
+				`awk NR 'con"fig"ure'; jq . "con'fig'ure"; ` +
+				"awk 'BEGIN { print 1 }' /tmp/dependency/data",
+		},
+		{
+			"optimized-balanced-explain",
+			validCommand,
+			"",
+			"FOO+= rg -n secret repository/file.go",
+		},
+		{
+			"optimized-balanced-deep-explain",
+			validCommand,
+			"",
+			"printf {#y,z}; rg -n secret repository/file.go",
+		},
+		{
+			"optimized-balanced-deep-review",
+			validCommand,
+			"",
+			`printf "%s" "\$(rg repository/file.go)"`,
+		},
+		{
+			"optimized-balanced-high-deep-explain",
+			validCommand,
+			"",
+			`awk 'BEGIN { print "configure" }' /tmp/dependency/data`,
+		},
 	} {
 		budgetLimit := 1
 		if strings.HasPrefix(current.stem, "optimized-guarded-high-") {
@@ -176,12 +717,24 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 				budgetLimit,
 				budgetLimit-1,
 			)
-		writeAnalyzeTranscript(t, runDir, current.stem, []any{
+		events := []any{
 			map[string]any{
 				"type":      "thread.started",
 				"thread_id": current.stem,
 			},
 			map[string]any{"type": "turn.started"},
+		}
+		if current.prefix != "" {
+			events = append(events,
+				analyzeCommandEvent(
+					"item.started", "command-0", current.prefix, "", 0, "",
+				),
+				analyzeCommandEvent(
+					"item.completed", "command-0", current.prefix, "completed", 0, "secret",
+				),
+			)
+		}
+		events = append(events,
 			analyzeCommandEvent(
 				"item.started",
 				"command-1",
@@ -198,8 +751,20 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 				0,
 				changedOutput,
 			),
-			analyzeCompletedTurn(),
-		})
+		)
+		if current.suffix != "" {
+			events = append(events,
+				analyzeCommandEvent(
+					"item.started", "command-2", current.suffix, "", 0, "",
+				),
+				analyzeCommandEvent(
+					"item.completed", "command-2", current.suffix,
+					"completed", 0, "secret",
+				),
+			)
+		}
+		events = append(events, analyzeCompletedTurn())
+		writeAnalyzeTranscript(t, runDir, current.stem, events)
 	}
 	writeAnalyzeJSON(t, filepath.Join(runDir, "manifest.json"), map[string]any{
 		"schema_version": 1,
@@ -230,21 +795,23 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 			ProfilesDigest string `json:"profiles_sha256"`
 		} `json:"analysis_provenance"`
 		Cases []struct {
-			Name              string `json:"name"`
-			FirstChanged      bool   `json:"repo_view_first_invocation_changed"`
-			Semantics         bool   `json:"repo_view_navigation_semantics_valid"`
-			Mechanical        bool   `json:"mechanical_navigation_semantics_enforced"`
-			BoundFailures     int    `json:"repo_view_bound_violation_count"`
-			BudgetValid       bool   `json:"repo_view_budget_accounting_valid"`
-			BudgetCap         int    `json:"repo_view_invocation_cap"`
-			SimpleChanged     bool   `json:"repo_view_simple_changed_command_exact"`
-			SimpleCore        bool   `json:"repo_view_simple_core_inspect_command_exact"`
-			SimpleConsumer    bool   `json:"repo_view_simple_consumer_inspect_command_exact"`
-			SimpleUntruncated bool   `json:"repo_view_simple_inspect_outputs_untruncated"`
+			Name              string   `json:"name"`
+			FirstChanged      bool     `json:"repo_view_first_invocation_changed"`
+			Semantics         bool     `json:"repo_view_navigation_semantics_valid"`
+			Mechanical        bool     `json:"mechanical_navigation_semantics_enforced"`
+			BoundFailures     int      `json:"repo_view_bound_violation_count"`
+			BudgetValid       bool     `json:"repo_view_budget_accounting_valid"`
+			BudgetCap         int      `json:"repo_view_invocation_cap"`
+			SimpleChanged     bool     `json:"repo_view_simple_changed_command_exact"`
+			SimpleCore        bool     `json:"repo_view_simple_core_inspect_command_exact"`
+			SimpleConsumer    bool     `json:"repo_view_simple_consumer_inspect_command_exact"`
+			SimpleUntruncated bool     `json:"repo_view_simple_inspect_outputs_untruncated"`
+			BypassCount       int      `json:"repository_read_bypass_command_count"`
+			BypassCommands    []string `json:"repository_read_bypass_commands"`
 		} `json:"cases"`
 	}
 	readAnalyzeJSON(t, filepath.Join(runDir, "metrics.json"), &metrics)
-	if len(metrics.Cases) != 3 {
+	if len(metrics.Cases) != 80 {
 		t.Fatalf("case count = %d", len(metrics.Cases))
 	}
 	if metrics.AnalysisProvenance.ProfilesSource != "run-snapshot" ||
@@ -253,25 +820,117 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 		t.Fatalf("analysis provenance = %#v", metrics.AnalysisProvenance)
 	}
 	for _, current := range metrics.Cases {
-		if !current.FirstChanged || !current.Mechanical || !current.BudgetValid {
+		if !current.Mechanical {
 			t.Fatalf("missing semantic provenance: %#v", current)
 		}
 		switch current.Name {
-		case "optimized-guarded-high-explain":
-			if !current.Semantics || current.BoundFailures != 0 || current.BudgetCap != 3 {
-				t.Fatalf("valid guarded semantics rejected: %#v", current)
-			}
-		case "optimized-patch-only-deep-explain":
-			if !current.Semantics || current.BoundFailures != 0 || current.BudgetCap != 1 {
+		case "optimized-guarded-high-explain",
+			"optimized-patch-only-deep-explain",
+			"optimized-balanced-medium-deep-review",
+			"optimized-patch-medium-deep-review",
+			"optimized-patch-high-deep-review",
+			"optimized-patch-only-review",
+			"optimized-balanced-high-explain",
+			"optimized-balanced-high-review",
+			"optimized-balanced-deep-review",
+			"optimized-balanced-high-deep-explain":
+			if !current.FirstChanged || !current.Semantics ||
+				!current.BudgetValid ||
+				current.BoundFailures != 0 || current.BypassCount != 0 ||
+				len(current.BypassCommands) != 0 {
 				t.Fatalf("valid semantics rejected: %#v", current)
 			}
-			if !current.SimpleChanged || !current.SimpleCore ||
-				!current.SimpleConsumer || !current.SimpleUntruncated {
+			if current.Name == "optimized-guarded-high-explain" && current.BudgetCap != 3 {
+				t.Fatalf("valid guarded budget rejected: %#v", current)
+			}
+			if current.Name == "optimized-patch-only-deep-explain" &&
+				(current.BudgetCap != 1 || !current.SimpleChanged || !current.SimpleCore ||
+					!current.SimpleConsumer || !current.SimpleUntruncated) {
 				t.Fatalf("simple-only checks changed deep behavior: %#v", current)
 			}
 		case "optimized-guarded-high-review":
-			if current.Semantics || current.BoundFailures != 1 || current.BudgetCap != 3 {
+			if !current.FirstChanged || current.Semantics ||
+				!current.BudgetValid ||
+				current.BoundFailures != 1 || current.BypassCount != 0 ||
+				current.BudgetCap != 3 {
 				t.Fatalf("missing option accepted: %#v", current)
+			}
+		case "optimized-guarded-high-deep-review",
+			"optimized-guarded-medium-explain",
+			"optimized-balanced-review",
+			"optimized-patch-high-deep-explain":
+			if current.FirstChanged || current.Semantics ||
+				current.BypassCount != 1 || len(current.BypassCommands) != 1 {
+				t.Fatalf("pre-navigation repository read accepted: %#v", current)
+			}
+		case "optimized-balanced-high-deep-review",
+			"optimized-balanced-medium-explain",
+			"optimized-balanced-medium-review",
+			"optimized-balanced-medium-deep-explain",
+			"optimized-context2-explain",
+			"optimized-context2-review",
+			"optimized-context2-deep-explain",
+			"optimized-context2-deep-review",
+			"optimized-patch-medium-explain",
+			"optimized-guarded-medium-review",
+			"optimized-guarded-medium-deep-explain",
+			"optimized-guarded-medium-deep-review",
+			"optimized-patch-medium-review",
+			"optimized-patch-medium-deep-explain",
+			"optimized-patch-high-review",
+			"optimized-context2-medium-explain",
+			"optimized-context2-medium-review",
+			"optimized-context2-medium-deep-explain",
+			"optimized-context2-medium-deep-review",
+			"optimized-patch-high-explain",
+			"optimized-patch-only-explain",
+			"optimized-investigative-high-explain",
+			"optimized-investigative-high-review",
+			"optimized-investigative-high-deep-explain",
+			"optimized-investigative-high-deep-review",
+			"optimized-investigative-batched-high-explain",
+			"optimized-investigative-batched-high-review",
+			"optimized-investigative-batched-high-deep-explain",
+			"optimized-investigative-batched-high-deep-review",
+			"optimized-investigative-batched-medium-explain",
+			"optimized-investigative-batched-medium-review",
+			"optimized-investigative-batched-medium-deep-explain",
+			"optimized-investigative-batched-medium-deep-review",
+			"optimized-investigative-budgeted-high-explain",
+			"optimized-investigative-budgeted-high-review",
+			"optimized-investigative-budgeted-high-deep-explain",
+			"optimized-investigative-budgeted-high-deep-review",
+			"optimized-investigative-budgeted-medium-explain",
+			"optimized-investigative-budgeted-medium-review",
+			"optimized-investigative-budgeted-medium-deep-explain",
+			"optimized-investigative-budgeted-medium-deep-review",
+			"optimized-investigative-mandatory-high-explain",
+			"optimized-investigative-mandatory-high-review",
+			"optimized-investigative-mandatory-high-deep-explain",
+			"optimized-investigative-mandatory-high-deep-review",
+			"optimized-investigative-mandatory-medium-explain",
+			"optimized-investigative-mandatory-medium-review",
+			"optimized-investigative-mandatory-medium-deep-explain",
+			"optimized-investigative-mandatory-medium-deep-review",
+			"optimized-investigative-confirmed-high-explain",
+			"optimized-investigative-confirmed-high-review",
+			"optimized-investigative-confirmed-high-deep-explain",
+			"optimized-investigative-confirmed-high-deep-review",
+			"optimized-investigative-confirmed-medium-explain",
+			"optimized-investigative-confirmed-medium-review",
+			"optimized-investigative-confirmed-medium-deep-explain",
+			"optimized-investigative-confirmed-medium-deep-review",
+			"optimized-investigative-complete-high-explain",
+			"optimized-investigative-complete-high-review",
+			"optimized-investigative-complete-high-deep-explain",
+			"optimized-investigative-complete-high-deep-review",
+			"optimized-patch-only-deep-review",
+			"optimized-guarded-high-deep-explain",
+			"optimized-balanced-explain",
+			"optimized-balanced-deep-explain":
+			if !current.FirstChanged || current.Semantics ||
+				current.BypassCount != 1 || len(current.BypassCommands) != 1 {
+				t.Fatalf("post-navigation repository read accepted: %#v", current)
 			}
 		default:
 			t.Fatalf("unexpected case: %#v", current)
