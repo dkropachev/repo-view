@@ -194,6 +194,64 @@ func TestInspectHonorsTotalLimitAndSignalsCodeTruncation(t *testing.T) {
 	}
 }
 
+func TestInspectExactLimitOnlySignalsRealRelatedTruncation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		path          string
+		source        string
+		wantSymbol    string
+		wantTruncated bool
+	}{
+		{
+			name:       "Go without related references",
+			path:       "solo.go",
+			source:     "package demo\nfunc solo() {}\n",
+			wantSymbol: "solo",
+		},
+		{
+			name:       "Java without related references",
+			path:       "Solo.java",
+			source:     "class Solo {\n void alone() {}\n}\n",
+			wantSymbol: "alone",
+		},
+		{
+			name:          "Go with a related reference",
+			path:          "used.go",
+			source:        "package demo\nfunc used() {}\nfunc caller() { used() }\n",
+			wantSymbol:    "used",
+			wantTruncated: true,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			writeFile(t, root, testCase.path, testCase.source)
+
+			response, err := mustView(t, root).Inspect(
+				testCase.path+":2",
+				Options{Include: IncludeRefs, Return: ReturnLocations, Limit: 1},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Symbol != testCase.wantSymbol {
+				t.Fatalf("symbol = %q, want %q", response.Symbol, testCase.wantSymbol)
+			}
+			if len(response.Results) != 1 || response.Results[0].Kind != "scope" {
+				t.Fatalf("results = %#v", response.Results)
+			}
+			if response.ResultsTruncated != testCase.wantTruncated {
+				t.Fatalf(
+					"results_truncated = %v, want %v; response = %#v",
+					response.ResultsTruncated, testCase.wantTruncated, response,
+				)
+			}
+		})
+	}
+}
+
 func TestInspectHonorsRequestedFileFilters(t *testing.T) {
 	root := t.TempDir()
 	runGit(t, root, "init")

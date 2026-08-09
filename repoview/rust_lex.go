@@ -917,9 +917,21 @@ func (lexer *rustLexer) resolveDefinitions(
 		scopeStartOffset = lexer.outerDocStart(scopeStartOffset)
 		scopeStart, _ := lexer.lineColumn(scopeStartOffset)
 		scopeEnd, _ := lexer.lineColumn(max(lexer.tokens[endIndex].end-1, 0))
+		ownsScope := bodyIndex >= 0
+		ownedEndColumn := 0
+		exactBoundary := !recovered && endIndex >= 0 && endIndex < len(lexer.tokens) &&
+			(lexer.tokens[endIndex].text == ";" ||
+				bodyIndex >= 0 && delimiters[bodyIndex] == endIndex)
+		if ownsScope && exactBoundary {
+			ownedEndLine, exactEndColumn := lexer.lineColumn(lexer.tokens[endIndex].end)
+			if ownedEndLine == scopeEnd {
+				ownedEndColumn = exactEndColumn
+			}
+		}
 		definition := sourceDefinition{
 			symbol: nameToken.text, line: line, column: column,
-			scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: bodyIndex >= 0,
+			scopeStart: scopeStart, scopeEnd: scopeEnd,
+			ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 		}
 		definitions = append(definitions, definition)
 		if item {

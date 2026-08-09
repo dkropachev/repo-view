@@ -161,6 +161,7 @@ type modulaRecoveryParser struct {
 	imports                        []cLineSpan
 	headerOverflowModuleExpression modulaRecoveryExpressionStream
 	headerOverflowName             modulaToken
+	headerOverflowLastText         string
 	headerOverflowProcedureStream  modulaRecoveryFormalStream
 	pendingRepeatControl           modulaRecoveryControl
 	headerOverflowProcedureBracket int
@@ -292,7 +293,10 @@ func (parser *modulaRecoveryParser) accept(token modulaToken) {
 		return
 	}
 	if parser.headerOverflow && token.lineStart &&
-		modulaRecoveryRestartToken(token.text) && !parser.headerOpen() {
+		modulaRecoveryRestartToken(token.text) &&
+		(!parser.headerOpen() || token.text == "PROCEDURE" &&
+			parser.headerOverflowBlocks == 0) &&
+		!parser.headerOverflowContinuesWith(token) {
 		parser.currentFrame().declarationPhase = 2
 		parser.clearHeader()
 	}
@@ -304,7 +308,10 @@ func (parser *modulaRecoveryParser) accept(token modulaToken) {
 
 	if token.lineStart && len(parser.header) > 0 &&
 		modulaRecoveryRestartToken(token.text) &&
-		!parser.headerOpen() &&
+		(!parser.headerOpen() || token.text == "PROCEDURE" &&
+			!modulaRecoveryHeaderHasOpenBlock(
+				parser.header, parser.headerBlockStart(parser.header),
+			)) &&
 		!parser.headerContinuesWith(token) {
 		parser.currentFrame().declarationPhase = 2
 		parser.clearHeader()
@@ -643,7 +650,9 @@ func (parser *modulaRecoveryParser) headerContinuesWith(token modulaToken) bool 
 		!modulaKeyword(parser.header[1].text) {
 		return true
 	}
-	if token.text != "PROCEDURE" || len(parser.header) < 2 {
+	if token.text != "PROCEDURE" || len(parser.header) < 2 ||
+		parser.header[0].kind != modulaTokenIdentifier ||
+		modulaKeyword(parser.header[0].text) {
 		return false
 	}
 	last := parser.header[len(parser.header)-1].text
@@ -652,6 +661,25 @@ func (parser *modulaRecoveryParser) headerContinuesWith(token modulaToken) bool 
 		return last == "=" || last == "TO" || last == "OF"
 	case modulaRecoveryVarSection:
 		return last == ":"
+	case modulaRecoveryNoSection, modulaRecoveryConstSection:
+		return false
+	}
+	return false
+}
+
+func (parser *modulaRecoveryParser) headerOverflowContinuesWith(
+	token modulaToken,
+) bool {
+	if token.text != "PROCEDURE" {
+		return false
+	}
+	switch parser.headerOverflowSection {
+	case modulaRecoveryTypeSection:
+		return parser.headerOverflowLastText == "=" ||
+			parser.headerOverflowLastText == "TO" ||
+			parser.headerOverflowLastText == "OF"
+	case modulaRecoveryVarSection:
+		return parser.headerOverflowLastText == ":"
 	case modulaRecoveryNoSection, modulaRecoveryConstSection:
 		return false
 	}
@@ -746,6 +774,7 @@ func (parser *modulaRecoveryParser) beginHeaderOverflow() {
 	parser.headerOverflow = true
 	if len(header) > 0 {
 		parser.headerOverflowStart = parser.line(header[0].start)
+		parser.headerOverflowLastText = header[len(header)-1].text
 	}
 	if len(header) > 0 && header[0].text == "PROCEDURE" {
 		if name, ok := modulaRawProcedureName(header); ok &&
@@ -814,6 +843,7 @@ func (parser *modulaRecoveryParser) updateHeaderOverflow(token modulaToken) {
 	}
 	parser.updateHeaderOverflowModuleSuffix(token)
 	parser.updateHeaderOverflowStructure(token)
+	parser.headerOverflowLastText = token.text
 }
 
 func (parser *modulaRecoveryParser) updateHeaderOverflowModuleSuffix(
@@ -1010,6 +1040,7 @@ func (parser *modulaRecoveryParser) acceptHeaderOverflowDirective(
 	if parser.headerOverflowImport {
 		parser.headerOverflowImportValid = false
 	}
+	parser.headerOverflowLastText = "*>"
 }
 
 func (parser *modulaRecoveryParser) updateHeaderOverflowStructure(
@@ -2034,7 +2065,7 @@ func (parser *modulaRecoveryParser) finishHeader(
 	terminatorEnd int,
 ) {
 	if parser.headerOverflow {
-		parser.finishOverflowHeader(line)
+		parser.finishOverflowHeader(line, terminatorEnd)
 		return
 	}
 	header := parser.header
@@ -2074,17 +2105,19 @@ func (parser *modulaRecoveryParser) finishHeader(
 		)
 		return
 	case "PROCEDURE":
-		parser.acceptProcedureHeader(header, line)
+		parser.acceptProcedureHeader(header, line, terminatorEnd)
 		return
 	case "MODULE":
 		parser.acceptModuleHeader(header, line)
 		return
 	}
 	parser.currentFrame().declarationPhase = 2
-	parser.acceptSectionHeader(header, line)
+	parser.acceptSectionHeader(header, line, terminatorEnd)
 }
 
-func (parser *modulaRecoveryParser) finishOverflowHeader(line int) {
+func (parser *modulaRecoveryParser) finishOverflowHeader(
+	line, terminatorEnd int,
+) {
 	owner := parser.headerOverflowOwner
 	name := parser.headerOverflowName
 	start := parser.headerOverflowStart
@@ -2149,6 +2182,7 @@ func (parser *modulaRecoveryParser) finishOverflowHeader(line int) {
 		)
 	}
 	if frame.definitionUnit {
+		parser.setDefinitionOwnedEndColumn(definitionIndex, terminatorEnd)
 		return
 	}
 	if len(parser.frames) >= modulaMaximumStructuralDepth {
@@ -2220,7 +2254,7 @@ func (parser *modulaRecoveryParser) acceptModuleHeader(
 
 func (parser *modulaRecoveryParser) acceptProcedureHeader(
 	header []modulaToken,
-	line int,
+	line, terminatorEnd int,
 ) {
 	parent := parser.currentFrame()
 	definitionUnit := parent.definitionUnit
@@ -2261,6 +2295,7 @@ func (parser *modulaRecoveryParser) acceptProcedureHeader(
 	startLine := parser.line(header[0].start)
 	definitionIndex := parser.addDefinition(name, startLine, line, definitionUnit)
 	if definitionUnit {
+		parser.setDefinitionOwnedEndColumn(definitionIndex, terminatorEnd)
 		return
 	}
 	if len(parser.frames) >= modulaMaximumStructuralDepth {
@@ -2276,7 +2311,7 @@ func (parser *modulaRecoveryParser) acceptProcedureHeader(
 
 func (parser *modulaRecoveryParser) acceptSectionHeader(
 	header []modulaToken,
-	line int,
+	line, terminatorEnd int,
 ) {
 	if parser.currentFrame().invalid {
 		return
@@ -2307,7 +2342,12 @@ func (parser *modulaRecoveryParser) acceptSectionHeader(
 				break
 			}
 		}
-		parser.addDefinition(header[0], parser.line(header[0].start), line, ownsScope)
+		definitionIndex := parser.addDefinition(
+			header[0], parser.line(header[0].start), line, ownsScope,
+		)
+		if ownsScope {
+			parser.setDefinitionOwnedEndColumn(definitionIndex, terminatorEnd)
+		}
 		parser.addTypeMemberDefinitions(header, 2, len(header), line)
 	case modulaRecoveryVarSection:
 		colon := modulaRecoveryTopLevelToken(header, ":")
@@ -2393,13 +2433,7 @@ func (parser *modulaRecoveryParser) closeNamedFrame(
 			definition.ownsScope = true
 			definition.scopeStart = frame.start
 			definition.scopeEnd = max(frame.start, line)
-			ownedEndLine, ownedEndColumn := modulaLineAndColumn(
-				parser.lineStarts, terminatorEnd,
-			)
-			if terminatorEnd <= 0 || ownedEndLine != definition.scopeEnd {
-				ownedEndColumn = 0
-			}
-			definition.ownedEndColumn = ownedEndColumn
+			parser.setDefinitionOwnedEndColumn(frame.definitionIndex, terminatorEnd)
 			parser.addScope(frame.start, line)
 		}
 	}
@@ -2545,6 +2579,25 @@ func (parser *modulaRecoveryParser) addDefinition(
 	return len(parser.definitions) - 1
 }
 
+func (parser *modulaRecoveryParser) setDefinitionOwnedEndColumn(
+	definitionIndex, terminatorEnd int,
+) {
+	if definitionIndex < 0 || definitionIndex >= len(parser.definitions) {
+		return
+	}
+	definition := &parser.definitions[definitionIndex]
+	definition.ownedEndColumn = 0
+	if !definition.ownsScope || terminatorEnd <= 0 {
+		return
+	}
+	ownedEndLine, ownedEndColumn := modulaLineAndColumn(
+		parser.lineStarts, terminatorEnd,
+	)
+	if ownedEndLine == definition.scopeEnd {
+		definition.ownedEndColumn = ownedEndColumn
+	}
+}
+
 func (parser *modulaRecoveryParser) addScope(start, end int) {
 	start = max(1, min(start, parser.lineCount))
 	end = max(start, min(end, parser.lineCount))
@@ -2579,6 +2632,7 @@ func (parser *modulaRecoveryParser) clearHeader() {
 	parser.headerOverflow = false
 	parser.headerOverflowOwner = modulaRecoveryNoOwner
 	parser.headerOverflowName = modulaToken{}
+	parser.headerOverflowLastText = ""
 	parser.headerOverflowStart = 0
 	parser.headerOverflowDefinition = false
 	parser.headerOverflowLocalModule = false
@@ -3002,14 +3056,28 @@ func modulaRecoveryImportHeaderValid(header []modulaToken) bool {
 }
 
 func modulaRecoveryHeaderOpen(header []modulaToken, blockStart int) bool {
-	paren, bracket := 0, 0
-	blocks := 0
+	paren, bracket, blocks := modulaRecoveryHeaderDepths(header, blockStart)
+	return paren > 0 || bracket > 0 || blocks > 0
+}
+
+func modulaRecoveryHeaderHasOpenBlock(
+	header []modulaToken,
+	blockStart int,
+) bool {
+	_, _, blocks := modulaRecoveryHeaderDepths(header, blockStart)
+	return blocks > 0
+}
+
+func modulaRecoveryHeaderDepths(
+	header []modulaToken,
+	blockStart int,
+) (paren, bracket, blocks int) {
 	for index := 0; index < len(header); index++ {
 		token := header[index]
 		if token.text == "<*" {
 			end := modulaRecoveryDirectiveRangeEnd(header, index, len(header))
 			if end < 0 {
-				return false
+				return 0, 0, 0
 			}
 			index = end - 1
 			continue
@@ -3037,7 +3105,7 @@ func modulaRecoveryHeaderOpen(header []modulaToken, blockStart int) bool {
 			}
 		}
 	}
-	return paren > 0 || bracket > 0 || blocks > 0
+	return paren, bracket, blocks
 }
 
 func modulaRecoveryTopLevelToken(tokens []modulaToken, text string) int {

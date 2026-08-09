@@ -290,7 +290,8 @@ experiments/lsp-replacement/analyze.sh \
 ```
 
 The current measurement summary is in
-[`../lsp-replacement.md`](../lsp-replacement.md). Short-workload details are in
-[`optimization-results.md`](optimization-results.md). Deep measurements,
-failed regression cases, and reproduction commands are in
-[`deep-navigation-results.md`](deep-navigation-results.md).
+[`../lsp-replacement.md`](../lsp-replacement.md). Historical pinned
+short-workload and deep-workload snapshots are in
+[`optimization-results.md`](optimization-results.md) and
+[`deep-navigation-results.md`](deep-navigation-results.md); their old call
+counts do not define the current accepted protocols.

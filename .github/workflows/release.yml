@@ -40,6 +40,7 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           version="${version//\//-}"
           mkdir -p build dist
+          cp THIRD_PARTY_NOTICES.md build/
 
           targets=(
             linux/amd64
@@ -63,11 +64,26 @@ jobs:
               -o "build/$binary" ./cmd/repo-view
 
             if [[ "$os" == "windows" ]]; then
-              (cd build && zip -q "../dist/$archive.zip" "$binary")
+              (cd build && zip -q "../dist/$archive.zip" \
+                "$binary" THIRD_PARTY_NOTICES.md)
             else
-              tar -C build -czf "dist/$archive.tar.gz" "$binary"
+              tar -C build -czf "dist/$archive.tar.gz" \
+                "$binary" THIRD_PARTY_NOTICES.md
             fi
             rm "build/$binary"
+          done
+
+          for archive in dist/repo-view_*; do
+            case "$archive" in
+              *.zip) contents="$(unzip -Z1 "$archive")" ;;
+              *.tar.gz) contents="$(tar -tzf "$archive")" ;;
+              *) continue ;;
+            esac
+            if ! grep -Fxq THIRD_PARTY_NOTICES.md <<<"$contents"; then
+              printf 'release archive lacks THIRD_PARTY_NOTICES.md: %s\n' \
+                "$archive" >&2
+              exit 1
+            fi
           done
 
           (cd dist && sha256sum repo-view_* > SHA256SUMS)

@@ -275,9 +275,13 @@ func (scanner *csharpScanner) Scan(
 	if cursor.exhausted {
 		return false
 	}
-	if csharpValidExternalSymbol(validSymbols, csharpInterpolationOpenBrace) &&
-		scanner.scanInterpolationOpenBrace(&cursor) {
-		return true
+	braceAdvanced := 0
+	if csharpValidExternalSymbol(validSymbols, csharpInterpolationOpenBrace) {
+		matched, advanced := scanner.scanInterpolationOpenBrace(&cursor)
+		if matched {
+			return true
+		}
+		braceAdvanced = advanced
 	}
 	if cursor.exhausted {
 		return false
@@ -290,7 +294,11 @@ func (scanner *csharpScanner) Scan(
 		return false
 	}
 	if csharpValidExternalSymbol(validSymbols, csharpInterpolationStringContent) {
-		return scanner.scanInterpolationStringContent(&cursor, didAdvance)
+		return scanner.scanInterpolationStringContent(
+			&cursor,
+			didAdvance,
+			braceAdvanced,
+		)
 	}
 	return false
 }
@@ -461,25 +469,27 @@ func (scanner *csharpScanner) scanInterpolationEndQuote(
 	return false, quoteCount > 0
 }
 
-func (scanner *csharpScanner) scanInterpolationOpenBrace(cursor *csharpScanCursor) bool {
+func (scanner *csharpScanner) scanInterpolationOpenBrace(
+	cursor *csharpScanCursor,
+) (matched bool, advanced int) {
 	current := scanner.currentInterpolation()
 	if current == nil {
-		return false
+		return false, 0
 	}
 	braceCount := 0
 	for cursor.lexer.Lookahead == '{' && braceCount < int(current.dollarCount) {
 		if !cursor.advance(false) {
-			return false
+			return false, braceCount
 		}
 		braceCount++
 	}
 	if braceCount == 0 || braceCount != int(current.dollarCount) ||
 		cursor.lexer.Lookahead == '{' {
-		return false
+		return false, braceCount
 	}
 	current.openBraceCount = uint8(braceCount)
 	cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationOpenBrace)
-	return true
+	return true, braceCount
 }
 
 func (scanner *csharpScanner) scanInterpolationCloseBrace(cursor *csharpScanCursor) bool {
@@ -505,13 +515,26 @@ func (scanner *csharpScanner) scanInterpolationCloseBrace(cursor *csharpScanCurs
 func (scanner *csharpScanner) scanInterpolationStringContent(
 	cursor *csharpScanCursor,
 	didAdvance bool,
+	braceCount int,
 ) bool {
 	current := scanner.currentInterpolation()
 	if current == nil {
 		return false
 	}
 	cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationStringContent)
-	braceCount := 0
+	// A failed one-brace interpolation probe has already consumed the first
+	// brace in a regular or verbatim `{{` escape. Finish exactly that escaped
+	// pair and mark its end. If another brace follows, tree-sitter restarts at
+	// it, allowing `{{{value}}}` to become literal `{` plus an interpolation
+	// instead of one undifferentiated content token.
+	if !current.raw() && current.dollarCount == 1 && braceCount == 1 &&
+		cursor.lexer.Lookahead == '{' {
+		if !cursor.advance(false) {
+			return false
+		}
+		cursor.lexer.MarkEnd()
+		return true
+	}
 	for !cursor.atEnd() {
 		switch {
 		case current.raw():

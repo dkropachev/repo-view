@@ -1,6 +1,9 @@
 package repoview
 
-import "strings"
+import (
+	"strings"
+	"unicode"
+)
 
 // csharpLexicalSourceAnalysis is the bounded, full-source structural view used
 // when the concrete grammar is unavailable and as recovery input beside ERROR
@@ -471,7 +474,11 @@ func (analyzer *csharpRecoveryAnalyzer) handleDirective(offset, line int) {
 	end := csharpLineEnd(analyzer.source, offset)
 	analyzer.ignoreUntil = max(analyzer.ignoreUntil, end)
 	analyzer.resetCurrentStatement()
-	text := strings.TrimSpace(analyzer.source[min(offset+1, end):end])
+	bodyStart := min(offset+1, end)
+	raw := analyzer.source[bodyStart:end]
+	leftTrimmed := strings.TrimLeftFunc(raw, unicode.IsSpace)
+	textStart := bodyStart + len(raw) - len(leftTrimmed)
+	text := strings.TrimSpace(raw)
 	if strings.HasPrefix(text, ":") {
 		name := csharpRecoveryDirectiveWord(strings.TrimSpace(strings.TrimPrefix(text, ":")))
 		if name == "package" || name == "sdk" || name == "project" {
@@ -483,9 +490,11 @@ func (analyzer *csharpRecoveryAnalyzer) handleDirective(offset, line int) {
 		return
 	}
 	name := csharpRecoveryDirectiveWord(text)
-	remainder := strings.TrimSpace(strings.TrimPrefix(text, name))
 	switch name {
 	case "define":
+		remainderStart := min(textStart+len(name), end)
+		remainder := analyzer.source[remainderStart:end]
+		remainder = strings.TrimLeftFunc(remainder, unicode.IsSpace)
 		start := end - len(remainder)
 		identifierEnd := csharpIdentifierEnd(analyzer.source, start)
 		if identifierEnd > start {

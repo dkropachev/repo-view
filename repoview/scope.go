@@ -56,18 +56,25 @@ func braceScopeFromStructural(
 
 func findBraceStart(lines []string, idx int) (int, bool) {
 	depth := 0
+	matchedCloseOnTargetLine := false
 	for pos := idx; pos >= 0; pos-- {
 		line := lines[pos]
 		for i := len(line) - 1; i >= 0; i-- {
 			switch line[i] {
 			case '}':
+				if depth == 0 {
+					matchedCloseOnTargetLine = pos == idx
+				}
 				depth++
 			case '{':
 				if depth == 0 {
 					return pos, true
 				}
 				depth--
-				if depth == 0 {
+				// A closing brace on the target line still belongs to its
+				// enclosing scope. A balanced block that ended on an earlier
+				// line is only a preceding sibling, so keep searching outward.
+				if depth == 0 && matchedCloseOnTargetLine {
 					return pos, true
 				}
 			}

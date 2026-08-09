@@ -87,6 +87,44 @@ public static class Extensions
 	}
 }
 
+func TestCSharpGrammarParsesEscapedInterpolationBraces(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		source             string
+		wantInterpolations int
+	}{
+		{"regular escaped pair", `var value = $"{{escaped}}";`, 0},
+		{"regular escaped pair before interpolation", `var value = $"{{{regularValue}}}";`, 1},
+		{"verbatim escaped pair", `var value = $@"{{escaped}}";`, 0},
+		{"verbatim escaped pair before interpolation", `var value = $@"{{{verbatimValue}}}";`, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree := parseCSharpTestSource(t, test.source)
+			interpolations := 0
+			csharpWalkTestTree(t, tree.RootNode(), func(node treesitter.Node) {
+				if node.IsMissing() || node.Symbol() == treesitter.SymbolError {
+					t.Fatalf("valid C# produced recovery node %q at %d",
+						node.Type(), node.StartByte())
+				}
+				if node.Type() != "interpolation" {
+					return
+				}
+				interpolations++
+				if node.ChildCount() != 3 ||
+					node.Child(0).Type() != "interpolation_brace" ||
+					node.Child(1).Type() != "identifier" ||
+					node.Child(2).Type() != "interpolation_brace" {
+					t.Errorf("interpolation has malformed structure: %s", node.String())
+				}
+			})
+			if interpolations != test.wantInterpolations {
+				t.Errorf("interpolation nodes = %d, want %d; tree: %s",
+					interpolations, test.wantInterpolations, tree.RootNode().String())
+			}
+		})
+	}
+}
+
 func TestCSharpScannerStateRoundTripAndBounds(t *testing.T) {
 	scanner := &csharpScanner{
 		quoteCount: 7,

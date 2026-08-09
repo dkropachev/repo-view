@@ -889,7 +889,41 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		t.Fatalf("pre-judge quality failure executed codex: count = %s", got)
 	}
 
+	danglingJudgeTarget := filepath.Join(runDir, "outside-judge-stderr")
+	danglingJudgeLink := filepath.Join(
+		runDir, "quality", "judge-explain-1.stderr",
+	)
+	if err := os.Symlink(danglingJudgeTarget, danglingJudgeLink); err != nil {
+		t.Skipf("dangling judge artifact test requires symlinks: %v", err)
+	}
 	runQualityCheck("1")
+	if _, err := os.Stat(danglingJudgeTarget); !os.IsNotExist(err) {
+		t.Fatalf("judge stderr followed dangling artifact outside quality dir: %v", err)
+	}
+	if info, err := os.Lstat(danglingJudgeLink); err != nil {
+		t.Fatalf("stat replacement judge stderr: %v", err)
+	} else if info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("dangling judge stderr artifact was not replaced")
+	}
+	retainedJudgeLinks, err := filepath.Glob(filepath.Join(
+		runDir, "quality", "rejected-judge-explain-1-*.stderr",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(retainedJudgeLinks) != 1 {
+		t.Fatalf("retained dangling judge artifacts = %#v, want one", retainedJudgeLinks)
+	}
+	if info, err := os.Lstat(retainedJudgeLinks[0]); err != nil {
+		t.Fatal(err)
+	} else if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("retained judge artifact mode = %v, want symlink", info.Mode())
+	}
+	if target, err := os.Readlink(retainedJudgeLinks[0]); err != nil {
+		t.Fatal(err)
+	} else if target != danglingJudgeTarget {
+		t.Fatalf("retained judge target = %q, want %q", target, danglingJudgeTarget)
+	}
 	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
 		t.Fatalf("global post-checkout hook ran in pristine clone: %v", err)
 	}

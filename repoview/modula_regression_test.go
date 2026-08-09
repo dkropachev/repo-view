@@ -848,6 +848,232 @@ END Names.
 	}
 }
 
+func TestModulaFallbackRecordScopeUsesSameLineClosingBoundary(t *testing.T) {
+	t.Parallel()
+
+	source := "MODULE Dense; " +
+		strings.Repeat("(*", modulaMaximumCommentDepth+1) + "opaque" +
+		strings.Repeat("*)", modulaMaximumCommentDepth+1) +
+		" TYPE Entry = RECORD field: InsideTarget END; " +
+		"BEGIN OutsideTarget END Dense.\n"
+	lines := modulaTestLines(source)
+	analysis := analyzeModulaSource(source, len(lines))
+	if analysis == nil || analysis.tree != nil {
+		t.Fatalf("deep-comment analysis = %#v, want lexical fallback", analysis)
+	}
+	entry := modulaTestFirstDefinition(t, analysis.definitions, "Entry")
+	wantEndColumn := strings.Index(source, "; BEGIN") + 2
+	if !entry.ownsScope || entry.ownedEndColumn != wantEndColumn {
+		t.Fatalf("fallback Entry boundary = %#v, want end column %d",
+			entry, wantEndColumn)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "Dense.mod", source)
+	view := mustView(t, root)
+	for _, test := range []struct {
+		symbol, scope string
+	}{
+		{symbol: "InsideTarget", scope: "Entry"},
+		{symbol: "OutsideTarget", scope: "Dense"},
+	} {
+		found, err := view.Find(test.symbol, Options{
+			Include: IncludeRefs,
+			Return:  ReturnScope,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != test.scope {
+			t.Errorf("fallback %s reference = %#v, want %s scope",
+				test.symbol, found.Results, test.scope)
+		}
+	}
+}
+
+func TestModulaFallbackDefinitionProcedureUsesSameLineHeadingBoundary(t *testing.T) {
+	t.Parallel()
+
+	source := "DEFINITION MODULE Dense; " +
+		strings.Repeat("(*", modulaMaximumCommentDepth+1) + "opaque" +
+		strings.Repeat("*)", modulaMaximumCommentDepth+1) +
+		" PROCEDURE First(value: ParamType): ReturnType; " +
+		"PROCEDURE Second; END Dense.\n"
+	lines := modulaTestLines(source)
+	analysis := analyzeModulaSource(source, len(lines))
+	if analysis == nil || analysis.tree != nil {
+		t.Fatalf("deep-comment analysis = %#v, want lexical fallback", analysis)
+	}
+	first := modulaTestFirstDefinition(t, analysis.definitions, "First")
+	wantEndColumn := strings.Index(source, "; PROCEDURE Second") + 2
+	if !first.ownsScope || first.ownedEndColumn != wantEndColumn {
+		t.Fatalf("fallback First boundary = %#v, want end column %d",
+			first, wantEndColumn)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "Dense.def", source)
+	view := mustView(t, root)
+	for _, symbol := range []string{"ParamType", "ReturnType"} {
+		found, err := view.Find(symbol, Options{
+			Include: IncludeRefs,
+			Return:  ReturnScope,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != "First" {
+			t.Errorf("fallback %s reference = %#v, want First scope",
+				symbol, found.Results)
+		}
+	}
+}
+
+func TestModulaFallbackOverflowDefinitionProcedureUsesHeadingBoundary(t *testing.T) {
+	t.Parallel()
+
+	source := "DEFINITION MODULE Dense; " +
+		strings.Repeat("(*", modulaMaximumCommentDepth+1) + "opaque" +
+		strings.Repeat("*)", modulaMaximumCommentDepth+1) +
+		" PROCEDURE Massive(" +
+		strings.Repeat("value: FillerType; ", modulaMaximumDeclarationTokens/4+64) +
+		"last: FinalParamType): ResultType; PROCEDURE Tail; END Dense.\n"
+	lines := modulaTestLines(source)
+	analysis := analyzeModulaSource(source, len(lines))
+	if analysis == nil || analysis.tree != nil {
+		t.Fatalf("overflow analysis = %#v, want lexical fallback", analysis)
+	}
+	massive := modulaTestFirstDefinition(t, analysis.definitions, "Massive")
+	wantEndColumn := strings.Index(source, "; PROCEDURE Tail") + 2
+	if !massive.ownsScope || massive.ownedEndColumn != wantEndColumn {
+		t.Fatalf("overflow Massive boundary = %#v, want end column %d",
+			massive, wantEndColumn)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "Dense.def", source)
+	view := mustView(t, root)
+	for _, symbol := range []string{"FinalParamType", "ResultType"} {
+		found, err := view.Find(symbol, Options{
+			Include: IncludeRefs,
+			Return:  ReturnScope,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(found.Results) != 1 || found.Results[0].Scope != "Massive" {
+			t.Errorf("overflow %s reference = %#v, want Massive scope",
+				symbol, found.Results)
+		}
+	}
+}
+
+func TestModulaMalformedOpenHeaderRecoversLineLeadingProcedure(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name, brokenHeading string
+	}{
+		{name: "opening parenthesis", brokenHeading: "PROCEDURE Broken(\n"},
+		{name: "formal type colon", brokenHeading: "PROCEDURE Broken(arg:\n"},
+		{
+			name:          "formal type colon after variable section",
+			brokenHeading: "VAR\nPROCEDURE Broken(arg:\n",
+		},
+		{
+			name:          "open default after type section",
+			brokenHeading: "TYPE\nPROCEDURE Broken(arg =\n",
+		},
+		{
+			name: "declaration budget overflow",
+			brokenHeading: "PROCEDURE Broken(" + strings.Repeat(
+				"arg: T; ", modulaMaximumDeclarationTokens/4+32,
+			) + "\n",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			source := "MODULE Recovery;\n" + test.brokenHeading + `PROCEDURE Tail;
+BEGIN
+END Tail;
+BEGIN
+END Recovery.
+`
+			lines := modulaTestLines(source)
+			want := []string{"Recovery", "Tail"}
+			for path, definitions := range map[string][]sourceDefinition{
+				"concrete": modulaTreeDefinitions(
+					source, len(lines), modulaTreeTestParseRecovery(t, source),
+				),
+				"fallback": analyzeModulaLexically(source, len(lines)).definitions,
+			} {
+				if got := modulaTestDefinitionSymbols(definitions); !slices.Equal(got, want) {
+					t.Errorf("%s malformed open-header definitions = %#v, want %#v",
+						path, got, want)
+				}
+			}
+
+			root := t.TempDir()
+			writeFile(t, root, "Recovery.mod", source)
+			outline, err := mustView(t, root).Outline(
+				"Recovery.mod",
+				Options{Return: ReturnLocations},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, len(outline.Results))
+			for index, result := range outline.Results {
+				got[index] = result.Symbol
+			}
+			if !slices.Equal(got, want) {
+				t.Fatalf("malformed open-header outline = %#v, want %#v", got, want)
+			}
+		})
+	}
+}
+
+func TestModulaFallbackOverflowOpenDeclarationRecoversProcedure(t *testing.T) {
+	t.Parallel()
+
+	source := "MODULE Recovery;\n" +
+		strings.Repeat("(*", modulaMaximumCommentDepth+1) + "opaque" +
+		strings.Repeat("*)", modulaMaximumCommentDepth+1) + "\n" +
+		"VAR Broken: ARRAY [" +
+		strings.Repeat("1, ", modulaMaximumDeclarationTokens/2+32) + "\n" +
+		`PROCEDURE Tail;
+BEGIN
+END Tail;
+BEGIN
+END Recovery.
+`
+	lines := modulaTestLines(source)
+	analysis := analyzeModulaSource(source, len(lines))
+	if analysis == nil || analysis.tree != nil {
+		t.Fatalf("overflow analysis = %#v, want lexical fallback", analysis)
+	}
+	if got, want := modulaTestDefinitionSymbols(analysis.definitions),
+		[]string{"Recovery", "Tail"}; !slices.Equal(got, want) {
+		t.Fatalf("fallback overflow definitions = %#v, want %#v", got, want)
+	}
+}
+
+func TestModulaFallbackOverflowProcedureTypeContinuationIsContextual(t *testing.T) {
+	t.Parallel()
+
+	source := "MODULE Recovery;\nVAR " +
+		strings.Repeat("item, ", modulaMaximumDeclarationTokens/2+32) +
+		"callback:\nPROCEDURE(T): R;\n" +
+		"Another: T;\nPROCEDURE Tail;\nBEGIN\nEND Tail;\n" +
+		"BEGIN\nEND Recovery.\n"
+	lines := modulaTestLines(source)
+	definitions := analyzeModulaLexically(source, len(lines)).definitions
+	if got, want := modulaTestDefinitionSymbols(definitions),
+		[]string{"Recovery", "Another", "Tail"}; !slices.Equal(got, want) {
+		t.Fatalf("overflow procedure-type definitions = %#v, want %#v", got, want)
+	}
+}
+
 func TestModulaReservedBuiltinTokensCannotBecomeDeclarationNames(t *testing.T) {
 	t.Parallel()
 

@@ -867,19 +867,117 @@ func (walker *swiftLexicalWalker) scanIdentifierTail() {
 
 func (walker *swiftLexicalWalker) scanNumber() {
 	start := walker.offset
-	for walker.offset < len(walker.source) {
-		character := walker.source[walker.offset]
-		if character >= '0' && character <= '9' || character >= 'a' && character <= 'z' ||
-			character >= 'A' && character <= 'Z' || character == '_' || character == '.' {
-			walker.offset++
-			continue
+	walker.offset = swiftNumberLiteralEnd(walker.source, start)
+	if walker.offset < len(walker.source) {
+		value, size := utf8.DecodeRuneInString(walker.source[walker.offset:])
+		if size > 0 && !(value == utf8.RuneError && size == 1) &&
+			swiftIdentifierContinueRune(value) {
+			// Keep malformed adjacent suffixes opaque without consuming a range or
+			// member-access dot after an otherwise complete numeric literal.
+			walker.scanIdentifierTail()
 		}
-		break
 	}
 	walker.emitToken(swiftToken{
 		text: walker.source[start:walker.offset], start: start, end: walker.offset,
 		nameStart: start, kind: swiftTokenNumber,
 	})
+}
+
+func swiftNumberLiteralEnd(source string, start int) int {
+	if start < 0 || start >= len(source) || source[start] < '0' || source[start] > '9' {
+		return max(0, min(start, len(source)))
+	}
+	if start+1 < len(source) && source[start] == '0' {
+		switch source[start+1] {
+		case 'b', 'B':
+			end, _ := swiftNumberDigitRunEnd(source, start+2, 2)
+			return end
+		case 'o', 'O':
+			end, _ := swiftNumberDigitRunEnd(source, start+2, 8)
+			return end
+		case 'x', 'X':
+			integerEnd, _ := swiftNumberDigitRunEnd(source, start+2, 16)
+			if exponentEnd, ok := swiftNumberExponentEnd(source, integerEnd, 'p', 'P'); ok {
+				return exponentEnd
+			}
+			if integerEnd < len(source) && source[integerEnd] == '.' &&
+				(integerEnd+1 >= len(source) || source[integerEnd+1] != '.') {
+				fractionEnd, hasFractionDigit := swiftNumberDigitRunEnd(
+					source, integerEnd+1, 16,
+				)
+				if hasFractionDigit {
+					if exponentEnd, ok := swiftNumberExponentEnd(
+						source, fractionEnd, 'p', 'P',
+					); ok {
+						return exponentEnd
+					}
+				}
+			}
+			return integerEnd
+		}
+	}
+
+	integerEnd, _ := swiftNumberDigitRunEnd(source, start, 10)
+	end := integerEnd
+	if end+1 < len(source) && source[end] == '.' && source[end+1] != '.' &&
+		source[end+1] >= '0' && source[end+1] <= '9' {
+		end, _ = swiftNumberDigitRunEnd(source, end+1, 10)
+	}
+	if exponentEnd, ok := swiftNumberExponentEnd(source, end, 'e', 'E'); ok {
+		return exponentEnd
+	}
+	return end
+}
+
+func swiftNumberDigitRunEnd(source string, start, base int) (int, bool) {
+	end := max(0, min(start, len(source)))
+	hasDigit := false
+	for end < len(source) {
+		character := source[end]
+		if character == '_' {
+			end++
+			continue
+		}
+		if !swiftNumberDigit(character, base) {
+			break
+		}
+		hasDigit = true
+		end++
+	}
+	return end, hasDigit
+}
+
+func swiftNumberDigit(character byte, base int) bool {
+	switch {
+	case character >= '0' && character <= '9':
+		return int(character-'0') < base
+	case character >= 'a' && character <= 'f':
+		return base == 16
+	case character >= 'A' && character <= 'F':
+		return base == 16
+	default:
+		return false
+	}
+}
+
+func swiftNumberExponentEnd(
+	source string,
+	start int,
+	lower, upper byte,
+) (int, bool) {
+	if start < 0 || start >= len(source) ||
+		(source[start] != lower && source[start] != upper) {
+		return start, false
+	}
+	end := start + 1
+	if end < len(source) && (source[end] == '+' || source[end] == '-') {
+		end++
+	}
+	if end >= len(source) || source[end] < '0' || source[end] > '9' {
+		return start, false
+	}
+	end, _ = swiftNumberDigitRunEnd(source, end, 10)
+	return end, true
 }
 
 func (walker *swiftLexicalWalker) scanPunctuationOrOperator() {

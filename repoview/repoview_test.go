@@ -276,6 +276,37 @@ func TestInspectGenericBraceFallbackIgnoresCommentBraces(t *testing.T) {
 	}
 }
 
+func TestInspectGenericBraceFallbackSkipsClosedPrecedingBlock(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "fixture.xyz", `function run() {
+  if (enabled) {
+    helper();
+  }
+  target();
+}
+`)
+
+	view := mustView(t, root)
+	for _, lineNo := range []int{5, 6} {
+		response, err := view.Inspect(
+			fmt.Sprintf("fixture.xyz:%d", lineNo),
+			Options{Include: IncludeScope, Return: ReturnScope},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Results) != 1 {
+			t.Fatalf("line %d results = %#v", lineNo, response.Results)
+		}
+		result := response.Results[0]
+		if result.StartLine != 1 || result.EndLine != 6 ||
+			!strings.Contains(result.Code, "function run()") ||
+			!strings.Contains(result.Code, "target()") {
+			t.Fatalf("line %d generic scope = %#v", lineNo, result)
+		}
+	}
+}
+
 func TestInspectGenericBraceFallbackIgnoresBacktickLiteralBraces(t *testing.T) {
 	tests := []struct {
 		name       string

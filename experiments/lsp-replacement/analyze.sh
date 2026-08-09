@@ -872,6 +872,22 @@ for log in "${inputs_dir}"/*.jsonl; do
           command_executable_pattern($executables)
           + "(?=[\\n\\r\\t ;|&)]|$)"
         );
+      def dynamic_command_invocation($command):
+        command_invocation(
+          $command;
+          "(?:"
+          + "\\$(?:"
+          + "[A-Za-z_][A-Za-z0-9_]*"
+          + "|[0-9@*#?!_-]"
+          + "|\\{[^}\\n\\r]+\\}"
+          + "|\\([^\\n\\r]*\\)"
+          + "|\u0027[^\u0027\\n\\r]*\u0027"
+          + "|\u0022[^\u0022\\n\\r]*\u0022"
+          + ")"
+          + "|\u0060[^\u0060\\n\\r]*\u0060"
+          + ")"
+          + "[^\\t \\n\\r;|&(){}\u0027\u0022\u0060]*"
+        );
       def repo_view_invocations($command; $subcommand):
         [
           $command
@@ -1030,13 +1046,17 @@ for log in "${inputs_dir}"/*.jsonl; do
                   .
                 end
               elif .escaped then
-                .segments[-1] += (
-                  if ($character | test("[\\t \\n\\r;|&(){}#\u0060$]")) then
+                if ($character | test("[\\n\\r]")) then
+                  .segments[-1] = .segments[-1][0:-1]
+                else
+                  .segments[-1] += (
+                    if ($character | test("[\\t ;|&(){}#\u0060$]")) then
                     "_"
-                  else
-                    $character
-                  end
-                )
+                    else
+                      $character
+                    end
+                  )
+                end
                 | .escaped = false
                 | .token_boundary = false
               elif $character == "\\" and .quote != "\u0027" then
@@ -1108,6 +1128,66 @@ for log in "${inputs_dir}"/*.jsonl; do
           )
           | .segments
           | map(select(test("\\S")))
+        );
+      def active_shell_substitution($command):
+        (
+          reduce range(0; ($command | length)) as $index (
+            {
+              quote: "",
+              escaped: false,
+              skip: 0,
+              active: false
+            };
+            ($command[$index:$index + 1]) as $character
+            | ($command[$index + 1:$index + 2]) as $next
+            | if .active then
+                .
+              elif .skip > 0 then
+                .skip -= 1
+              elif .escaped then
+                .escaped = false
+              elif .quote == "single" then
+                if $character == "\u0027" then .quote = "" else . end
+              elif .quote == "ansi" then
+                if $character == "\\" then
+                  .escaped = true
+                elif $character == "\u0027" then
+                  .quote = ""
+                else
+                  .
+                end
+              elif .quote == "double" then
+                if $character == "\\" then
+                  .escaped = true
+                elif $character == "\u0022" then
+                  .quote = ""
+                elif $character == "\u0060"
+                  or ($character == "$" and $next == "(") then
+                  .active = true
+                else
+                  .
+                end
+              elif $character == "\\" then
+                .escaped = true
+              elif $character == "$" and $next == "\u0027" then
+                .quote = "ansi"
+                | .skip = 1
+              elif $character == "\u0027" then
+                .quote = "single"
+              elif $character == "\u0022" then
+                .quote = "double"
+              elif $character == "\u0060"
+                or ($character == "$" and $next == "(")
+                or (
+                  ($character == "<" or $character == ">")
+                  and $next == "("
+                ) then
+                .active = true
+              else
+                .
+              end
+          )
+          | .active
         );
       def repository_path_reference($command):
         (
@@ -1254,6 +1334,126 @@ for log in "${inputs_dir}"/*.jsonl; do
         ];
       def executable_basename:
         split("/") | last;
+      def shell_wrapper_basename:
+        (split("/") | last) as $basename
+        | if (
+            $basename
+            | test(
+                "^(?:time|then|do|else|elif|if|while|until|builtin|command|exec|sudo|env|!)$"
+              )
+          ) then
+            $basename
+          else
+            ""
+          end;
+      def shell_wrapper_option_takes_argument($wrapper; $word):
+        (
+          $wrapper == "time"
+          and ($word | test("^(?:-f|--format|-o|--output)$"))
+        )
+        or (
+          $wrapper == "env"
+          and (
+            $word
+            | test("^(?:-u|--unset|-C|--chdir|-S|--split-string|--argv0)$")
+          )
+        )
+        or (
+          $wrapper == "exec"
+          and ($word == "-a" or $word == "--argv0")
+        )
+        or (
+          $wrapper == "sudo"
+          and (
+            $word
+            | test(
+                "^(?:-C|-D|-g|-h|-p|-R|-r|-T|-t|-u|--chdir|--group|--host|--prompt|--role|--type|--user)$"
+              )
+          )
+        );
+      def shell_command_executable($command):
+        def walk($words; $index; $wrapper; $skip):
+          if $index >= ($words | length) then
+            null
+          else
+            $words[$index] as $word
+            | if $skip then
+                walk($words; $index + 1; $wrapper; false)
+              elif (
+                $word
+                | test("^[A-Za-z_][A-Za-z0-9_]*\\+?=")
+              ) then
+                walk($words; $index + 1; $wrapper; false)
+              elif ($word | shell_wrapper_basename) != "" then
+                walk(
+                  $words;
+                  $index + 1;
+                  ($word | shell_wrapper_basename);
+                  false
+                )
+              elif $wrapper != "" and ($word | startswith("-")) then
+                walk(
+                  $words;
+                  $index + 1;
+                  $wrapper;
+                  shell_wrapper_option_takes_argument($wrapper; $word)
+                )
+              else
+                $word
+              end
+          end;
+        shell_words($command) as $words
+        | walk($words; 0; ""; false);
+      def normalized_dynamic_command_invocation($command):
+        (shell_command_executable($command) // "") as $executable
+        | $executable != ""
+          and $executable != "["
+          and (
+            ($executable | test("[\\$\u0060]"))
+            or ($executable | contains("*"))
+            or ($executable | contains("?"))
+            or ($executable | contains("["))
+          );
+      def normalized_command_invocation($command; $executables):
+        (shell_command_executable($command) // "") as $executable
+        | $executable != ""
+          and (
+            $executable
+            | executable_basename
+            | test("^(?:" + $executables + ")$")
+          );
+      def exact_or_normalized_command_invocation($command; $executables):
+        command_invocation($command; $executables)
+        or normalized_command_invocation($command; $executables);
+      def complex_shell_command($command):
+        command_invocation(
+          $command;
+          "(?:case|select|for|function)"
+        )
+        or (
+          $command
+          | test("^[\\t ]*(?:[0-9]+)?(?:<|>|<>|>>|<<<|<&|>&)")
+        )
+        or (
+          $command
+          | test(
+              "(?:^|[\\n\\r;|&(){}\u0060])[\\t ]*"
+              + "[^\\t \\n\\r;|&(){}]+"
+              + "\\{[^}\\n\\r]+\\}"
+              + "[^\\t \\n\\r;|&(){}]*"
+            )
+        )
+        or (
+          $command
+          | test(
+              "(?:^|[\\n\\r;|&(){}\u0060])[\\t ]*"
+              + "(?:"
+              + "function[\\t ]+[A-Za-z_][A-Za-z0-9_]*"
+              + "(?:[\\t ]*\\([\\t ]*\\))?"
+              + "|[A-Za-z_][A-Za-z0-9_]*[\\t ]*\\([\\t ]*\\)"
+              + ")[\\t ]*\\{"
+            )
+        );
       def tool_arguments($command; $executables):
         shell_words($command) as $words
         | (
@@ -1294,6 +1494,12 @@ for log in "${inputs_dir}"/*.jsonl; do
           + "|\\.[A-Za-z0-9_@+-][A-Za-z0-9_@+.-]*"
           + "|[A-Za-z0-9_@+-]+\\."
           + "(?:bash|c|cc|cfg|conf|cpp|cs|css|env|go|graphql|h|hpp|html|ini|java|js|json|jsx|kt|lock|md|mjs|mod|proto|py|rs|scss|sh|sql|sum|swift|toml|ts|tsx|txt|vue|xml|yaml|yml|zsh))$"
+        );
+      def command_mentions_repository_operand($command):
+        repository_path_reference($command)
+        or any(
+          shell_words($command)[];
+          repository_file_operand
         );
       def input_redirection_repository_read($command):
         [
@@ -1808,17 +2014,20 @@ for log in "${inputs_dir}"/*.jsonl; do
             any(.operands[0:-1][]; repository_file_operand)
           end;
       def extensionless_repository_read($command):
-        if command_invocation($command; "(?:awk|mawk)") then
+        if exact_or_normalized_command_invocation(
+          $command;
+          "(?:awk|mawk)"
+        ) then
           awk_extensionless_repository_read(
             tool_arguments($command; "(?:awk|mawk)")
           )
-        elif command_invocation($command; "jq") then
+        elif exact_or_normalized_command_invocation($command; "jq") then
           jq_extensionless_repository_read(tool_arguments($command; "jq"))
-        elif command_invocation($command; "deno") then
+        elif exact_or_normalized_command_invocation($command; "deno") then
           deno_extensionless_repository_read(
             tool_arguments($command; "deno")
           )
-        elif command_invocation(
+        elif exact_or_normalized_command_invocation(
           $command;
           "(?:python|python3|perl|ruby|node)"
         ) then
@@ -1840,19 +2049,22 @@ for log in "${inputs_dir}"/*.jsonl; do
               ($interpreter | test("^(?:python|python3)$"))
               and python_inline_repository_read($command)
             )
-        elif command_invocation($command; "(?:source|\\.)") then
+        elif exact_or_normalized_command_invocation(
+          $command;
+          "(?:source|\\.)"
+        ) then
           source_extensionless_repository_read(
             tool_arguments($command; "(?:source|\\.)")
           )
-        elif command_invocation($command; "dd") then
+        elif exact_or_normalized_command_invocation($command; "dd") then
           dd_extensionless_repository_read(
             tool_arguments($command; "dd")
           )
-        elif command_invocation($command; "cp") then
+        elif exact_or_normalized_command_invocation($command; "cp") then
           cp_extensionless_repository_read(
             tool_arguments($command; "cp")
           )
-        elif command_invocation(
+        elif exact_or_normalized_command_invocation(
           $command;
           "(?:cut|sort|wc|strings|more|less)"
         ) then
@@ -1872,7 +2084,7 @@ for log in "${inputs_dir}"/*.jsonl; do
           or input_redirection_repository_read($command)
         )
         and (
-          command_invocation(
+          exact_or_normalized_command_invocation(
             $command;
             "(?:awk|mawk|python|python3|perl|ruby|node|deno|jq|cut|sort|wc|strings|more|less|dd|cp|source|\\.)"
           )
@@ -1881,16 +2093,67 @@ for log in "${inputs_dir}"/*.jsonl; do
       def forbidden_repository_read($command):
         (shell_command_payload($command) // $command) as $payload
         |
-        [
-          shell_segments($payload)[]
-          | select(
-              command_invocation(
-                .;
-                "(?:git|rg|grep|sed|cat|nl|head|tail|find|ls|time|env|xargs|parallel|eval|bash|dash|fish|ksh|sh|zsh)"
+        (
+          (
+            active_shell_substitution($payload)
+            and command_mentions_repository_operand($payload)
+          )
+          or (
+            complex_shell_command($payload)
+            and command_mentions_repository_operand($payload)
+          )
+          or (
+            [
+              shell_segments($payload)[]
+              | select(
+                  dynamic_command_invocation(.)
+                  or normalized_dynamic_command_invocation(.)
+                  or (
+                    complex_shell_command(.)
+                    and command_mentions_repository_operand(.)
+                  )
+                  or command_invocation(
+                    .;
+                    "(?:git|rg|grep|sed|cat|nl|head|tail|find|ls|time|env|xargs|parallel|eval|bash|dash|fish|ksh|sh|zsh|coproc|nohup|timeout|nice|setsid|stdbuf|trap|hash|alias|unalias|enable)"
+                  )
+                  or normalized_command_invocation(
+                    .;
+                    "(?:git|rg|grep|sed|cat|nl|head|tail|find|ls|time|env|xargs|parallel|eval|bash|dash|fish|ksh|sh|zsh|coproc|nohup|timeout|nice|setsid|stdbuf|trap|hash|alias|unalias|enable)"
+                  )
+                  or direct_repository_read_segment(.)
+                )
+            ]
+            | length > 0
               )
-              or direct_repository_read_segment(.)
-            )
-        ] | length > 0;
+          );
+      # Treat arbitrary shell execution as capable of reading the repository.
+      # The only mechanically registered commands are a single plain repo-view
+      # invocation and, for the verified deep profile, its exact bounded
+      # dependency-source read. This is intentionally fail-closed: executable
+      # names cannot prove that a command, function, interpreter, or plugin
+      # avoids repository input.
+      def contracted_repo_view_command($command):
+        (repo_view_command_payload($command)) as $payload
+        | ($payload | type) == "string"
+          and ($payload | startswith("repo-view "))
+          and all_repo_view_invocations($payload) == 1
+          and ([shell_segments($payload)[]] | length) == 1
+          and (
+            $payload
+            | test("[\\n\\r;|&<>(){}\u0060$*?\\[\\]\\\\]")
+            | not
+          )
+          and (
+            shell_command_executable($payload)
+            | executable_basename
+          ) == "repo-view";
+      def registered_navigation_command($command; $dependency_allowed):
+        contracted_repo_view_command($command)
+        or (
+          $dependency_allowed
+          and (shell_command_payload($command) // "")
+            == $deep_dependency_awk_command
+        );
       def option_occurrences($command; $option):
         [
           $command
@@ -2072,6 +2335,11 @@ for log in "${inputs_dir}"/*.jsonl; do
       | ([
           .[]
           | select(.type == "item.completed" and .item.type == "command_execution")
+          | (.item.command // "")
+        ]) as $completed_commands
+      | ([
+          .[]
+          | select(.type == "item.completed" and .item.type == "command_execution")
           | select(all_repo_view_invocations(.item.command // "") > 0)
           | .item
         ]) as $repo_view_executions
@@ -2185,8 +2453,17 @@ for log in "${inputs_dir}"/*.jsonl; do
           end
         ) as $deep_dependency_awk_exact
       | ([
-          $started_commands[]
-          | select(forbidden_repository_read(.))
+          ($started_commands + $completed_commands)[]
+          | select(
+              forbidden_repository_read(.)
+              or (
+                $variant == "optimized"
+                and (
+                  registered_navigation_command(.; $optimized_verified_deep)
+                  | not
+                )
+              )
+            )
         ] | unique) as $repository_read_bypass_commands
       | ([
           $repo_view_executions[]

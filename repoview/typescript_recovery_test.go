@@ -238,6 +238,47 @@ func TestTypeScriptDenseFallbackPreservesModifierMatrix(t *testing.T) {
 	}
 }
 
+func TestTypeScriptDenseFallbackClassifiesModifiedStaticFieldInitializers(t *testing.T) {
+	const declarationCount = 17_000
+	for _, test := range []struct {
+		name        string
+		declaration string
+		wantImport  bool
+	}{
+		{"readonly static", `static readonly shared = require("readonly-static");`, true},
+		{"typed static", `static typed: unknown = require("typed-static");`, true},
+		{"decorated modified static", `@decorate static readonly decorated: unknown = require("decorated-static");`, true},
+		{"computed static", `static [key] = require("computed-static");`, true},
+		{"accessor static", `static accessor shared = require("accessor-static");`, true},
+		{"readonly instance", `readonly instance: unknown = require("instance");`, false},
+		{"field named static", `static = require("named-static");`, false},
+		{"public field named static", `public static = require("public-named-static");`, false},
+		{"readonly field named static", `readonly static = require("readonly-named-static");`, false},
+		{"static field named static", `static static = require("doubled-static");`, true},
+		{"static ASI boundary", "static\n  shared = require(\"after-static-asi\");", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var source strings.Builder
+			source.WriteString("class Registry {\n")
+			for index := range declarationCount {
+				fmt.Fprintf(&source, "  field%d = null;\n", index)
+			}
+			fmt.Fprintf(&source, "  %s\n}\n", test.declaration)
+
+			text := source.String()
+			analysis := newTypeScriptLanguage("typescript", false).analysisForSource(
+				text, len(strings.Split(text, "\n")),
+			)
+			if analysis.tree != nil {
+				t.Fatal("dense TypeScript fixture unexpectedly retained a whole-file tree")
+			}
+			if got := len(analysis.imports) > 0; got != test.wantImport {
+				t.Fatalf("imports = %#v, want present %v", analysis.imports, test.wantImport)
+			}
+		})
+	}
+}
+
 func TestTypeScriptFallbackMatchesConcreteForComplexMemberBoundaries(t *testing.T) {
 	const source = `interface Contract<T extends { id: string }> {
   "event": Event;

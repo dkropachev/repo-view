@@ -170,20 +170,32 @@ func analyzeJavaSource(source string, lineCount int) *javaSourceAnalysis {
 		treeDefinitions, lexical.definitions, lexicalAuthoritative, analysis.recoveryPrefix,
 	)
 	authoritativeScopes := make([]javaLineScope, 0)
-	definitionSeen := make(map[javaDefinitionIdentity]struct{}, len(analysis.definitions))
-	for _, definition := range analysis.definitions {
-		definitionSeen[javaDefinitionIdentity{
+	definitionByIdentity := make(map[javaDefinitionIdentity]int, len(analysis.definitions))
+	for index, definition := range analysis.definitions {
+		definitionByIdentity[javaDefinitionIdentity{
 			symbol: definition.symbol, line: definition.line, column: definition.column,
-		}] = struct{}{}
+		}] = index
 	}
 	for _, definition := range lexical.authoritativeDefinitions {
 		identity := javaDefinitionIdentity{
 			symbol: definition.symbol, line: definition.line, column: definition.column,
 		}
-		if _, exists := definitionSeen[identity]; exists {
+		if index, exists := definitionByIdentity[identity]; exists {
+			current := &analysis.definitions[index]
+			// Suffix recovery can prove a same-line sibling boundary more
+			// precisely than the ordinary lexical field scan. Preserve the
+			// ordinary attached range and adopt only that exact earlier end.
+			if current.ownsScope && definition.ownsScope &&
+				current.scopeStart == definition.scopeStart &&
+				current.scopeEnd == definition.scopeEnd &&
+				definition.ownedEndColumn > 0 &&
+				(current.ownedEndColumn <= 0 ||
+					definition.ownedEndColumn < current.ownedEndColumn) {
+				current.ownedEndColumn = definition.ownedEndColumn
+			}
 			continue
 		}
-		definitionSeen[identity] = struct{}{}
+		definitionByIdentity[identity] = len(analysis.definitions)
 		analysis.definitions = append(analysis.definitions, definition)
 		if definition.ownsScope {
 			authoritativeScopes = append(authoritativeScopes, javaLineScope{

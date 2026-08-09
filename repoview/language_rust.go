@@ -158,6 +158,20 @@ func (r rustLanguage) sourceDefinitions(lines []string) []sourceDefinition {
 	return analysis.definitions
 }
 
+func (r rustLanguage) prepareFindScopeResolver(
+	lines []string,
+) preparedFindScopeResolver {
+	analysis := r.sourceAnalysis(lines)
+	if analysis == nil {
+		return nil
+	}
+	scopes := make([]cLineScope, 0, len(analysis.scopes))
+	for _, scope := range analysis.scopes {
+		scopes = append(scopes, cLineScope{start: scope.start, end: scope.end})
+	}
+	return newCPreparedFindScopeResolver(analysis.definitions, scopes, len(lines))
+}
+
 func rustDefinitions(
 	source string,
 	lineCount int,
@@ -191,6 +205,7 @@ func rustDefinitions(
 				// cover only the following keyword (or be hidden by an ERROR root).
 				definitions[index].scopeStart = lexical.scopeStart
 				definitions[index].scopeEnd = lexical.scopeEnd
+				definitions[index].ownedEndColumn = lexical.ownedEndColumn
 				definitions[index].ownsScope = lexical.ownsScope
 			case lexed.trustedDefinitions[key] &&
 				definitions[index].ownsScope == lexical.ownsScope:
@@ -199,10 +214,12 @@ func rustDefinitions(
 				// syntax such as `[const]` bounds or `unsafe extern` blocks.
 				definitions[index].scopeStart = lexical.scopeStart
 				definitions[index].scopeEnd = lexical.scopeEnd
+				definitions[index].ownedEndColumn = lexical.ownedEndColumn
 			case lexed.trustedDefinitions[key] && touchesRecovery &&
 				lexical.scopeEnd < definitions[index].scopeEnd:
 				definitions[index].scopeStart = lexical.scopeStart
 				definitions[index].scopeEnd = lexical.scopeEnd
+				definitions[index].ownedEndColumn = lexical.ownedEndColumn
 				definitions[index].ownsScope = lexical.ownsScope
 			default:
 				definitions[index].scopeStart = min(
@@ -312,16 +329,25 @@ func rustTreeDefinitionsFromSyntax(
 			continue
 		}
 
+		ownsScope := rustTreeDefinitionOwnsScope(tree, nodeIndex)
 		scopeStartOffset := rustSyntaxAttachedStart(tree, nodeIndex, attachedStarts)
 		line, column := positions.lineColumn(nameStart)
 		scopeStart, scopeEnd := positions.lineSpan(scopeStartOffset, node.endByte)
+		ownedEndColumn := 0
+		if ownsScope {
+			ownedEndLine, exactEndColumn := positions.lineColumn(node.endByte)
+			if ownedEndLine == scopeEnd {
+				ownedEndColumn = exactEndColumn
+			}
+		}
 		definitions = append(definitions, sourceDefinition{
-			symbol:     symbol,
-			line:       line,
-			column:     column,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			ownsScope:  rustTreeDefinitionOwnsScope(tree, nodeIndex),
+			symbol:         symbol,
+			line:           line,
+			column:         column,
+			scopeStart:     scopeStart,
+			scopeEnd:       scopeEnd,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      ownsScope,
 		})
 	}
 	return definitions
@@ -1225,6 +1251,18 @@ func rustTokenSourceText(source string, token rustToken) string {
 }
 
 func (rustLanguage) countSymbolOccurrences(line, symbol string) int {
+	return rustWalkSymbolOccurrences(line, symbol, nil)
+}
+
+func (rustLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	var columns []int
+	rustWalkSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
+func rustWalkSymbolOccurrences(line, symbol string, visit func(start int)) int {
 	if symbol == "" {
 		return 0
 	}
@@ -1242,6 +1280,9 @@ func (rustLanguage) countSymbolOccurrences(line, symbol string) int {
 		afterOK := after >= len(line) || !rustIdentifierContinue(afterRune)
 		if beforeOK && afterOK && rustOccurrenceIsWholeToken(line, symbol, position, after) {
 			count++
+			if visit != nil {
+				visit(position)
+			}
 		}
 		_, size := rustDecode(line, position)
 		if size < 1 {
