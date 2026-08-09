@@ -763,6 +763,7 @@ func validGenerationModelIdentity(model, mode, configuration string) bool {
 	}
 }
 
+//nolint:govet,nolintlint // Keep fields in the canonical manifest order used by audit output.
 type liveRunIdentity struct {
 	SourceRepo         string   `json:"source_repo"`
 	TargetCommit       string   `json:"target_commit"`
@@ -1227,9 +1228,9 @@ type qualityAggregateSnapshot struct {
 type QualityReplayConfig struct {
 	AggregateSHA256 string
 	Provenance      string
-	JudgeRepeats    int
 	JudgeModelMode  string
 	JudgeModel      string
+	JudgeRepeats    int
 	Enforce         bool
 }
 
@@ -1297,22 +1298,22 @@ type qualityAnalysisEnvironment struct {
 }
 
 type qualityDocument struct {
-	SchemaVersion      int              `json:"schema_version"`
-	ProvenanceStatus   string           `json:"provenance_status"`
-	RequiredJudgeCount int              `json:"required_judge_count"`
 	Evaluator          qualityEvaluator `json:"evaluator"`
+	ProvenanceStatus   string           `json:"provenance_status"`
 	Static             json.RawMessage  `json:"static"`
 	Judges             json.RawMessage  `json:"judges"`
 	JudgeUsage         json.RawMessage  `json:"judge_usage"`
 	Verdicts           []qualityVerdict `json:"verdicts"`
+	SchemaVersion      int              `json:"schema_version"`
+	RequiredJudgeCount int              `json:"required_judge_count"`
 }
 
 type qualityEvaluator struct {
+	Environment  qualityEvaluatorEnvironment `json:"environment"`
 	Model        string                      `json:"model"`
 	ModelMode    string                      `json:"model_mode,omitempty"`
 	CodexVersion string                      `json:"codex_version"`
 	CacheSchema  int                         `json:"cache_schema"`
-	Environment  qualityEvaluatorEnvironment `json:"environment"`
 }
 
 type qualityEvaluatorEnvironment struct {
@@ -1363,49 +1364,47 @@ type qualityEvaluatorEnvironment struct {
 }
 
 type qualityVerdict struct {
-	Task                string                `json:"task"`
+	CoreConclusionMatch *bool                 `json:"core_conclusion_match"`
+	JudgesNotWorse      *bool                 `json:"judges_not_worse"`
 	Profile             string                `json:"profile"`
-	NavigationRequired  bool                  `json:"navigation_required"`
-	NavigationPass      bool                  `json:"navigation_pass"`
-	AccountingPass      bool                  `json:"accounting_pass"`
+	Task                string                `json:"task"`
 	NavigationCalls     staticNavigationCalls `json:"navigation_calls"`
-	StaticNotWorse      bool                  `json:"static_not_worse"`
-	JudgeEvaluated      bool                  `json:"judge_evaluated"`
 	JudgeCount          int                   `json:"judge_count"`
 	RequiredJudgeCount  int                   `json:"required_judge_count"`
+	NavigationPass      bool                  `json:"navigation_pass"`
+	JudgeEvaluated      bool                  `json:"judge_evaluated"`
+	StaticNotWorse      bool                  `json:"static_not_worse"`
 	JudgeComplete       bool                  `json:"judge_complete"`
-	JudgesNotWorse      *bool                 `json:"judges_not_worse"`
-	CoreConclusionMatch *bool                 `json:"core_conclusion_match"`
+	AccountingPass      bool                  `json:"accounting_pass"`
+	NavigationRequired  bool                  `json:"navigation_required"`
 	QualityPass         bool                  `json:"quality_pass"`
 }
 
 type staticDocument struct {
-	SchemaVersion int                `json:"schema_version"`
 	Cases         []staticCase       `json:"cases"`
 	Comparisons   []staticComparison `json:"comparisons"`
+	SchemaVersion int                `json:"schema_version"`
 }
 
 type staticCase struct {
-	Name               string                `json:"name"`
 	Task               string                `json:"task"`
 	Variant            string                `json:"variant"`
 	Profile            string                `json:"profile"`
-	NavigationRequired bool                  `json:"navigation_required"`
-	AccountingPass     bool                  `json:"accounting_pass"`
-	NavigationPass     bool                  `json:"navigation_pass"`
-	NavigationCalls    staticNavigationCalls `json:"navigation_calls"`
+	Name               string                `json:"name"`
 	Criteria           []staticCriterion     `json:"criteria"`
+	NavigationCalls    staticNavigationCalls `json:"navigation_calls"`
 	PassedWeight       int                   `json:"passed_weight"`
 	TotalWeight        int                   `json:"total_weight"`
 	ScorePercent       float64               `json:"score_percent"`
+	NavigationPass     bool                  `json:"navigation_pass"`
+	AccountingPass     bool                  `json:"accounting_pass"`
+	NavigationRequired bool                  `json:"navigation_required"`
 	RequiredPass       bool                  `json:"required_pass"`
 }
 
 type staticNavigationCalls struct {
 	Total              int                  `json:"total"`
 	CommandCap         int                  `json:"command_cap"`
-	CommandCapPass     bool                 `json:"command_cap_pass"`
-	CommandCapExceeded bool                 `json:"command_cap_exceeded"`
 	BudgetTamper       int                  `json:"budget_tamper"`
 	Changed            int                  `json:"changed"`
 	Find               int                  `json:"find"`
@@ -1414,6 +1413,8 @@ type staticNavigationCalls struct {
 	BoundViolations    int                  `json:"bound_violations"`
 	SimpleContract     staticSimpleContract `json:"simple_contract"`
 	DeepContract       staticDeepContract   `json:"deep_contract"`
+	CommandCapPass     bool                 `json:"command_cap_pass"`
+	CommandCapExceeded bool                 `json:"command_cap_exceeded"`
 }
 
 type staticSimpleContract struct {
@@ -1438,12 +1439,12 @@ type staticCriterion struct {
 type staticComparison struct {
 	Task                  string                `json:"task"`
 	Profile               string                `json:"profile"`
+	NavigationCalls       staticNavigationCalls `json:"navigation_calls"`
 	BaselineScorePercent  float64               `json:"baseline_score_percent"`
 	CandidateScorePercent float64               `json:"candidate_score_percent"`
 	NavigationRequired    bool                  `json:"navigation_required"`
 	NavigationPass        bool                  `json:"navigation_pass"`
 	AccountingPass        bool                  `json:"accounting_pass"`
-	NavigationCalls       staticNavigationCalls `json:"navigation_calls"`
 	RequiredPass          bool                  `json:"required_pass"`
 	StaticNotWorse        bool                  `json:"static_not_worse"`
 }
@@ -1457,63 +1458,63 @@ type qualityJudgesDocument struct {
 
 type qualityJudgeRun struct {
 	Task       string                     `json:"task"`
-	Baseline   qualityJudgeRunBaseline    `json:"baseline"`
 	Candidates []qualityJudgeRunCandidate `json:"candidates"`
+	Baseline   qualityJudgeRunBaseline    `json:"baseline"`
 }
 
 type qualityJudgeRunBaseline struct {
 	Name              string   `json:"name"`
+	CriticalOmissions []string `json:"critical_omissions"`
+	UnsupportedClaims []string `json:"unsupported_claims"`
 	Correctness       int      `json:"correctness"`
 	Completeness      int      `json:"completeness"`
 	Grounding         int      `json:"grounding"`
 	TaskAdherence     int      `json:"task_adherence"`
-	CriticalOmissions []string `json:"critical_omissions"`
-	UnsupportedClaims []string `json:"unsupported_claims"`
 }
 
 type qualityJudgeRunCandidate struct {
 	Name                          string   `json:"name"`
-	Correctness                   int      `json:"correctness"`
-	Completeness                  int      `json:"completeness"`
-	Grounding                     int      `json:"grounding"`
-	TaskAdherence                 int      `json:"task_adherence"`
+	Rationale                     string   `json:"rationale"`
+	MaterialContradictions        []string `json:"material_contradictions"`
 	CriticalOmissions             []string `json:"critical_omissions"`
 	UnsupportedClaims             []string `json:"unsupported_claims"`
-	CoreConclusionMatchesBaseline bool     `json:"core_conclusion_matches_baseline"`
-	NotWorseThanBaseline          bool     `json:"not_worse_than_baseline"`
-	MaterialContradictions        []string `json:"material_contradictions"`
 	BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
 	CandidateMaterialAdditions    []string `json:"candidate_material_additions"`
-	Rationale                     string   `json:"rationale"`
+	Grounding                     int      `json:"grounding"`
+	TaskAdherence                 int      `json:"task_adherence"`
+	Completeness                  int      `json:"completeness"`
+	Correctness                   int      `json:"correctness"`
+	CoreConclusionMatchesBaseline bool     `json:"core_conclusion_matches_baseline"`
+	NotWorseThanBaseline          bool     `json:"not_worse_than_baseline"`
 }
 
 type qualityJudgeBaseline struct {
 	Task                 string   `json:"task"`
 	Name                 string   `json:"name"`
+	CriticalOmissions    []string `json:"critical_omissions"`
+	UnsupportedClaims    []string `json:"unsupported_claims"`
 	JudgeCount           int      `json:"judge_count"`
 	AverageCorrectness   float64  `json:"average_correctness"`
 	AverageCompleteness  float64  `json:"average_completeness"`
 	AverageGrounding     float64  `json:"average_grounding"`
 	AverageTaskAdherence float64  `json:"average_task_adherence"`
-	CriticalOmissions    []string `json:"critical_omissions"`
-	UnsupportedClaims    []string `json:"unsupported_claims"`
 }
 
 type qualityJudgeCandidate struct {
-	Task                          string   `json:"task"`
 	Name                          string   `json:"name"`
-	JudgeCount                    int      `json:"judge_count"`
-	AllNotWorse                   bool     `json:"all_not_worse"`
-	AverageCorrectness            float64  `json:"average_correctness"`
-	AverageCompleteness           float64  `json:"average_completeness"`
+	Task                          string   `json:"task"`
+	CriticalOmissions             []string `json:"critical_omissions"`
+	CandidateMaterialAdditions    []string `json:"candidate_material_additions"`
+	BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
+	MaterialContradictions        []string `json:"material_contradictions"`
+	UnsupportedClaims             []string `json:"unsupported_claims"`
 	AverageGrounding              float64  `json:"average_grounding"`
 	AverageTaskAdherence          float64  `json:"average_task_adherence"`
-	CriticalOmissions             []string `json:"critical_omissions"`
-	UnsupportedClaims             []string `json:"unsupported_claims"`
+	AverageCompleteness           float64  `json:"average_completeness"`
+	AverageCorrectness            float64  `json:"average_correctness"`
+	JudgeCount                    int      `json:"judge_count"`
 	AllCoreConclusionMatch        bool     `json:"all_core_conclusion_match"`
-	MaterialContradictions        []string `json:"material_contradictions"`
-	BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
-	CandidateMaterialAdditions    []string `json:"candidate_material_additions"`
+	AllNotWorse                   bool     `json:"all_not_worse"`
 }
 
 type qualityJudgeUsageDocument struct {
@@ -2030,27 +2031,27 @@ func validateStaticAndVerdicts(
 		return fmt.Errorf("static.json has incompatible schema or collections")
 	}
 	type metricCase struct {
-		Name                         string `json:"name"`
+		AnswerFile                   string `json:"answer_file"`
 		Task                         string `json:"task"`
 		Variant                      string `json:"variant"`
 		Profile                      string `json:"profile"`
-		Completed                    bool   `json:"completed"`
-		AnswerFile                   string `json:"answer_file"`
-		RepoViewCalls                int    `json:"repo_view_invocation_count"`
+		Name                         string `json:"name"`
+		BoundViolations              int    `json:"repo_view_bound_violation_count"`
+		OutlineCalls                 int    `json:"repo_view_outline_invocation_count"`
 		CommandCap                   int    `json:"repo_view_invocation_cap"`
-		CommandCapExceeded           bool   `json:"repo_view_invocation_cap_exceeded"`
+		RepoViewCalls                int    `json:"repo_view_invocation_count"`
 		BudgetTamper                 int    `json:"repo_view_budget_tamper_command_count"`
 		ChangedCalls                 int    `json:"repo_view_changed_invocation_count"`
 		FindCalls                    int    `json:"repo_view_find_invocation_count"`
 		InspectCalls                 int    `json:"repo_view_inspect_invocation_count"`
-		OutlineCalls                 int    `json:"repo_view_outline_invocation_count"`
-		BoundViolations              int    `json:"repo_view_bound_violation_count"`
-		SimpleChangedCommandExact    bool   `json:"repo_view_simple_changed_command_exact"`
 		SimpleCoreInspectExact       bool   `json:"repo_view_simple_core_inspect_command_exact"`
+		DeepDependencyAWKExact       bool   `json:"repo_view_deep_dependency_awk_exact"`
+		SimpleChangedCommandExact    bool   `json:"repo_view_simple_changed_command_exact"`
+		CommandCapExceeded           bool   `json:"repo_view_invocation_cap_exceeded"`
 		SimpleConsumerInspectExact   bool   `json:"repo_view_simple_consumer_inspect_command_exact"`
 		SimpleOutputsUntruncated     bool   `json:"repo_view_simple_inspect_outputs_untruncated"`
 		DeepCommandSequenceExact     bool   `json:"repo_view_deep_command_sequence_exact"`
-		DeepDependencyAWKExact       bool   `json:"repo_view_deep_dependency_awk_exact"`
+		Completed                    bool   `json:"completed"`
 		ToolAccounting               bool   `json:"tool_call_accounting_valid"`
 		InvocationAccounting         bool   `json:"repo_view_invocation_accounting_valid"`
 		RepoViewToolAccounting       bool   `json:"repo_view_tool_call_accounting_valid"`
@@ -2070,10 +2071,10 @@ func validateStaticAndVerdicts(
 		Tasks map[string]struct {
 			Criteria []struct {
 				ID       string   `json:"id"`
-				Weight   int      `json:"weight"`
-				Required bool     `json:"required"`
 				AllOf    []string `json:"all_of"`
 				NoneOf   []string `json:"none_of"`
+				Weight   int      `json:"weight"`
+				Required bool     `json:"required"`
 			} `json:"criteria"`
 		} `json:"tasks"`
 	}
@@ -2551,8 +2552,8 @@ func expectedJudgeInputDigest(
 			Task       string `json:"task"`
 			Variant    string `json:"variant"`
 			Profile    string `json:"profile"`
-			Completed  bool   `json:"completed"`
 			AnswerFile string `json:"answer_file"`
+			Completed  bool   `json:"completed"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(snapshot.inputs["metrics.json"], &metrics); err != nil {
@@ -2709,25 +2710,25 @@ func expectedJudgeInputDigest(
 }
 
 type legacyJudgeAttestation struct {
-	SchemaVersion    int    `json:"schema_version"`
-	Status           string `json:"status"`
-	ArtifactIdentity string `json:"artifact_identity"`
-	Provenance       struct {
+	Provenance struct {
 		Model          string `json:"model"`
 		CodexVersion   string `json:"codex_version"`
 		Isolation      string `json:"isolation"`
 		OperatorAction string `json:"operator_action"`
 	} `json:"provenance"`
+	Status           string `json:"status"`
+	ArtifactIdentity string `json:"artifact_identity"`
 	InputSHA256      string `json:"input_sha256"`
 	OutputSHA256     string `json:"output_sha256"`
 	TranscriptSHA256 string `json:"transcript_sha256"`
-	ExitCode         int    `json:"exit_code"`
 	ExitCodeSHA256   string `json:"exit_code_sha256"`
 	Transcript       struct {
 		Contract                       string `json:"contract"`
 		OutputMatchesFinalAgentMessage bool   `json:"output_matches_final_agent_message"`
 		SchemaValidNumericOutput       bool   `json:"schema_valid_numeric_output"`
 	} `json:"transcript_validation"`
+	SchemaVersion int `json:"schema_version"`
+	ExitCode      int `json:"exit_code"`
 }
 
 func validateLegacyJudgeAttestation(
@@ -2809,8 +2810,8 @@ func expectedLegacyJudgeInputDigest(
 			Task       string `json:"task"`
 			Variant    string `json:"variant"`
 			Profile    string `json:"profile"`
-			Completed  bool   `json:"completed"`
 			AnswerFile string `json:"answer_file"`
+			Completed  bool   `json:"completed"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(snapshot.inputs["metrics.json"], &metrics); err != nil {
@@ -3024,17 +3025,17 @@ func readCommittedJudgeLog(
 	scanner.Buffer(buffer, 16*1024*1024)
 	for scanner.Scan() {
 		var event struct {
-			Type string `json:"type"`
-			Item struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"item"`
 			Usage *struct {
 				InputTokens           int64 `json:"input_tokens"`
 				CachedInputTokens     int64 `json:"cached_input_tokens"`
 				OutputTokens          int64 `json:"output_tokens"`
 				ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
 			} `json:"usage"`
+			Item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+			Type string `json:"type"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			return qualityJudgeUsageRun{}, nil, fmt.Errorf("invalid JSONL event: %w", err)
@@ -3071,8 +3072,8 @@ func readCommittedJudgeLog(
 
 func validateJudgeAggregates(judges qualityJudgesDocument) error {
 	type group struct {
-		baseline   []qualityJudgeRunBaseline
 		candidates map[string][]qualityJudgeRunCandidate
+		baseline   []qualityJudgeRunBaseline
 	}
 	groups := make(map[string]*group)
 	for _, run := range judges.JudgeRuns {
@@ -3857,24 +3858,24 @@ func validateMaterialQualityInputs(
 			PromptFiles            map[string]string `json:"prompt_files"`
 			CasePromptDigests      map[string]string `json:"case_prompt_digests"`
 			CasePromptFiles        map[string]string `json:"case_prompt_files"`
-			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
-			VariantSelection       string            `json:"variant_selection"`
+			GoVersion              string            `json:"go_version"`
+			TargetCommit           string            `json:"target_commit"`
 			GenerationIsolation    string            `json:"generation_isolation"`
 			GenerationConfigSHA256 string            `json:"generation_config_sha256"`
 			ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
-			GoVersion              string            `json:"go_version"`
+			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
 			CodexVersion           string            `json:"codex_version"`
 			Model                  string            `json:"model"`
 			TaskSelection          string            `json:"task_selection"`
-			TargetCommit           string            `json:"target_commit"`
+			VariantSelection       string            `json:"variant_selection"`
 			PromptCommit           string            `json:"prompt_commit"`
 			BaseCommit             string            `json:"base_commit"`
 			BaseRef                string            `json:"base_ref"`
+			ModelConfiguration     string            `json:"model_configuration"`
+			ModelMode              string            `json:"model_mode"`
 			Profiles               []string          `json:"profiles"`
 			SchemaVersion          int               `json:"schema_version"`
 			MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
-			ModelMode              string            `json:"model_mode"`
-			ModelConfiguration     string            `json:"model_configuration"`
 		}
 		if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
 			return fmt.Errorf("decode snapshotted manifest: %w", err)

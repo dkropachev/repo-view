@@ -87,19 +87,19 @@ type evidencePreparationKey struct {
 	runDir            string
 	qualityProvenance string
 	qualityDigest     string
-	skipAnalyze       bool
-	skipQuality       bool
-	judgeRepeats      int
 	judgeModelMode    string
 	judgeModel        string
+	judgeRepeats      int
+	skipAnalyze       bool
+	skipQuality       bool
 	enforce           bool
 }
 
 type strictQualityReplayConfig struct {
 	qualityDigest  string
-	judgeRepeats   int
 	judgeModelMode string
 	judgeModel     string
+	judgeRepeats   int
 	enforce        bool
 }
 
