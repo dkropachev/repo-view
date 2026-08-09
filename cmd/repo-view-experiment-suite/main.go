@@ -1387,10 +1387,7 @@ func repairCases(
 			experimentsuite.ValidateLiveIdentity(
 				runDir,
 				*resolution.Repair,
-				filepath.Join(
-					opts.repoRoot,
-					filepath.FromSlash(resolution.Repair.Source),
-				),
+				identityPaths...,
 			),
 		)
 		metrics, metricErr := experimentsuite.SummarizeEvidence(

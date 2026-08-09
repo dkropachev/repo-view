@@ -877,6 +877,30 @@ client
 	}
 }
 
+func TestJavaScriptAndTypeScriptInspectRejectNumericFragments(t *testing.T) {
+	t.Parallel()
+
+	for _, extension := range []string{"js", "ts"} {
+		t.Run(extension, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			path := "fixture." + extension
+			writeFile(t, root, path, "1e10;\n")
+			response, err := mustView(t, root).Inspect(
+				path+":1",
+				Options{Include: IncludeScope, Return: ReturnLocations},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response.Symbol != "" || len(response.Results) != 1 ||
+				response.Results[0].Symbol != "" {
+				t.Fatalf("numeric Inspect response = %#v", response)
+			}
+		})
+	}
+}
+
 func TestJavaScriptMalformedInspectPreservesECMAScriptNames(t *testing.T) {
 	t.Parallel()
 

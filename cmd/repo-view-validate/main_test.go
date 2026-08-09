@@ -226,6 +226,33 @@ func TestReadSourceFilesIncludesJavaScriptAndTypeScriptModuleExtensions(t *testi
 	}
 }
 
+func TestReadSourceFilesIncludesRegisteredCSharpAndCPPExtensions(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	for name, content := range map[string]string{
+		"script.csx":  "public class ScriptEntry {}\n",
+		"source.cxx":  "class Source {};\n",
+		"ignored.txt": "class Ignored {};\n",
+	} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	files, err := readSourceFiles(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(files))
+	for _, file := range files {
+		got = append(got, file.rel)
+	}
+	const want = "script.csx,source.cxx"
+	if strings.Join(got, ",") != want {
+		t.Fatalf("registered source files = %#v, want %s", got, want)
+	}
+}
+
 func TestReadSourceFilesIncludesKotlinSourceAndScriptExtensions(t *testing.T) {
 	t.Parallel()
 
@@ -338,6 +365,29 @@ func TestBuildIndexFiltersModulaKeywordsOnlyForModulaFiles(t *testing.T) {
 
 	if got, want := strings.Join(selectSymbols(index, 2), ","), "MODULE,TYPE"; got != want {
 		t.Fatalf("sampled symbols = %q, want %q", got, want)
+	}
+}
+
+func TestIndependentContainsSymbolUsesUnicodeContinuationBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name string
+		line string
+		want bool
+	}{
+		{name: "independent", line: "helper()", want: true},
+		{name: "Unicode letter before", line: "αhelper", want: false},
+		{name: "combining acute after", line: "helper\u0301", want: false},
+		{name: "combining Hebrew point after", line: "helper\u05C1", want: false},
+		{name: "format character after", line: "helper\u200E", want: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := independentContainsSymbol(test.line, "helper"); got != test.want {
+				t.Fatalf("independentContainsSymbol(%q, helper) = %v, want %v", test.line, got, test.want)
+			}
+		})
 	}
 }
 

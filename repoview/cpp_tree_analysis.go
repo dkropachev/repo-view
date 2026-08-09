@@ -63,13 +63,18 @@ func cppTreeDefinitions(
 			)
 		}
 		scopeStart, scopeEnd := positions.lineSpan(startOffset, scope.endByte)
+		ownedEndLine, ownedEndColumn := positions.lineColumn(scope.endByte)
+		if !ownsScope || ownedEndLine != scopeEnd {
+			ownedEndColumn = 0
+		}
 		definitions = append(definitions, sourceDefinition{
-			symbol:     source[name.start:name.end],
-			line:       line,
-			column:     column,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			ownsScope:  ownsScope,
+			symbol:         source[name.start:name.end],
+			line:           line,
+			column:         column,
+			scopeStart:     scopeStart,
+			scopeEnd:       scopeEnd,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      ownsScope,
 		})
 	}
 

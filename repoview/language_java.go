@@ -748,6 +748,25 @@ func (javaLanguage) countSymbolOccurrences(line, symbol string) int {
 	return javaCountSymbolOccurrencesWithPrefix(line, symbol, prefix)
 }
 
+func (javaLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if symbol == "" || len(symbol) > len(line) {
+		return nil
+	}
+	var inlinePrefix [64]int
+	var prefix []int
+	if len(symbol) <= len(inlinePrefix) {
+		prefix = inlinePrefix[:len(symbol)]
+	} else {
+		prefix = make([]int, len(symbol))
+	}
+	javaBuildRawSymbolPrefix(symbol, prefix)
+	var columns []int
+	javaWalkSymbolOccurrencesWithPrefix(line, symbol, prefix, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
 func (javaLanguage) prepareSymbolOccurrenceCounter(symbol string) func(string) int {
 	prefix := make([]int, len(symbol))
 	javaBuildRawSymbolPrefix(symbol, prefix)
@@ -772,6 +791,14 @@ func javaBuildRawSymbolPrefix(symbol string, prefix []int) {
 }
 
 func javaCountSymbolOccurrencesWithPrefix(line, symbol string, prefix []int) int {
+	return javaWalkSymbolOccurrencesWithPrefix(line, symbol, prefix, nil)
+}
+
+func javaWalkSymbolOccurrencesWithPrefix(
+	line, symbol string,
+	prefix []int,
+	visit func(start int),
+) int {
 	if symbol == "" || len(symbol) > len(line) || len(prefix) < len(symbol) {
 		return 0
 	}
@@ -815,6 +842,9 @@ func javaCountSymbolOccurrencesWithPrefix(line, symbol string, prefix []int) int
 		}
 		if beforeOK && afterOK {
 			count++
+			if visit != nil {
+				visit(position)
+			}
 		}
 		matched = prefix[matched-1]
 	}

@@ -79,7 +79,9 @@ JSON always includes `code_truncated`; it is `true` when `--max-code-lines`
 cuts a returned scope or context. Truncated snippets remain centered on the
 requested or matching line and include `code_start_line` and `code_end_line`
 for the exact embedded range. Increase the cap only when omitted scope is
-required.
+required. Those range fields are also included when an imports result embeds
+only a line or adds context while retaining the full import range as its
+identity.
 
 Command-specific options and defaults:
 
@@ -101,10 +103,14 @@ Multiple includes are ORed; any matching exclude wins.
   more paths and shares `--limit` fairly across them. JSON is one object for
   one path and an array in argument order for multiple paths.
 - `changed`: default return is `context`; `--base REF` compares `REF...HEAD`.
-  Without `--base`, it reports staged, unstaged, and untracked files. JSON
-  always includes `patch_truncated`, plus `changed_lines` and the containing
-  `scope` or `scopes` for each merged range. `patch_truncated` is `true` when
-  `--max-patch-lines` cuts the exact patch.
+  Its source context comes from that immutable HEAD snapshot, even when the
+  worktree is dirty. Without `--base`, it reports staged, unstaged, and
+  untracked files in worktree coordinates. JSON always includes
+  `patch_truncated`, plus `changed_lines` and the containing `scope` or `scopes`
+  for each merged range. `patch_truncated` is `true` when
+  `--max-patch-lines` cuts the exact patch or its 16 MiB safety ceiling is
+  reached. The byte ceiling also bounds temporary snapshots used to diff
+  untracked files.
 
 ## Codex Integration
 

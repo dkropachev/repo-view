@@ -168,7 +168,7 @@ func TestCTranslationPhaseSplicesCRLFAndDigraphsKeepPhysicalCoordinates(t *testi
 	}
 	for _, want := range wantMetadata {
 		definition := cHighLevelDefinitionNamed(t, definitions, want.symbol)
-		got := cHighLevelDefinitionSummary(definition)
+		got := cHighLevelDefinitionSummaryOf(definition)
 		if got != want {
 			t.Errorf("%s metadata = %#v, want %#v", want.symbol, got, want)
 		}
@@ -245,6 +245,98 @@ func TestCSpliceOccurrenceWalkerAddsLogicalNamesAndRemovesFragments(t *testing.T
 			t.Errorf("%s splice adjustments = %#v, handled=%v; want %#v",
 				test.symbol, adjustments, handled, test.want)
 		}
+	}
+}
+
+func TestCSpliceOccurrenceWalkerReportsExactCorrectionColumns(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"int target\\",
+		"_suffix;",
+		"int tar\\",
+		"get;",
+		"double number = 1e\\",
+		"+target;",
+		"#define CALL() tar\\",
+		"get()",
+	}
+	backend := prepareLanguageBackend(newCLanguage(), lines).(cLanguage)
+	type correction struct {
+		adjustment int
+		added      []int
+		removed    []int
+	}
+	corrections := make(map[int]correction)
+	handled := backend.walkAdditionalSymbolOccurrencesAt(
+		lines, "target",
+		func(
+			lineNo, adjustment int,
+			addedColumns, removedColumns []int,
+		) bool {
+			if adjustment != 0 || len(addedColumns) > 0 || len(removedColumns) > 0 {
+				corrections[lineNo] = correction{
+					adjustment: adjustment,
+					added:      append([]int(nil), addedColumns...),
+					removed:    append([]int(nil), removedColumns...),
+				}
+			}
+			return true
+		},
+	)
+	want := map[int]correction{
+		1: {adjustment: -1, removed: []int{strings.Index(lines[0], "target") + 1}},
+		3: {adjustment: 1, added: []int{strings.Index(lines[2], "tar") + 1}},
+		6: {adjustment: -1, removed: []int{strings.Index(lines[5], "target") + 1}},
+		7: {adjustment: 1, added: []int{strings.Index(lines[6], "tar") + 1}},
+	}
+	if !handled || !reflect.DeepEqual(corrections, want) {
+		t.Fatalf("positional splice corrections = %#v, handled=%v; want %#v",
+			corrections, handled, want)
+	}
+}
+
+func TestCFindUsesExactSpliceCorrectionPositionsOnDenseLines(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			name:   "spliced reference",
+			source: "void first(void) {} void second(void) { tar\\\nget(); }\n",
+			want:   "second",
+		},
+		{
+			name:   "earlier physical reference",
+			source: "void first(void) { target(); } void second(void) { tar\\\nget(); }\n",
+			want:   "first",
+		},
+		{
+			name:   "definition before spliced reference",
+			source: "void target(void) {} void second(void) { tar\\\nget(); }\n",
+			want:   "second",
+		},
+		{
+			name: "rejected numeric fragment before reference",
+			source: "void first(void) { double n = 1e\\\n" +
+				"+target; } void second(void) { target(); }\n",
+			want: "second",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "dense.c", test.source)
+			found, err := mustView(t, root).Find("target", Options{
+				Include: IncludeRefs, Return: ReturnScope,
+				NoComments: true, NoStrings: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(found.Results) != 1 || found.Results[0].Scope != test.want {
+				t.Fatalf("dense positional Find = %#v, want scope %q",
+					found.Results, test.want)
+			}
+		})
 	}
 }
 

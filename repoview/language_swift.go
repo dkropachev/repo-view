@@ -154,7 +154,13 @@ func swiftMergeDefinitions(
 					*current = definition
 				} else if definition.ownsScope == current.ownsScope {
 					current.scopeStart = min(current.scopeStart, definition.scopeStart)
-					current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+					if definition.scopeEnd > current.scopeEnd {
+						current.scopeEnd = definition.scopeEnd
+						current.ownedEndColumn = definition.ownedEndColumn
+					} else if definition.scopeEnd == current.scopeEnd &&
+						current.ownedEndColumn == 0 {
+						current.ownedEndColumn = definition.ownedEndColumn
+					}
 				}
 				continue
 			}
@@ -401,6 +407,24 @@ func (swiftLanguage) countSymbolOccurrences(line, symbol string) int {
 	if line == "" || symbol == "" {
 		return 0
 	}
+	return swiftWalkSymbolOccurrences(line, symbol, nil)
+}
+
+func (swiftLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || symbol == "" {
+		return nil
+	}
+	var columns []int
+	swiftWalkSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
+func swiftWalkSymbolOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	requireQuoted := swiftHardKeyword(symbol) && symbol != "init" &&
 		symbol != "deinit" && symbol != "subscript"
@@ -418,8 +442,14 @@ func (swiftLanguage) countSymbolOccurrences(line, symbol string) int {
 			if token.kind == swiftTokenIdentifier && !specialMember &&
 				(!requireQuoted || token.quotedIdentifier || memberKeyword) {
 				count++
+				if visit != nil {
+					visit(token.nameStart)
+				}
 			} else if swiftOperatorSymbol(symbol) && token.kind == swiftTokenPunctuation {
 				count++
+				if visit != nil {
+					visit(token.start)
+				}
 			}
 		}
 		previous = token
@@ -433,22 +463,6 @@ func (swiftLanguage) prepareSymbolOccurrenceCounter(symbol string) func(string) 
 	return func(line string) int {
 		return swiftLanguage{}.countSymbolOccurrences(line, symbol)
 	}
-}
-
-func (swift swiftLanguage) walkAdditionalSymbolOccurrences(
-	lines []string,
-	_ string,
-	visit func(lineNo, additionalCount int) bool,
-) bool {
-	if visit == nil {
-		return false
-	}
-	for index := range lines {
-		if !visit(index+1, 0) {
-			break
-		}
-	}
-	return true
 }
 
 func (swift swiftLanguage) symbolOnLine(lines []string, lineNo int) (string, bool) {

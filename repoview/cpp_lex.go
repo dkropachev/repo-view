@@ -31,6 +31,7 @@ type cppLexResult struct {
 	scopes              []cLineScope
 	imports             []cLineSpan
 	moduleSpans         []cByteSpan
+	directiveSpans      []cByteSpan
 	tokens              []cToken
 	lineStarts          []int
 	concreteEligible    bool
@@ -109,14 +110,19 @@ func lexCPP(source string) cppLexResult {
 			end:   directive.end,
 		})
 	}
+	directiveSpans = normalizeCSpans(directiveSpans)
 
 	moduleScanner := newCPPModuleStreamScanner(source, base.lineStarts)
+	ownerScanner := newCPPOwningDefinitionStreamScanner(source, base.lineStarts)
 	tokens, truncated := cppCodeTokensObserved(
 		source,
 		comments,
 		stringsAndHeaders,
-		normalizeCSpans(directiveSpans),
-		moduleScanner.consume,
+		directiveSpans,
+		func(token cToken) {
+			moduleScanner.consume(token)
+			ownerScanner.consume(token)
+		},
 	)
 	moduleScanner.finishSource()
 	modules := moduleScanner.result
@@ -127,6 +133,11 @@ func lexCPP(source string) cppLexResult {
 		fallbackDefinitions,
 		cppCStreamingFallbackDefinitions(source, base.definitions, modules.spans)...,
 	)
+	if truncated {
+		fallbackDefinitions = cppMergeStreamingDefinitions(
+			fallbackDefinitions, ownerScanner.definitions,
+		)
+	}
 	definitions := append(append([]sourceDefinition(nil), trustedDefinitions...), fallbackDefinitions...)
 
 	imports := append([]cLineSpan(nil), base.imports...)
@@ -146,11 +157,45 @@ func lexCPP(source string) cppLexResult {
 		scopes:              cSortLineScopes(scopes),
 		imports:             cSortLineSpans(imports),
 		moduleSpans:         normalizeCSpans(modules.spans),
+		directiveSpans:      directiveSpans,
 		tokens:              tokens,
 		lineStarts:          cLineStarts(source),
 		concreteEligible:    base.concreteEligible && !truncated,
 		truncated:           truncated,
 	}
+}
+
+// cppMergeStreamingDefinitions lets the complete-stream scanner replace a
+// retained-window definition at the same source coordinate once it observed a
+// physical closing brace. This matters for constructor initializer lists: the
+// C fallback can mistake the first braced member initializer for the body.
+func cppMergeStreamingDefinitions(
+	definitions []sourceDefinition,
+	streamed []sourceDefinition,
+) []sourceDefinition {
+	indices := make(map[cDefinitionIdentity]int, len(definitions)+len(streamed))
+	for index, definition := range definitions {
+		key := cDefinitionKey(definition)
+		if existing, exists := indices[key]; exists {
+			if definition.ownsScope && !definitions[existing].ownsScope {
+				definitions[existing] = definition
+			}
+			continue
+		}
+		indices[key] = index
+	}
+	for _, definition := range streamed {
+		key := cDefinitionKey(definition)
+		if index, exists := indices[key]; exists {
+			if definition.ownsScope {
+				definitions[index] = definition
+			}
+			continue
+		}
+		indices[key] = len(definitions)
+		definitions = append(definitions, definition)
+	}
+	return definitions
 }
 
 // The hardened C scanner already maintains a bounded streaming declaration
@@ -191,6 +236,616 @@ func cppCStreamingFallbackDefinitions(
 	return filtered
 }
 
+const (
+	cppMaximumStreamingOwnerLookahead = 256
+	cppMaximumStreamingOwnerDepth     = 96
+	cppMaximumStreamingCallableTokens = 512
+	cppMaximumStreamingOwnerNameBytes = 16 << 10
+)
+
+type cppStreamingOwnerCandidate struct {
+	kind            string
+	name            cToken
+	remaining       int
+	parenDepth      int
+	bracketDepth    int
+	angleDepth      int
+	definitionIndex int
+	baseClause      bool
+	disqualified    bool
+}
+
+type cppStreamingOwnerFrame struct {
+	name                string
+	kind                string
+	definitionIndex     int
+	open                int
+	deferredInitializer bool
+}
+
+type cppStreamingDeferredCallable struct {
+	definitionIndex  int
+	baseDepth        int
+	parenDepth       int
+	bracketDepth     int
+	active           bool
+	afterInitializer bool
+	expectMember     bool
+	sawMember        bool
+}
+
+// cppOwningDefinitionStreamScanner recovers C++ class/namespace owners and
+// callable spellings that the C fallback cannot express from the complete
+// token stream before bounded retention discards its middle. Candidate
+// lookahead, callable headers, and structural depth are fixed, so adversarial
+// declarations or nesting cannot make working memory source-sized. Ownership
+// is committed only after a physical matching closing brace; an unfinished
+// owner remains a useful non-owning definition with no exact end.
+type cppOwningDefinitionStreamScanner struct {
+	positions                 cSourcePositions
+	definitions               []sourceDefinition
+	frames                    []cppStreamingOwnerFrame
+	statement                 []cToken
+	candidate                 cppStreamingOwnerCandidate
+	deferred                  cppStreamingDeferredCallable
+	previousTemplateSeparator bool
+	statementOverflow         bool
+	overflowDepth             int
+	statementParenDepth       int
+	statementBracketDepth     int
+	statementBraceDepth       int
+}
+
+func newCPPOwningDefinitionStreamScanner(
+	source string,
+	lineStarts []int,
+) *cppOwningDefinitionStreamScanner {
+	return &cppOwningDefinitionStreamScanner{
+		positions: cSourcePositions{source: source, lineStarts: lineStarts},
+	}
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) consume(token cToken) {
+	previousTemplateSeparator := scanner.previousTemplateSeparator
+	scanner.previousTemplateSeparator = token.text == "<" || token.text == ","
+
+	owner, ownerKind, ownerName := -1, "", ""
+	if scanner.candidate.remaining > 0 {
+		candidateKind := scanner.candidate.kind
+		owner = scanner.consumeCandidate(token)
+		if owner >= 0 && owner < len(scanner.definitions) {
+			ownerKind = candidateKind
+			ownerName = scanner.definitions[owner].symbol
+		}
+	}
+
+	deferredInitializer := false
+	if deferredOwner, initializer := scanner.consumeDeferred(token); deferredOwner >= 0 {
+		owner = deferredOwner
+		ownerKind = "callable"
+		if owner < len(scanner.definitions) {
+			ownerName = scanner.definitions[owner].symbol
+		}
+	} else {
+		deferredInitializer = initializer
+	}
+	if scanner.consumeNestedCallableHeader(token) {
+		return
+	}
+
+	switch token.text {
+	case "{":
+		if owner < 0 && !deferredInitializer && !scanner.deferredAtBase() {
+			if definition, initializer, ok := scanner.callableDefinitionAt(token, true); ok {
+				owner = scanner.appendDefinition(definition)
+				ownerName = definition.symbol
+				if initializer {
+					scanner.deferred = cppStreamingDeferredCallable{
+						definitionIndex: owner,
+						baseDepth:       len(scanner.frames),
+						active:          true,
+					}
+					owner = -1
+					ownerName = ""
+					deferredInitializer = true
+				} else {
+					ownerKind = "callable"
+				}
+			}
+		}
+		scanner.openFrame(
+			token, owner, ownerKind, ownerName, deferredInitializer,
+		)
+		scanner.resetStatement()
+	case "}":
+		scanner.closeFrame(token)
+		scanner.resetStatement()
+	case ";":
+		if !scanner.deferredAtBase() {
+			if definition, _, ok := scanner.callableDefinitionAt(token, false); ok {
+				scanner.appendDefinition(definition)
+			}
+		}
+		scanner.resetStatement()
+	default:
+		if !scanner.deferredAtBase() {
+			scanner.appendStatementToken(token)
+			scanner.updateStatementDelimiters(token)
+		}
+	}
+
+	if scanner.candidate.remaining == 0 && !scanner.deferredAtBase() {
+		switch token.text {
+		case "class":
+			if !previousTemplateSeparator {
+				scanner.startCandidate("class")
+			}
+		case "struct", "union":
+			scanner.startCandidate("class")
+		case "namespace":
+			scanner.startCandidate("namespace")
+		}
+	}
+}
+
+// A braced expression can occur inside a parameter, noexcept expression, or
+// trailing decltype before the callable body. Preserve it as part of the
+// bounded header instead of treating its first brace as the body boundary.
+func (scanner *cppOwningDefinitionStreamScanner) consumeNestedCallableHeader(
+	token cToken,
+) bool {
+	if scanner.statementBraceDepth == 0 && token.text == "{" &&
+		(scanner.statementParenDepth > 0 || scanner.statementBracketDepth > 0) {
+		scanner.appendStatementToken(token)
+		scanner.statementBraceDepth = 1
+		scanner.openFrame(token, -1, "", "", false)
+		return true
+	}
+	if scanner.statementBraceDepth == 0 {
+		return false
+	}
+
+	scanner.appendStatementToken(token)
+	switch token.text {
+	case "{":
+		scanner.statementBraceDepth++
+		scanner.openFrame(token, -1, "", "", false)
+	case "}":
+		scanner.closeFrame(token)
+		scanner.statementBraceDepth--
+	default:
+		scanner.updateStatementDelimiters(token)
+	}
+	return true
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) updateStatementDelimiters(
+	token cToken,
+) {
+	switch token.text {
+	case "(":
+		scanner.statementParenDepth++
+	case ")":
+		scanner.statementParenDepth = max(0, scanner.statementParenDepth-1)
+	case "[":
+		scanner.statementBracketDepth++
+	case "]":
+		scanner.statementBracketDepth = max(0, scanner.statementBracketDepth-1)
+	}
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) deferredAtBase() bool {
+	return scanner.deferred.active && scanner.overflowDepth == 0 &&
+		len(scanner.frames) == scanner.deferred.baseDepth
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) consumeDeferred(
+	token cToken,
+) (int, bool) {
+	if !scanner.deferredAtBase() {
+		return -1, false
+	}
+	deferred := &scanner.deferred
+	switch token.text {
+	case ";", "}":
+		scanner.deferred = cppStreamingDeferredCallable{}
+	case ",":
+		if deferred.parenDepth == 0 && deferred.bracketDepth == 0 {
+			deferred.afterInitializer = false
+			deferred.expectMember = true
+			deferred.sawMember = false
+		}
+	case "(":
+		deferred.parenDepth++
+	case ")":
+		if deferred.parenDepth > 0 {
+			deferred.parenDepth--
+			if deferred.parenDepth == 0 && deferred.bracketDepth == 0 &&
+				deferred.expectMember {
+				deferred.afterInitializer = true
+				deferred.expectMember = false
+			}
+		}
+	case "[":
+		deferred.bracketDepth++
+	case "]":
+		if deferred.bracketDepth > 0 {
+			deferred.bracketDepth--
+		}
+	case "{":
+		switch {
+		case deferred.afterInitializer && !deferred.expectMember:
+			owner := deferred.definitionIndex
+			scanner.deferred = cppStreamingDeferredCallable{}
+			return owner, false
+		case deferred.expectMember && deferred.sawMember &&
+			deferred.parenDepth == 0 && deferred.bracketDepth == 0:
+			deferred.expectMember = false
+			deferred.sawMember = false
+			deferred.afterInitializer = false
+			return -1, true
+		}
+	default:
+		if deferred.expectMember && deferred.parenDepth == 0 &&
+			deferred.bracketDepth == 0 {
+			deferred.sawMember = true
+		}
+	}
+	return -1, false
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) appendStatementToken(
+	token cToken,
+) {
+	if scanner.statementOverflow {
+		return
+	}
+	if len(token.text) > cppMaximumStreamingOwnerNameBytes ||
+		len(scanner.statement) >= cppMaximumStreamingCallableTokens {
+		scanner.statement = scanner.statement[:0]
+		scanner.statementOverflow = true
+		return
+	}
+	scanner.statement = append(scanner.statement, token)
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) resetStatement() {
+	scanner.statement = scanner.statement[:0]
+	scanner.statementOverflow = false
+	scanner.statementParenDepth = 0
+	scanner.statementBracketDepth = 0
+	scanner.statementBraceDepth = 0
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) appendDefinition(
+	definition sourceDefinition,
+) int {
+	if definition.symbol == "" ||
+		len(definition.symbol) > cppMaximumStreamingOwnerNameBytes {
+		return -1
+	}
+	scanner.definitions = append(scanner.definitions, definition)
+	return len(scanner.definitions) - 1
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) callableDefinitionAt(
+	terminator cToken,
+	ownsScope bool,
+) (sourceDefinition, bool, bool) {
+	if scanner.statementOverflow || len(scanner.statement) == 0 {
+		return sourceDefinition{}, false, false
+	}
+	hasOpen, hasClose := false, false
+	for _, token := range scanner.statement {
+		hasOpen = hasOpen || token.text == "("
+		hasClose = hasClose || token.text == ")"
+	}
+	if !hasOpen || !hasClose {
+		return sourceDefinition{}, false, false
+	}
+	tokens := make([]cToken, 0, len(scanner.statement)+1)
+	tokens = append(tokens, scanner.statement...)
+	tokens = append(tokens, terminator)
+	pairs := cppDelimiterPairs(tokens)
+	className := scanner.directClassName()
+	for open := 1; open+1 < len(tokens); open++ {
+		if tokens[open].text != "(" {
+			continue
+		}
+		parameterClose := pairs[open]
+		if parameterClose <= open || parameterClose >= len(tokens)-1 {
+			continue
+		}
+		nameIndex, symbol := cppCallableBefore(scanner.positions.source, tokens, open)
+		if nameIndex < 0 || symbol == "" || cppControlKeyword(symbol) ||
+			cppCallableInsideParentheses(tokens, open, pairs) {
+			continue
+		}
+		candidateTerminator := cppCallableTerminator(tokens, parameterClose+1, pairs)
+		if candidateTerminator >= 0 && tokens[candidateTerminator].text == "try" {
+			candidateTerminator = cppNextOpeningBrace(
+				tokens, candidateTerminator+1, 256,
+			)
+		}
+		if candidateTerminator != len(tokens)-1 {
+			continue
+		}
+
+		specialMember := cppStreamingSpecialMemberCandidate(
+			tokens, nameIndex, symbol, className,
+		)
+		destructor := strings.HasPrefix(symbol, "~") && specialMember
+		constructor := !strings.HasPrefix(symbol, "~") && specialMember
+		operator := strings.HasPrefix(symbol, "operator")
+		operatorContext := className != "" ||
+			cppStreamingQualifiedCallableCandidate(tokens, nameIndex)
+		declarationEvidence := cppDeclarationEvidence(tokens, nameIndex)
+		supported := constructor || destructor || declarationEvidence ||
+			operator && operatorContext
+		if !supported {
+			continue
+		}
+
+		line, column := scanner.positions.lineColumn(tokens[nameIndex].start)
+		definition := sourceDefinition{
+			symbol: symbol, line: line, column: column,
+			scopeStart: line, scopeEnd: line,
+		}
+		initializer := ownsScope && constructor &&
+			cppStreamingBraceStartsConstructorInitializer(
+				tokens, parameterClose, len(tokens)-1, pairs,
+			)
+		return definition, initializer, true
+	}
+	return sourceDefinition{}, false, false
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) directClassName() string {
+	if len(scanner.frames) == 0 {
+		return ""
+	}
+	frame := scanner.frames[len(scanner.frames)-1]
+	if frame.kind == "class" {
+		return frame.name
+	}
+	return ""
+}
+
+func cppStreamingQualifiedCallableCandidate(tokens []cToken, nameIndex int) bool {
+	return nameIndex > 0 && tokens[nameIndex-1].text == "::" &&
+		cppStreamingQualifierIdentifier(tokens, nameIndex-1) != ""
+}
+
+func cppStreamingSpecialMemberCandidate(
+	tokens []cToken,
+	nameIndex int,
+	symbol, className string,
+) bool {
+	plain := strings.TrimPrefix(symbol, "~")
+	if className != "" && plain == className {
+		return true
+	}
+	if !cppStreamingQualifiedCallableCandidate(tokens, nameIndex) {
+		return false
+	}
+	return cppStreamingQualifierIdentifier(tokens, nameIndex-1) == plain
+}
+
+func cppStreamingQualifierIdentifier(tokens []cToken, scopeIndex int) string {
+	angleDepth := 0
+	for index := scopeIndex - 1; index >= 0 && index >= scopeIndex-128; index-- {
+		switch tokens[index].text {
+		case ">":
+			angleDepth++
+		case ">>":
+			angleDepth += 2
+		case "<":
+			angleDepth = max(0, angleDepth-1)
+		case "<<":
+			angleDepth = max(0, angleDepth-2)
+		default:
+			if angleDepth == 0 && tokens[index].kind == cTokenIdentifier &&
+				!cppKeyword(tokens[index].text) {
+				return tokens[index].text
+			}
+		}
+	}
+	return ""
+}
+
+func cppStreamingBraceStartsConstructorInitializer(
+	tokens []cToken,
+	parameterClose, brace int,
+	pairs map[int]int,
+) bool {
+	colon := -1
+	for index := parameterClose + 1; index < brace; index++ {
+		if closing := pairs[index]; closing > index && closing < brace {
+			index = closing
+			continue
+		}
+		if tokens[index].text == ":" {
+			colon = index
+		}
+	}
+	if colon < 0 || brace <= colon+1 {
+		return false
+	}
+	previous := tokens[brace-1]
+	return previous.kind == cTokenIdentifier || previous.text == ">" ||
+		previous.text == ">>" || previous.text == "]" || previous.text == "..."
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) startCandidate(
+	kind string,
+) {
+	scanner.candidate = cppStreamingOwnerCandidate{
+		kind: kind, remaining: cppMaximumStreamingOwnerLookahead,
+		definitionIndex: -1,
+	}
+}
+
+// consumeCandidate returns the definition index owned by a top-level opening
+// brace, or -1 when the brace is unrelated to the pending declaration.
+func (scanner *cppOwningDefinitionStreamScanner) consumeCandidate(
+	token cToken,
+) int {
+	candidate := &scanner.candidate
+	candidate.remaining--
+	if candidate.name.text == "" {
+		switch token.text {
+		case ";", "{", "}":
+			scanner.candidate = cppStreamingOwnerCandidate{}
+			return -1
+		}
+		if token.kind != cTokenIdentifier || cppKeyword(token.text) {
+			if candidate.remaining == 0 {
+				scanner.candidate = cppStreamingOwnerCandidate{}
+			}
+			return -1
+		}
+		if len(token.text) > cppMaximumStreamingOwnerNameBytes {
+			scanner.candidate = cppStreamingOwnerCandidate{}
+			return -1
+		}
+		candidate.name = token
+		if candidate.kind == "class" {
+			candidate.definitionIndex = scanner.appendCandidateDefinition(token)
+		}
+		return -1
+	}
+
+	switch token.text {
+	case "(":
+		candidate.parenDepth++
+	case ")":
+		candidate.parenDepth = max(0, candidate.parenDepth-1)
+	case "[":
+		candidate.bracketDepth++
+	case "]":
+		candidate.bracketDepth = max(0, candidate.bracketDepth-1)
+	case "<":
+		if candidate.parenDepth == 0 && candidate.bracketDepth == 0 {
+			candidate.angleDepth++
+		}
+	case ">":
+		if candidate.parenDepth == 0 && candidate.bracketDepth == 0 {
+			candidate.angleDepth = max(0, candidate.angleDepth-1)
+		}
+	case ">>":
+		if candidate.parenDepth == 0 && candidate.bracketDepth == 0 {
+			candidate.angleDepth = max(0, candidate.angleDepth-2)
+		}
+	case ":":
+		if candidate.kind == "class" && candidate.parenDepth == 0 &&
+			candidate.bracketDepth == 0 && candidate.angleDepth == 0 {
+			candidate.baseClause = true
+		}
+	case ";", "}":
+		scanner.candidate = cppStreamingOwnerCandidate{}
+		return -1
+	case "{":
+		if candidate.parenDepth == 0 && candidate.bracketDepth == 0 &&
+			candidate.angleDepth == 0 {
+			if candidate.definitionIndex < 0 && candidate.kind == "namespace" {
+				candidate.definitionIndex = scanner.appendCandidateDefinition(
+					candidate.name,
+				)
+			}
+			owner := candidate.definitionIndex
+			if candidate.disqualified {
+				owner = -1
+			}
+			scanner.candidate = cppStreamingOwnerCandidate{}
+			return owner
+		}
+	default:
+		if candidate.kind == "class" && token.kind == cTokenIdentifier &&
+			candidate.parenDepth == 0 && candidate.bracketDepth == 0 &&
+			candidate.angleDepth == 0 && !candidate.baseClause &&
+			token.text != "final" {
+			candidate.disqualified = true
+		}
+	}
+	if candidate.remaining == 0 {
+		scanner.candidate = cppStreamingOwnerCandidate{}
+	}
+	return -1
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) appendCandidateDefinition(
+	name cToken,
+) int {
+	line, column := scanner.positions.lineColumn(name.start)
+	return scanner.appendDefinition(sourceDefinition{
+		symbol: name.text, line: line, column: column,
+		scopeStart: line, scopeEnd: line,
+	})
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) openFrame(
+	token cToken,
+	definitionIndex int,
+	kind, name string,
+	deferredInitializer bool,
+) {
+	if scanner.overflowDepth > 0 {
+		scanner.overflowDepth++
+		if deferredInitializer {
+			scanner.deferred = cppStreamingDeferredCallable{}
+		}
+		return
+	}
+	if len(scanner.frames) >= cppMaximumStreamingOwnerDepth {
+		scanner.overflowDepth = 1
+		if deferredInitializer {
+			scanner.deferred = cppStreamingDeferredCallable{}
+		}
+		return
+	}
+	scanner.frames = append(scanner.frames, cppStreamingOwnerFrame{
+		name: name, kind: kind,
+		definitionIndex:     definitionIndex,
+		open:                token.start,
+		deferredInitializer: deferredInitializer,
+	})
+}
+
+func (scanner *cppOwningDefinitionStreamScanner) closeFrame(token cToken) {
+	if scanner.overflowDepth > 0 {
+		scanner.overflowDepth--
+		return
+	}
+	if len(scanner.frames) == 0 {
+		return
+	}
+	frameIndex := len(scanner.frames) - 1
+	frame := scanner.frames[frameIndex]
+	scanner.frames = scanner.frames[:frameIndex]
+	if frame.deferredInitializer && scanner.deferred.active &&
+		len(scanner.frames) == scanner.deferred.baseDepth {
+		scanner.deferred.afterInitializer = true
+		scanner.deferred.expectMember = false
+		scanner.deferred.sawMember = false
+		scanner.deferred.parenDepth = 0
+		scanner.deferred.bracketDepth = 0
+	}
+	if frame.definitionIndex < 0 || frame.definitionIndex >= len(scanner.definitions) {
+		return
+	}
+	definition := &scanner.definitions[frame.definitionIndex]
+	scopeStart, _ := scanner.positions.lineColumn(frame.open)
+	scopeEnd, _ := scanner.positions.lineColumn(max(frame.open, token.end-1))
+	ownedEndLine, ownedEndColumn := scanner.positions.lineColumn(token.end)
+	if ownedEndLine != scopeEnd {
+		ownedEndColumn = 0
+	}
+	definition.scopeStart = min(definition.line, scopeStart)
+	definition.scopeEnd = max(definition.line, scopeEnd)
+	definition.ownedEndColumn = ownedEndColumn
+	definition.ownsScope = true
+}
+
 // cppRawStringSpans recognizes the standard encoding prefixes and exact raw
 // delimiter match. An unterminated, otherwise-valid raw literal owns the tail;
 // treating its payload as code would create worse phantom definitions/scopes.
@@ -224,14 +879,8 @@ func cppRawStringSpans(source string) []cByteSpan {
 }
 
 func cppRawStringEnd(source string, start int) (int, bool) {
-	prefixEnd := -1
-	for _, prefix := range []string{"u8R\"", "uR\"", "UR\"", "LR\"", "R\""} {
-		if strings.HasPrefix(source[start:], prefix) {
-			prefixEnd = start + len(prefix)
-			break
-		}
-	}
-	if prefixEnd < 0 {
+	prefixEnd, ok := cppRawStringPrefixEnd(source, start, len(source))
+	if !ok {
 		return start, false
 	}
 	delimiterEnd := prefixEnd
@@ -251,6 +900,21 @@ func cppRawStringEnd(source string, start int) (int, bool) {
 		return delimiterEnd + 1 + relative + len(closing), true
 	}
 	return len(source), true
+}
+
+// Translation phase 2 removes line splices before preprocessing tokens are
+// formed. Match the raw-string introducer in that logical view while returning
+// its physical end so the literal span still preserves source coordinates.
+func cppRawStringPrefixEnd(source string, start, limit int) (int, bool) {
+	if start < 0 || start >= limit || limit > len(source) {
+		return start, false
+	}
+	for _, prefix := range []string{"u8R\"", "uR\"", "UR\"", "LR\"", "R\""} {
+		if end, ok := cMatchLogical(source, start, prefix, limit); ok {
+			return end, true
+		}
+	}
+	return start, false
 }
 
 func cppRawDelimiterByte(character byte) bool {
@@ -1227,17 +1891,23 @@ func cppLexicalDefinitions(source string, tokens []cToken) []sourceDefinition {
 		}
 		line, column := positions.lineColumn(name.start)
 		scopeStart, scopeEnd := line, line
+		ownedEndColumn := 0
 		if scopeIndex >= 0 && scopeIndex < len(tokens) {
 			closing := pairs[scopeIndex]
 			if closing > scopeIndex {
 				scopeStart, _ = positions.lineColumn(tokens[scopeIndex].start)
 				scopeEnd, _ = positions.lineColumn(max(tokens[scopeIndex].start, tokens[closing].end-1))
+				ownedEndLine, exactEndColumn := positions.lineColumn(tokens[closing].end)
+				if ownedEndLine == scopeEnd {
+					ownedEndColumn = exactEndColumn
+				}
 			}
 		}
 		definitions = append(definitions, sourceDefinition{
 			symbol: name.text, line: line, column: column,
 			scopeStart: min(line, scopeStart), scopeEnd: max(line, scopeEnd),
-			ownsScope: ownsScope && scopeEnd >= scopeStart,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      ownsScope && scopeEnd >= scopeStart,
 		})
 	}
 
@@ -1246,7 +1916,7 @@ func cppLexicalDefinitions(source string, tokens []cToken) []sourceDefinition {
 		switch token.text {
 		case "namespace":
 			name := cppNextIdentifierToken(tokens, index+1, min(len(tokens), index+32))
-			brace := cppNextTokenBefore(tokens, index+1, "{", ";", 128)
+			brace := cppNextOpeningBrace(tokens, index+1, 128)
 			if name >= 0 && brace >= 0 {
 				appendName(name, brace, true)
 			}
@@ -1259,7 +1929,7 @@ func cppLexicalDefinitions(source string, tokens []cToken) []sourceDefinition {
 			if name < 0 || cppKeyword(tokens[name].text) {
 				continue
 			}
-			brace := cppNextTokenBefore(tokens, name+1, "{", ";", 256)
+			brace := cppNextOpeningBrace(tokens, name+1, 256)
 			appendName(name, brace, brace >= 0)
 		case "concept":
 			name := cppNextIdentifierToken(tokens, index+1, min(len(tokens), index+8))
@@ -1294,11 +1964,12 @@ func cppLexicalDefinitions(source string, tokens []cToken) []sourceDefinition {
 			continue
 		}
 		if ownsScope && tokens[terminator].text == "try" {
-			terminator = cppNextTokenBefore(tokens, terminator+1, "{", ";", 256)
+			terminator = cppNextOpeningBrace(tokens, terminator+1, 256)
 			ownsScope = terminator >= 0
 		}
 		line, column := positions.lineColumn(tokens[nameIndex].start)
 		scopeStart, scopeEnd := line, line
+		ownedEndColumn := 0
 		if ownsScope {
 			closing := pairs[terminator]
 			if closing <= terminator {
@@ -1309,12 +1980,16 @@ func cppLexicalDefinitions(source string, tokens []cToken) []sourceDefinition {
 			} else {
 				scopeStart, _ = positions.lineColumn(tokens[terminator].start)
 				scopeEnd, _ = positions.lineColumn(max(tokens[terminator].start, tokens[closing].end-1))
+				ownedEndLine, exactEndColumn := positions.lineColumn(tokens[closing].end)
+				if ownedEndLine == scopeEnd {
+					ownedEndColumn = exactEndColumn
+				}
 			}
 		}
 		definitions = append(definitions, sourceDefinition{
 			symbol: symbol, line: line, column: column,
 			scopeStart: min(line, scopeStart), scopeEnd: max(line, scopeEnd),
-			ownsScope: ownsScope,
+			ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 		})
 	}
 	return definitions
@@ -1387,15 +2062,15 @@ func cppNextIdentifierToken(tokens []cToken, start, end int) int {
 	return -1
 }
 
-func cppNextTokenBefore(tokens []cToken, start int, want, stop string, budget int) int {
+func cppNextOpeningBrace(tokens []cToken, start, budget int) int {
 	for index, end := start, min(len(tokens), start+budget); index < end; index++ {
 		if tokens[index].text == cppTokenGap {
 			return -1
 		}
-		if tokens[index].text == want {
+		if tokens[index].text == "{" {
 			return index
 		}
-		if tokens[index].text == stop || tokens[index].text == "}" {
+		if tokens[index].text == ";" || tokens[index].text == "}" {
 			return -1
 		}
 	}

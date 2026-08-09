@@ -2,6 +2,11 @@ package repoview
 
 import "strings"
 
+type javaOccurrenceColumnState struct {
+	added   []int
+	removed []int
+}
+
 // walkAdditionalSymbolOccurrences visits every physical source line in order
 // with the number of qualified Java-name occurrences that the ordinary raw
 // substring search cannot see. A qualified name may cross whitespace,
@@ -19,18 +24,48 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 	if visit == nil {
 		return false
 	}
+	return j.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, visit, nil)
+}
+
+func (j javaLanguage) walkAdditionalSymbolOccurrencesAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	return j.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, nil, visit)
+}
+
+func (j javaLanguage) walkAdditionalSymbolOccurrencesWithVisitor(
+	lines []string,
+	symbol string,
+	visit func(lineNo, additionalCount int) bool,
+	visitAt func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	if visit == nil && visitAt == nil {
+		return false
+	}
 	pattern, ok := javaQualifiedOccurrencePattern(symbol)
 	if !ok {
 		if _, unqualified := javaUnqualifiedOccurrencePattern(symbol); !unqualified {
 			return false
 		}
-		return j.walkUnqualifiedNumericOccurrenceAdjustments(lines, symbol, visit)
+		if visit != nil {
+			return j.walkUnqualifiedNumericOccurrenceAdjustments(lines, symbol, visit)
+		}
+		return j.walkUnqualifiedNumericOccurrenceAdjustmentsAt(
+			lines, symbol, visitAt,
+		)
 	}
 	analysis := j.sourceAnalysis(lines)
 	if analysis == nil || len(lines) == 0 {
 		return true
 	}
-
 	prefix := make([]int, len(pattern))
 	javaBuildQualifiedOccurrencePrefix(pattern, prefix)
 	raw := newJavaRawOccurrenceCursor(analysis.source, symbol)
@@ -43,6 +78,10 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 	nextLine := 1
 	pendingLine := 0
 	pendingAdjustment := 0
+	var pendingColumns *javaOccurrenceColumnState
+	if visitAt != nil {
+		pendingColumns = &javaOccurrenceColumnState{}
+	}
 	visitorStopped := false
 	numericSpans := make([]javaByteSpan, 0)
 	numericHead := 0
@@ -58,11 +97,28 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 		lastLine = min(lastLine, len(lines))
 		for nextLine <= lastLine {
 			adjustment := 0
+			var addedColumns, removedColumns []int
 			if pendingLine == nextLine {
 				adjustment = pendingAdjustment
+				if pendingColumns != nil {
+					addedColumns = pendingColumns.added
+					removedColumns = pendingColumns.removed
+				}
 				pendingLine, pendingAdjustment = 0, 0
 			}
-			if !visit(nextLine, adjustment) {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(
+					nextLine, adjustment, addedColumns, removedColumns,
+				)
+			} else {
+				keepGoing = visit(nextLine, adjustment)
+			}
+			if pendingLine == 0 && pendingColumns != nil {
+				pendingColumns.added = pendingColumns.added[:0]
+				pendingColumns.removed = pendingColumns.removed[:0]
+			}
+			if !keepGoing {
 				visitorStopped = true
 				return false
 			}
@@ -71,12 +127,22 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 		return true
 	}
 
-	recordAdjustment := func(lineNo, adjustment int) bool {
-		if adjustment == 0 {
+	recordAdjustment := func(
+		lineNo, adjustment, addedColumn, removedColumn int,
+	) bool {
+		if adjustment == 0 && addedColumn <= 0 && removedColumn <= 0 {
 			return true
 		}
-		if pendingAdjustment == 0 {
+		if pendingLine == 0 {
 			pendingLine, pendingAdjustment = lineNo, adjustment
+			if pendingColumns != nil {
+				if addedColumn > 0 {
+					pendingColumns.added = append(pendingColumns.added, addedColumn)
+				}
+				if removedColumn > 0 {
+					pendingColumns.removed = append(pendingColumns.removed, removedColumn)
+				}
+			}
 			return true
 		}
 		if pendingLine != lineNo {
@@ -87,12 +153,28 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 				return false
 			}
 			pendingLine, pendingAdjustment = lineNo, adjustment
+			if pendingColumns != nil {
+				if addedColumn > 0 {
+					pendingColumns.added = append(pendingColumns.added, addedColumn)
+				}
+				if removedColumn > 0 {
+					pendingColumns.removed = append(pendingColumns.removed, removedColumn)
+				}
+			}
 			return true
 		}
 		if adjustment > 0 && pendingAdjustment > int(^uint(0)>>1)-adjustment {
 			pendingAdjustment = int(^uint(0) >> 1)
 		} else {
 			pendingAdjustment += adjustment
+		}
+		if pendingColumns != nil {
+			if addedColumn > 0 {
+				pendingColumns.added = append(pendingColumns.added, addedColumn)
+			}
+			if removedColumn > 0 {
+				pendingColumns.removed = append(pendingColumns.removed, removedColumn)
+			}
 		}
 		return true
 	}
@@ -108,9 +190,12 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 				javaQualifiedOccurrenceBoundaries(
 					analysis.source, start, matchEnd,
 					&rawStartBoundaries, &rawEndBoundaries,
-				) &&
-				!recordAdjustment(rawMatchLines.lineAt(start), -1) {
-				visitorStopped = true
+				) {
+				lineNo := rawMatchLines.lineAt(start)
+				column := start - analysis.lineStarts[lineNo-1] + 1
+				if !recordAdjustment(lineNo, -1, 0, column) {
+					visitorStopped = true
+				}
 			}
 		})
 		cutoff := raw.offset - len(symbol)
@@ -174,7 +259,8 @@ func (j javaLanguage) walkAdditionalSymbolOccurrences(
 						&startBoundaries, &endBoundaries,
 					) && !raw.matchesAt(start, end) {
 						lineNo := matchLineCursor.lineAt(start)
-						if !recordAdjustment(lineNo, 1) {
+						column := start - analysis.lineStarts[lineNo-1] + 1
+						if !recordAdjustment(lineNo, 1, column, 0) {
 							return false
 						}
 					}
@@ -205,6 +291,33 @@ func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustments(
 	symbol string,
 	visit func(lineNo, adjustment int) bool,
 ) bool {
+	return j.walkUnqualifiedNumericOccurrenceAdjustmentsWithVisitor(
+		lines, symbol, visit, nil,
+	)
+}
+
+func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustmentsAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, adjustment int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	return j.walkUnqualifiedNumericOccurrenceAdjustmentsWithVisitor(
+		lines, symbol, nil, visit,
+	)
+}
+
+func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustmentsWithVisitor(
+	lines []string,
+	symbol string,
+	visit func(lineNo, adjustment int) bool,
+	visitAt func(
+		lineNo, adjustment int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
 	analysis := j.sourceAnalysis(lines)
 	if analysis == nil || len(lines) == 0 {
 		return true
@@ -219,16 +332,33 @@ func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustments(
 	nextLine := 1
 	pendingLine := 0
 	pendingAdjustment := 0
+	var pendingColumns *javaOccurrenceColumnState
+	if visitAt != nil {
+		pendingColumns = &javaOccurrenceColumnState{}
+	}
 	visitorStopped := false
 	emitThrough := func(lastLine int) bool {
 		lastLine = min(lastLine, len(lines))
 		for nextLine <= lastLine {
 			adjustment := 0
+			var removedColumns []int
 			if pendingLine == nextLine {
 				adjustment = pendingAdjustment
+				if pendingColumns != nil {
+					removedColumns = pendingColumns.removed
+				}
 				pendingLine, pendingAdjustment = 0, 0
 			}
-			if !visit(nextLine, adjustment) {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(nextLine, adjustment, nil, removedColumns)
+			} else {
+				keepGoing = visit(nextLine, adjustment)
+			}
+			if pendingLine == 0 && pendingColumns != nil {
+				pendingColumns.removed = pendingColumns.removed[:0]
+			}
+			if !keepGoing {
 				visitorStopped = true
 				return false
 			}
@@ -236,22 +366,28 @@ func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustments(
 		}
 		return true
 	}
-	record := func(lineNo, count int) bool {
-		if count <= 0 {
-			return true
-		}
-		if pendingAdjustment == 0 {
-			pendingLine, pendingAdjustment = lineNo, -count
+	record := func(lineNo, column int) bool {
+		if pendingLine == 0 {
+			pendingLine, pendingAdjustment = lineNo, -1
+			if pendingColumns != nil && column > 0 {
+				pendingColumns.removed = append(pendingColumns.removed, column)
+			}
 			return true
 		}
 		if pendingLine != lineNo {
 			if !emitThrough(lineNo-1) || pendingAdjustment != 0 {
 				return false
 			}
-			pendingLine, pendingAdjustment = lineNo, -count
+			pendingLine, pendingAdjustment = lineNo, -1
+			if pendingColumns != nil && column > 0 {
+				pendingColumns.removed = append(pendingColumns.removed, column)
+			}
 			return true
 		}
-		pendingAdjustment -= count
+		pendingAdjustment--
+		if pendingColumns != nil && column > 0 {
+			pendingColumns.removed = append(pendingColumns.removed, column)
+		}
 		return true
 	}
 
@@ -267,11 +403,19 @@ func (j javaLanguage) walkUnqualifiedNumericOccurrenceAdjustments(
 				token := event.token
 				frontier = token.end
 				if token.numeric {
-					count := javaRawSymbolOccurrencesInToken(
+					recordFailed := false
+					javaWalkRawSymbolOccurrencesInToken(
 						analysis.source, symbol, prefix, token,
 						&startBoundaries, &endBoundaries,
+						func(start int) {
+							lineNo := matchLines.lineAt(start)
+							column := start - analysis.lineStarts[lineNo-1] + 1
+							if !record(lineNo, column) {
+								recordFailed = true
+							}
+						},
 					)
-					if count > 0 && !record(matchLines.lineAt(token.start), count) {
+					if recordFailed {
 						return false
 					}
 				}
@@ -301,11 +445,12 @@ func javaUnqualifiedOccurrencePattern(symbol string) (javaToken, bool) {
 		pattern.end == len(symbol) && javaTokenIsSourceName(pattern)
 }
 
-func javaRawSymbolOccurrencesInToken(
+func javaWalkRawSymbolOccurrencesInToken(
 	source, symbol string,
 	prefix []int,
 	token javaToken,
 	startBoundaries, endBoundaries *javaTranslatedBoundaryCursor,
+	visit func(start int),
 ) int {
 	if !token.numeric || symbol == "" || token.start < 0 || token.end > len(source) ||
 		token.end <= token.start || len(prefix) < len(symbol) {
@@ -330,6 +475,9 @@ func javaRawSymbolOccurrencesInToken(
 			source, start, end, startBoundaries, endBoundaries,
 		) {
 			count++
+			if visit != nil {
+				visit(start)
+			}
 		}
 		matched = prefix[matched-1]
 	}

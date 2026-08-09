@@ -156,7 +156,7 @@ func (parser *swiftRecoveryParser) acceptToken(token swiftToken) {
 		return
 	case "}":
 		parser.finishHeader(line)
-		parser.closeBrace(line)
+		parser.closeBrace(line, token.end)
 		return
 	}
 
@@ -646,7 +646,7 @@ func swiftParameterDefaultClosurePlausible(tokens []swiftToken, parameterOpen in
 	return colon >= segmentStart && equal > colon+1
 }
 
-func (parser *swiftRecoveryParser) closeBrace(line int) {
+func (parser *swiftRecoveryParser) closeBrace(line, endOffset int) {
 	if parser.frameOverflow > 0 {
 		parser.frameOverflow--
 		return
@@ -657,7 +657,11 @@ func (parser *swiftRecoveryParser) closeBrace(line int) {
 	}
 	frame := parser.frames[len(parser.frames)-1]
 	parser.frames = parser.frames[:len(parser.frames)-1]
-	parser.closeFrame(frame, line)
+	endColumn := 0
+	if line >= 1 && line <= len(parser.lineStarts) && endOffset > 0 {
+		endColumn = endOffset - parser.lineStarts[line-1] + 1
+	}
+	parser.closeFrame(frame, line, endColumn)
 	if len(frame.suspendedHeader) > 0 {
 		parser.header = frame.suspendedHeader
 		parser.headerBalance = frame.suspendedBalance
@@ -697,7 +701,10 @@ func (parser *swiftRecoveryParser) rollbackHeaderSideEffects() {
 	parser.imports = parser.imports[:importStart]
 }
 
-func (parser *swiftRecoveryParser) closeFrame(frame swiftRecoveryFrame, line int) {
+func (parser *swiftRecoveryParser) closeFrame(
+	frame swiftRecoveryFrame,
+	line, ownedEndColumn int,
+) {
 	line = max(frame.start, min(line, parser.lineCount))
 	if frame.emitScope {
 		if frame.caseStart > 0 {
@@ -707,9 +714,11 @@ func (parser *swiftRecoveryParser) closeFrame(frame swiftRecoveryFrame, line int
 	}
 	for _, index := range frame.definitionIndexes {
 		if index >= 0 && index < len(parser.definitions) {
-			parser.definitions[index].scopeEnd = max(
-				parser.definitions[index].scopeEnd, line,
-			)
+			definition := &parser.definitions[index]
+			definition.scopeEnd = max(definition.scopeEnd, line)
+			if ownedEndColumn > 0 && definition.scopeEnd == line {
+				definition.ownedEndColumn = ownedEndColumn
+			}
 		}
 	}
 }
@@ -719,7 +728,7 @@ func (parser *swiftRecoveryParser) closeFramesTo(depth, line int) {
 	for len(parser.frames) > depth {
 		frame := parser.frames[len(parser.frames)-1]
 		parser.frames = parser.frames[:len(parser.frames)-1]
-		parser.closeFrame(frame, line)
+		parser.closeFrame(frame, line, 0)
 		if len(frame.suspendedHeader) > 0 {
 			parser.suspendedCount = max(0, parser.suspendedCount-1)
 		}

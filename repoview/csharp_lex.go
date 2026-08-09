@@ -754,7 +754,15 @@ func csharpNumberEnd(source string, start int) int {
 	for offset < len(source) {
 		character := source[offset]
 		if character >= '0' && character <= '9' || character >= 'a' && character <= 'z' ||
-			character >= 'A' && character <= 'Z' || character == '_' || character == '.' {
+			character >= 'A' && character <= 'Z' || character == '_' {
+			offset++
+			continue
+		}
+		// A decimal point belongs to a C# real literal only when a decimal
+		// digit follows it. Otherwise it starts member access or the range
+		// punctuator, as in 1.ToString(), 1._member, and 1..end.
+		if character == '.' && offset+1 < len(source) &&
+			source[offset+1] >= '0' && source[offset+1] <= '9' {
 			offset++
 			continue
 		}
@@ -861,6 +869,8 @@ func csharpLiteralEndDepth(source string, start, recursionDepth int) (int, bool)
 		}
 		if !terminated {
 			end = csharpMalformedMultilineLiteralEnd(source, start)
+		} else if dollars == 0 {
+			end = csharpUTF8StringSuffixEnd(source, end)
 		}
 		return end, true
 	}
@@ -1043,7 +1053,8 @@ func csharpInterpolatedRawStringEnd(
 }
 
 func csharpUTF8StringSuffixEnd(source string, end int) int {
-	if end < 0 || end+2 > len(source) || source[end:end+2] != "u8" {
+	if end < 0 || end+2 > len(source) ||
+		(source[end:end+2] != "u8" && source[end:end+2] != "U8") {
 		return end
 	}
 	if end+2 < len(source) && csharpIdentifierEnd(source, end) > end+2 {

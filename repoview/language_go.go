@@ -255,7 +255,12 @@ func goScope(lines []string, lineNo int) (int, int) {
 			return bestStart, bestEnd
 		}
 	}
-	return braceScopeResolver(goSearchLines(lines, true, true), lineNo)
+	if start, end, ok := braceScopeFromStructural(
+		lines, goSearchLines(lines, true, true), lineNo,
+	); ok {
+		return start, end
+	}
+	return lineNo, lineNo
 }
 
 func goImports(lines []string) (int, int, bool) {

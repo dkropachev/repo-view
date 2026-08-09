@@ -2,8 +2,9 @@ package repoview
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -17,8 +18,11 @@ import (
 // margin for a line terminator and read-ahead.
 const maximumSourceLineBytes = (8 << 20) + bufio.MaxScanTokenSize
 
+var errRepositoryRootChanged = errors.New("repository root changed after opening")
+
 type RepoView struct {
-	root string
+	rootInfo os.FileInfo
+	root     string
 }
 
 func New(root string) (*RepoView, error) {
@@ -37,43 +41,86 @@ func New(root string) (*RepoView, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("repository root is not a directory: %s", root)
 	}
-	return &RepoView{root: filepath.Clean(resolved)}, nil
+	return &RepoView{rootInfo: info, root: filepath.Clean(resolved)}, nil
 }
 
 func (r *RepoView) sourceFiles() ([]string, error) {
 	extensions := defaultExtensions()
 	excludes := defaultExcludes()
+	type pendingDirectory struct {
+		info     os.FileInfo
+		relative string
+	}
+	directories := []pendingDirectory{{info: r.rootInfo, relative: "."}}
 	var paths []string
-	err := filepath.WalkDir(r.root, func(path string, d fs.DirEntry, err error) error {
+	for index := 0; index < len(directories); index++ {
+		pending := directories[index]
+		directory, opened, err := r.openRelativeDirectory(pending.relative)
 		if err != nil {
-			return err
+			return nil, err
 		}
-		name := d.Name()
-		if d.IsDir() {
-			if path != r.root && excludes[name] {
-				return filepath.SkipDir
+		if !os.SameFile(pending.info, opened) {
+			_ = directory.Close()
+			return nil, fmt.Errorf(
+				"repository directory changed while scanning: %q",
+				pending.relative,
+			)
+		}
+		file, err := directory.Open(".")
+		if err != nil {
+			_ = directory.Close()
+			return nil, err
+		}
+		entries, readErr := file.ReadDir(-1)
+		closeFileErr := file.Close()
+		if readErr != nil {
+			_ = directory.Close()
+			return nil, readErr
+		}
+		if closeFileErr != nil {
+			_ = directory.Close()
+			return nil, closeFileErr
+		}
+		for _, entry := range entries {
+			name := entry.Name()
+			info, statErr := directory.Lstat(name)
+			if statErr != nil {
+				_ = directory.Close()
+				return nil, statErr
 			}
-			return nil
+			if info.Mode()&os.ModeSymlink != 0 {
+				continue
+			}
+			relative := name
+			if pending.relative != "." {
+				relative = path.Join(pending.relative, name)
+			}
+			if info.IsDir() {
+				if !excludes[name] {
+					directories = append(directories, pendingDirectory{
+						info: info, relative: relative,
+					})
+				}
+				continue
+			}
+			if info.Mode().IsRegular() && extensions[path.Ext(relative)] {
+				paths = append(paths, filepath.Join(r.root, filepath.FromSlash(relative)))
+			}
 		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
+		if err := directory.Close(); err != nil {
+			return nil, err
 		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		if info.Mode().IsRegular() && extensions[filepath.Ext(path)] {
-			paths = append(paths, path)
-		}
-		return nil
-	})
+	}
+	if err := r.verifyRootIdentity(); err != nil {
+		return nil, err
+	}
 	sort.Strings(paths)
-	return paths, err
+	return paths, nil
 }
 
 func defaultExtensions() map[string]bool {
 	extensions := make(map[string]bool, len(languagesByExtension))
-	for _, extension := range supportedExtensions() {
+	for _, extension := range SupportedExtensions() {
 		extensions[extension] = true
 	}
 	return extensions
@@ -88,82 +135,10 @@ func defaultExcludes() map[string]bool {
 }
 
 func (r *RepoView) readRelativeLines(relative string) ([]string, string, error) {
-	clean, fullPath, err := r.resolveRegularPath(relative)
+	file, opened, clean, err := r.openRelativeRegularFile(relative)
 	if err != nil {
 		return nil, "", err
 	}
-	lines, err := readLines(fullPath)
-	if err != nil {
-		return nil, "", err
-	}
-	resolvedAfter, err := filepath.EvalSymlinks(fullPath)
-	if err != nil {
-		return nil, "", fmt.Errorf("verify repository path %q: %w", relative, err)
-	}
-	if filepath.Clean(resolvedAfter) != fullPath {
-		return nil, "", fmt.Errorf("repository path %q traverses a symbolic link", relative)
-	}
-	return lines, clean, nil
-}
-
-func (r *RepoView) resolveRegularPath(relative string) (string, string, error) {
-	native := filepath.FromSlash(relative)
-	if relative == "" ||
-		strings.Contains(relative, `\`) ||
-		strings.ContainsRune(relative, '\x00') ||
-		path.IsAbs(relative) ||
-		filepath.IsAbs(native) ||
-		filepath.VolumeName(native) != "" {
-		return "", "", fmt.Errorf("repository path must be a nonempty relative slash path: %q", relative)
-	}
-	clean := path.Clean(relative)
-	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
-		return "", "", fmt.Errorf("repository path escapes the root: %q", relative)
-	}
-	fullPath := filepath.Clean(filepath.Join(r.root, filepath.FromSlash(clean)))
-	within, err := filepath.Rel(r.root, fullPath)
-	if err != nil || within == ".." || strings.HasPrefix(within, ".."+string(filepath.Separator)) {
-		return "", "", fmt.Errorf("repository path escapes the root: %q", relative)
-	}
-	resolved, err := filepath.EvalSymlinks(fullPath)
-	if err != nil {
-		return "", "", fmt.Errorf("resolve repository path %q: %w", relative, err)
-	}
-	if filepath.Clean(resolved) != fullPath {
-		return "", "", fmt.Errorf("repository path %q traverses a symbolic link", relative)
-	}
-	info, err := os.Lstat(fullPath)
-	if err != nil {
-		return "", "", fmt.Errorf("inspect repository path %q: %w", relative, err)
-	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
-		return "", "", fmt.Errorf("repository path is not a regular file: %q", relative)
-	}
-	return filepath.ToSlash(clean), fullPath, nil
-}
-
-func readLines(path string) ([]string, error) {
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, err
-	}
-	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
-		return nil, fmt.Errorf("source path is not a regular file: %s", path)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	opened, err := file.Stat()
-	if err != nil {
-		_ = file.Close()
-		return nil, err
-	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
-		_ = file.Close()
-		return nil, fmt.Errorf("source file changed while opening: %s", path)
-	}
-
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 1024), maximumSourceLineBytes)
 	var lines []string
@@ -172,30 +147,267 @@ func readLines(path string) ([]string, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		_ = file.Close()
-		return nil, err
+		return nil, "", err
 	}
+	if err := r.verifyRelativeRegularFileUnchanged(clean, file, opened); err != nil {
+		_ = file.Close()
+		return nil, "", err
+	}
+	if err := file.Close(); err != nil {
+		return nil, "", err
+	}
+	return lines, clean, nil
+}
+
+func cleanRepositoryPath(relative string) (string, error) {
+	native := filepath.FromSlash(relative)
+	if relative == "" ||
+		(filepath.Separator == '\\' && strings.Contains(relative, `\`)) ||
+		strings.ContainsRune(relative, '\x00') ||
+		path.IsAbs(relative) ||
+		filepath.IsAbs(native) ||
+		filepath.VolumeName(native) != "" {
+		return "", fmt.Errorf("repository path must be a nonempty relative slash path: %q", relative)
+	}
+	clean := path.Clean(relative)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("repository path escapes the root: %q", relative)
+	}
+	return filepath.ToSlash(clean), nil
+}
+
+func (r *RepoView) openRelativeRegularFile(
+	relative string,
+) (*os.File, os.FileInfo, string, error) {
+	clean, err := cleanRepositoryPath(relative)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	root, err := r.openVerifiedRoot()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	native := filepath.FromSlash(clean)
+	components := strings.Split(native, string(filepath.Separator))
+	root, err = descendVerifiedDirectories(
+		root,
+		components[:len(components)-1],
+		relative,
+	)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	defer func() {
+		_ = root.Close()
+	}()
+
+	name := components[len(components)-1]
+	before, err := root.Lstat(name)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("inspect repository path %q: %w", relative, err)
+	}
+	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, "", fmt.Errorf("repository path is not a regular file: %q", relative)
+	}
+	file, err := root.OpenFile(name, regularFileOpenFlags(), 0)
+	if err != nil {
+		return nil, nil, "", fmt.Errorf("open repository path %q: %w", relative, err)
+	}
+	opened, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, "", err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		_ = file.Close()
+		return nil, nil, "", fmt.Errorf("repository file changed while opening: %q", relative)
+	}
+	return file, opened, clean, nil
+}
+
+func descendVerifiedDirectories(
+	root *os.Root,
+	components []string,
+	relative string,
+) (*os.Root, error) {
+	for _, component := range components {
+		before, statErr := root.Lstat(component)
+		if statErr != nil {
+			_ = root.Close()
+			return nil, fmt.Errorf(
+				"inspect repository path %q: %w", relative, statErr,
+			)
+		}
+		if !before.IsDir() || before.Mode()&os.ModeSymlink != 0 {
+			_ = root.Close()
+			return nil, fmt.Errorf(
+				"repository path %q traverses a non-directory or symbolic link", relative,
+			)
+		}
+		next, openErr := root.OpenRoot(component)
+		if openErr != nil {
+			_ = root.Close()
+			return nil, fmt.Errorf(
+				"open repository path %q: %w", relative, openErr,
+			)
+		}
+		after, statErr := next.Stat(".")
+		if statErr != nil {
+			_ = next.Close()
+			_ = root.Close()
+			return nil, fmt.Errorf(
+				"verify repository path %q: %w", relative, statErr,
+			)
+		}
+		if !after.IsDir() || !os.SameFile(before, after) {
+			_ = next.Close()
+			_ = root.Close()
+			return nil, fmt.Errorf(
+				"repository path %q changed while opening", relative,
+			)
+		}
+		if err := root.Close(); err != nil {
+			_ = next.Close()
+			return nil, fmt.Errorf(
+				"close repository path %q: %w", relative, err,
+			)
+		}
+		root = next
+	}
+	return root, nil
+}
+
+func (r *RepoView) openVerifiedRoot() (*os.Root, error) {
+	root, err := os.OpenRoot(r.root)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, fmt.Errorf("inspect repository root: %w", err)
+	}
+	if !opened.IsDir() || !os.SameFile(r.rootInfo, opened) {
+		_ = root.Close()
+		return nil, errRepositoryRootChanged
+	}
+	return root, nil
+}
+
+func (r *RepoView) openRelativeDirectory(
+	relative string,
+) (*os.Root, os.FileInfo, error) {
+	root, err := r.openVerifiedRoot()
+	if err != nil {
+		return nil, nil, err
+	}
+	if relative != "." {
+		clean, cleanErr := cleanRepositoryPath(relative)
+		if cleanErr != nil {
+			_ = root.Close()
+			return nil, nil, cleanErr
+		}
+		components := strings.Split(
+			filepath.FromSlash(clean),
+			string(filepath.Separator),
+		)
+		root, err = descendVerifiedDirectories(root, components, relative)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+	opened, err := root.Stat(".")
+	if err != nil {
+		_ = root.Close()
+		return nil, nil, err
+	}
+	return root, opened, nil
+}
+
+func (r *RepoView) verifyRootIdentity() error {
+	root, err := r.openVerifiedRoot()
+	if err != nil {
+		return err
+	}
+	return root.Close()
+}
+
+func (r *RepoView) verifyRelativeRegularFileUnchanged(
+	relative string,
+	file *os.File,
+	opened os.FileInfo,
+) error {
 	finished, err := file.Stat()
 	if err != nil {
-		_ = file.Close()
-		return nil, err
+		return err
 	}
-	after, err := os.Lstat(path)
+	afterFile, after, _, err := r.openRelativeRegularFile(relative)
 	if err != nil {
-		_ = file.Close()
-		return nil, err
+		return err
+	}
+	if err := afterFile.Close(); err != nil {
+		return err
 	}
 	if !os.SameFile(opened, finished) ||
 		!os.SameFile(opened, after) ||
-		after.Mode()&os.ModeSymlink != 0 ||
 		opened.Size() != finished.Size() ||
 		!opened.ModTime().Equal(finished.ModTime()) {
-		_ = file.Close()
-		return nil, fmt.Errorf("source file changed while reading: %s", path)
+		return fmt.Errorf("repository file changed while reading: %q", relative)
+	}
+	return nil
+}
+
+func (r *RepoView) validateRelativeRegularFile(relative string) (string, error) {
+	file, _, clean, err := r.openRelativeRegularFile(relative)
+	if err != nil {
+		return "", err
 	}
 	if err := file.Close(); err != nil {
-		return nil, err
+		return "", err
 	}
-	return lines, nil
+	return clean, nil
+}
+
+func (r *RepoView) snapshotRelativeRegularFile(
+	relative, snapshotPath string,
+	bytesRemaining *int64,
+) error {
+	source, opened, clean, err := r.openRelativeRegularFile(relative)
+	if err != nil {
+		return err
+	}
+	defer source.Close()
+	if opened.Size() < 0 || opened.Size() > *bytesRemaining {
+		return fmt.Errorf("%w: %q", errSnapshotBudget, relative)
+	}
+
+	destination, err := os.OpenFile(
+		snapshotPath,
+		os.O_WRONLY|os.O_CREATE|os.O_EXCL,
+		opened.Mode().Perm(),
+	)
+	if err != nil {
+		return err
+	}
+	copied, copyErr := io.CopyN(destination, source, *bytesRemaining+1)
+	closeErr := destination.Close()
+	if copyErr != nil && !errors.Is(copyErr, io.EOF) {
+		return copyErr
+	}
+	if closeErr != nil {
+		return closeErr
+	}
+	if copied > *bytesRemaining {
+		return fmt.Errorf("%w: %q", errSnapshotBudget, relative)
+	}
+	*bytesRemaining -= copied
+	if err := r.verifyRelativeRegularFileUnchanged(clean, source, opened); err != nil {
+		return err
+	}
+	if err := os.Chmod(snapshotPath, opened.Mode().Perm()); err != nil {
+		return err
+	}
+	return nil
 }
 
 func countSymbolOccurrences(line, symbol string) int {

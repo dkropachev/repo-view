@@ -3327,9 +3327,16 @@ func modulaTreeDefinitions(
 			scopeEnd, _ := modulaLineAndColumn(
 				lineStarts, max(node.startByte, node.endByte-1),
 			)
+			ownedEndLine, ownedEndColumn := modulaLineAndColumn(
+				lineStarts, node.endByte,
+			)
+			if !ownsScope || ownedEndLine != scopeEnd {
+				ownedEndColumn = 0
+			}
 			definitions = append(definitions, sourceDefinition{
 				symbol: source[child.startByte:child.endByte], line: line, column: column,
-				scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+				scopeStart: scopeStart, scopeEnd: scopeEnd,
+				ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 			})
 		}
 		_ = index
@@ -3435,7 +3442,13 @@ func modulaSortUniqueDefinitions(
 					*last = definition
 				} else if definition.ownsScope == last.ownsScope {
 					last.scopeStart = min(last.scopeStart, definition.scopeStart)
-					last.scopeEnd = max(last.scopeEnd, definition.scopeEnd)
+					if definition.scopeEnd > last.scopeEnd {
+						last.scopeEnd = definition.scopeEnd
+						last.ownedEndColumn = definition.ownedEndColumn
+					} else if definition.scopeEnd == last.scopeEnd &&
+						last.ownedEndColumn == 0 {
+						last.ownedEndColumn = definition.ownedEndColumn
+					}
 				}
 				continue
 			}

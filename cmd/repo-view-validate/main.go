@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/dkropachev/repo-view/repoview"
 )
@@ -353,11 +354,9 @@ func validateRepo(root string, cases int) (int, error) {
 }
 
 func readSourceFiles(root string) ([]fileData, error) {
-	extensions := map[string]bool{
-		".c": true, ".cc": true, ".cjs": true, ".cpp": true, ".cs": true, ".def": true,
-		".go": true, ".h": true, ".hpp": true, ".java": true, ".js": true, ".jsx": true,
-		".kt": true, ".kts": true, ".mjs": true, ".py": true, ".rs": true, ".swift": true,
-		".ts": true, ".tsx": true, ".mts": true, ".cts": true, ".mod": true,
+	extensions := make(map[string]bool)
+	for _, extension := range repoview.SupportedExtensions() {
+		extensions[extension] = true
 	}
 	excludes := map[string]bool{
 		".cache": true, ".git": true, ".hg": true, ".svn": true, ".venv": true,
@@ -566,18 +565,35 @@ func independentContainsSymbol(line, symbol string) bool {
 			return false
 		}
 		pos := start + idx
-		beforeOK := pos == 0 || !independentIdent(rune(line[pos-1]))
+		before, _ := utf8.DecodeLastRuneInString(line[:pos])
+		beforeOK := pos == 0 || !independentIdent(before)
 		after := pos + len(symbol)
-		afterOK := after >= len(line) || !independentIdent(rune(line[after]))
+		afterRune, _ := utf8.DecodeRuneInString(line[after:])
+		afterOK := after >= len(line) || !independentIdent(afterRune)
 		if beforeOK && afterOK {
 			return true
 		}
-		start = pos + 1
+		_, size := utf8.DecodeRuneInString(line[pos:])
+		if size < 1 {
+			size = 1
+		}
+		start = pos + size
 	}
 }
 
 func independentIdent(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
+	return r == '_' || unicode.In(
+		r,
+		unicode.L,
+		unicode.Nl,
+		unicode.Nd,
+		unicode.Mn,
+		unicode.Mc,
+		unicode.Pc,
+		unicode.Cf,
+		unicode.Other_ID_Start,
+		unicode.Other_ID_Continue,
+	)
 }
 
 func isKeyword(symbol string) bool {

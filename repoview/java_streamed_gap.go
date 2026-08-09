@@ -863,6 +863,7 @@ func analyzeJavaStreamedGapMode(
 					pendingScopeCount -= len(context.pendingStatement)
 					pendingOwnerCount -= len(context.pendingOwners)
 					endLine, _ := positions.lineColumn(max(token.start, token.end-1))
+					exactEnd := javaTokenIsExactPunctuation(lexed.input, token, '}')
 					if context.switchBody {
 						appendSwitchLabelScope(&context, context.switchLastEnd)
 					}
@@ -870,6 +871,9 @@ func analyzeJavaStreamedGapMode(
 					if recoverCrossBoundary && spansGap {
 						for _, definition := range context.pendingOwners {
 							definition.scopeEnd = max(definition.line, endLine)
+							definition.ownedEndColumn = javaExactOwnedEndColumn(
+								positions, definition.scopeEnd, token.end, exactEnd,
+							)
 							definitions = append(definitions, definition)
 							scopes = append(scopes, javaLineScope{
 								start: definition.scopeStart, end: definition.scopeEnd,
@@ -882,6 +886,9 @@ func analyzeJavaStreamedGapMode(
 						}
 						definitions[owner].scopeEnd = max(
 							definitions[owner].line, endLine,
+						)
+						definitions[owner].ownedEndColumn = javaExactOwnedEndColumn(
+							positions, definitions[owner].scopeEnd, token.end, exactEnd,
 						)
 						scopes = append(scopes, javaLineScope{
 							start: definitions[owner].scopeStart,

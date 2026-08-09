@@ -241,10 +241,10 @@ func analyzeModulaLexically(source string, lineCount int) modulaLexicalAnalysis 
 	if parser.ownerOverflow > 0 || parser.unmatchedDirective {
 		parser.clearHeader()
 	} else {
-		parser.finishHeader(parser.lineCount, "")
+		parser.finishHeader(parser.lineCount, "", 0)
 	}
 	for len(parser.frames) > 1 {
-		parser.closeNamedFrame("", parser.lineCount, "")
+		parser.closeNamedFrame("", parser.lineCount, "", 0)
 	}
 	for len(parser.controls) > 0 {
 		control := parser.controls[len(parser.controls)-1]
@@ -354,12 +354,12 @@ func (parser *modulaRecoveryParser) accept(token modulaToken) {
 		if len(parser.header) == 0 && !parser.headerOverflow {
 			parser.currentFrame().declarationPhase = 2
 		}
-		parser.finishHeader(line, ";")
+		parser.finishHeader(line, ";", token.end)
 		return
 	}
 	if token.text == "." && len(parser.header) > 0 &&
 		parser.header[0].text == "END" {
-		parser.finishHeader(line, ".")
+		parser.finishHeader(line, ".", token.end)
 		return
 	}
 	parser.appendHeader(token)
@@ -549,7 +549,7 @@ func (parser *modulaRecoveryParser) finishInvalidBodyEnd(line int) bool {
 	parser.invalidBody = false
 	parser.invalidBodyOwner = false
 	if closeOwner && len(parser.frames) > 1 {
-		parser.closeNamedFrame(parser.currentFrame().name, line, "")
+		parser.closeNamedFrame(parser.currentFrame().name, line, "", 0)
 	}
 	return true
 }
@@ -665,7 +665,7 @@ func (parser *modulaRecoveryParser) acceptBody(token modulaToken, line int) {
 		parser.pendingBareBodyEnd = false
 		parser.pendingBareBodyEndLine = 0
 		if modulaRecoveryOwnerRestartToken(token.text) {
-			parser.closeNamedFrame(parser.currentFrame().name, pendingLine, "")
+			parser.closeNamedFrame(parser.currentFrame().name, pendingLine, "", 0)
 			parser.accept(token)
 			return
 		}
@@ -675,13 +675,13 @@ func (parser *modulaRecoveryParser) acceptBody(token modulaToken, line int) {
 		switch {
 		case token.lineStart && token.text == "END":
 			// A bare control END may be followed immediately by its owner's END.
-			parser.finishBodyEnd(line-1, "")
+			parser.finishBodyEnd(line-1, "", 0)
 			if len(parser.frames) < frameDepth {
 				parser.accept(token)
 				return
 			}
 		case token.text == ";" || token.text == ".":
-			parser.finishBodyEnd(line, token.text)
+			parser.finishBodyEnd(line, token.text, token.end)
 			return
 		case len(parser.header) == 1 && token.kind == modulaTokenIdentifier &&
 			(!modulaKeyword(token.text) || parser.currentFrame().invalid &&
@@ -689,7 +689,7 @@ func (parser *modulaRecoveryParser) acceptBody(token modulaToken, line int) {
 			parser.appendHeader(token)
 			return
 		default:
-			parser.finishBodyEnd(line, "")
+			parser.finishBodyEnd(line, "", 0)
 			if len(parser.frames) < frameDepth {
 				parser.accept(token)
 				return
@@ -2028,7 +2028,11 @@ func (parser *modulaRecoveryParser) headerBlockStart(
 	return -1
 }
 
-func (parser *modulaRecoveryParser) finishHeader(line int, terminator string) {
+func (parser *modulaRecoveryParser) finishHeader(
+	line int,
+	terminator string,
+	terminatorEnd int,
+) {
 	if parser.headerOverflow {
 		parser.finishOverflowHeader(line)
 		return
@@ -2040,12 +2044,12 @@ func (parser *modulaRecoveryParser) finishHeader(line int, terminator string) {
 	}
 	if header[0].text == "END" {
 		if len(header) == 2 && header[1].kind == modulaTokenIdentifier {
-			parser.closeNamedFrame(header[1].text, line, terminator)
+			parser.closeNamedFrame(header[1].text, line, terminator, terminatorEnd)
 		}
 		return
 	}
 	if header[0].text == "FORWARD" && parser.currentFrame().procedure {
-		parser.closeNamedFrame(parser.currentFrame().name, line, "")
+		parser.closeNamedFrame(parser.currentFrame().name, line, "", 0)
 		return
 	}
 	if modulaRecoveryModuleHeader(header) {
@@ -2341,7 +2345,11 @@ func (parser *modulaRecoveryParser) addTypeMemberDefinitions(
 	}
 }
 
-func (parser *modulaRecoveryParser) finishBodyEnd(line int, terminator string) {
+func (parser *modulaRecoveryParser) finishBodyEnd(
+	line int,
+	terminator string,
+	terminatorEnd int,
+) {
 	header := parser.header
 	parser.header = nil
 	if len(header) == 1 {
@@ -2355,7 +2363,7 @@ func (parser *modulaRecoveryParser) finishBodyEnd(line int, terminator string) {
 		return
 	}
 	if len(header) == 2 && header[1].kind == modulaTokenIdentifier {
-		parser.closeNamedFrame(header[1].text, line, terminator)
+		parser.closeNamedFrame(header[1].text, line, terminator, terminatorEnd)
 		parser.statementStart = true
 	}
 }
@@ -2364,6 +2372,7 @@ func (parser *modulaRecoveryParser) closeNamedFrame(
 	name string,
 	line int,
 	terminator string,
+	terminatorEnd int,
 ) {
 	if len(parser.frames) <= 1 {
 		return
@@ -2384,6 +2393,13 @@ func (parser *modulaRecoveryParser) closeNamedFrame(
 			definition.ownsScope = true
 			definition.scopeStart = frame.start
 			definition.scopeEnd = max(frame.start, line)
+			ownedEndLine, ownedEndColumn := modulaLineAndColumn(
+				parser.lineStarts, terminatorEnd,
+			)
+			if terminatorEnd <= 0 || ownedEndLine != definition.scopeEnd {
+				ownedEndColumn = 0
+			}
+			definition.ownedEndColumn = ownedEndColumn
 			parser.addScope(frame.start, line)
 		}
 	}

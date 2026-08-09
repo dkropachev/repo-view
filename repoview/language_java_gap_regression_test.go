@@ -76,7 +76,10 @@ func javaAssertGapRegressionParity(t *testing.T, fixture string) {
 
 	want := javaGapRegressionSnapshotWithin(baseline, 1, fixtureLines)
 	got := javaGapRegressionSnapshotWithin(gap, 2, fixtureLines)
-	if !reflect.DeepEqual(got.definitions, want.definitions) {
+	if !reflect.DeepEqual(
+		javaDefinitionSummaries(got.definitions),
+		javaDefinitionSummaries(want.definitions),
+	) {
 		t.Errorf("definition parity mismatch\nbaseline: %#v\ngap:      %#v",
 			want.definitions, got.definitions)
 	}

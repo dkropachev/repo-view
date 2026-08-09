@@ -158,6 +158,155 @@ func TestScopeForCommentBetweenBraceBlocksContainsHitLine(t *testing.T) {
 	assertLocations(t, response.Results, []string{"found.c:5-5"})
 }
 
+func TestInspectGenericBraceFallbackPreservesQuotedCommentText(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "fixture.xyz", `function run() {
+  const block = "/* not a comment */";
+  const line = "https://example.test/path";
+	const joined = left/* separator */right;
+  // remove this comment
+	return block + line + joined;
+}
+`)
+
+	view := mustView(t, root)
+	response, err := view.Inspect("fixture.xyz:2", Options{
+		Include:      IncludeScope,
+		Return:       ReturnScope,
+		DropComments: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results = %#v", response.Results)
+	}
+	code := response.Results[0].Code
+	if !strings.Contains(code, `"/* not a comment */"`) ||
+		!strings.Contains(code, `"https://example.test/path"`) ||
+		!strings.Contains(code, "left right") ||
+		strings.Contains(code, "remove this comment") {
+		t.Fatalf("cleaned generic scope = %q", code)
+	}
+}
+
+func TestGenericCommentCleanerPreservesBacktickText(t *testing.T) {
+	source := "const template = `/* template text */`; // remove this"
+	if got := dropCLikeComments(source); got != "const template = `/* template text */`; " {
+		t.Fatalf("cleaned backtick source = %q", got)
+	}
+}
+
+func TestGenericCommentCleanerResynchronizesUnterminatedLineQuotes(t *testing.T) {
+	source := "const broken = \"unterminated\n// remove this\nconst visible = true;"
+	want := "const broken = \"unterminated\n\nconst visible = true;"
+	if got := dropCLikeComments(source); got != want {
+		t.Fatalf("cleaned unterminated quoted source = %q, want %q", got, want)
+	}
+}
+
+func TestInspectGenericBraceFallbackIgnoresCommentBraces(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "fixture.xyz", `function run() {
+  /* } is not syntax */
+  target();
+  // { is not syntax either
+}
+`)
+
+	view := mustView(t, root)
+	response, err := view.Inspect(
+		"fixture.xyz:3",
+		Options{Include: IncludeScope, Return: ReturnScope},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 {
+		t.Fatalf("results = %#v", response.Results)
+	}
+	result := response.Results[0]
+	if result.StartLine != 1 || result.EndLine != 5 ||
+		!strings.Contains(result.Code, "function run()") ||
+		!strings.Contains(result.Code, "target()") {
+		t.Fatalf("generic comment-brace scope = %#v", result)
+	}
+}
+
+func TestInspectGenericBraceFallbackIgnoresBacktickLiteralBraces(t *testing.T) {
+	tests := []struct {
+		name       string
+		source     string
+		targetLine int
+		wantEnd    int
+	}{
+		{
+			name: "single line",
+			source: "function run() {\n" +
+				"  const text = `}`;\n" +
+				"  target();\n" +
+				"}\n",
+			targetLine: 3,
+			wantEnd:    4,
+		},
+		{
+			name: "multiline",
+			source: "function run() {\n" +
+				"  const text = `\n" +
+				"    {\n" +
+				"  `;\n" +
+				"  target();\n" +
+				"}\n",
+			targetLine: 5,
+			wantEnd:    6,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "fixture.xyz", test.source)
+
+			view := mustView(t, root)
+			response, err := view.Inspect(
+				fmt.Sprintf("fixture.xyz:%d", test.targetLine),
+				Options{Include: IncludeScope, Return: ReturnScope},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Results) != 1 {
+				t.Fatalf("results = %#v", response.Results)
+			}
+			result := response.Results[0]
+			if result.StartLine != 1 || result.EndLine != test.wantEnd ||
+				!strings.Contains(result.Code, "function run()") ||
+				!strings.Contains(result.Code, "target()") {
+				t.Fatalf("generic backtick-brace scope = %#v", result)
+			}
+		})
+	}
+}
+
+func TestPreparedGenericBraceScopeReusesStructuralSource(t *testing.T) {
+	lines := strings.Split("function run() {\n  /* } */\n  target();\n}\n", "\n")
+	backend := prepareLanguageBackend(newBraceLanguage("xyz"), lines)
+	prepared, ok := backend.(braceLanguage)
+	if !ok || len(prepared.structuralLines) != len(lines) {
+		t.Fatalf("prepared generic backend = %#v", backend)
+	}
+	var start, end int
+	allocations := testing.AllocsPerRun(100, func() {
+		start, end = prepared.enclosingScope(lines, 3)
+	})
+	if start != 1 || end != 4 {
+		t.Fatalf("prepared generic scope = %d-%d, want 1-4", start, end)
+	}
+	if allocations != 0 {
+		t.Fatalf("prepared generic scope allocated %.2f objects per hit", allocations)
+	}
+}
+
 func mustView(t *testing.T, root string) *RepoView {
 	t.Helper()
 	view, err := New(root)

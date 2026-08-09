@@ -49,6 +49,21 @@ func TestReturnLocationsMapsToNoEmbeddedCode(t *testing.T) {
 	}
 }
 
+func TestCommonFlagsPreserveExplicitZeroContext(t *testing.T) {
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	common := addCommonFlags(flags, repoview.ReturnScope)
+	if err := flags.Parse([]string{"--return", "locations", "--context", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	options, err := common.buildOptions(repoview.IncludeBoth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Context != 0 || !options.ContextSet {
+		t.Fatalf("context = %d, context set = %t", options.Context, options.ContextSet)
+	}
+}
+
 func TestFenceLanguageCoversJavaScriptAndTypeScriptExtensions(t *testing.T) {
 	t.Parallel()
 
@@ -99,6 +114,35 @@ func TestFenceLanguageCoversModulaSourceExtensions(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversCSharpAndRegisteredCPPExtensions(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"Source.cs", "Script.csx"} {
+		if got := fenceLanguage(path); got != "csharp" {
+			t.Fatalf("fenceLanguage(%q) = %q, want csharp", path, got)
+		}
+	}
+	for _, path := range []string{
+		"source.CXX", "source.c++", "header.HXX", "template.tpp", "module.cppm",
+	} {
+		if got := fenceLanguage(path); got != "cpp" {
+			t.Fatalf("fenceLanguage(%q) = %q, want cpp", path, got)
+		}
+	}
+}
+
+func TestPrintResultsUsesFenceLongerThanEmbeddedBackticks(t *testing.T) {
+	output := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path: "found.go", StartLine: 1, EndLine: 3,
+			Code: "before\n```\nafter",
+		}}, repoview.ReturnScope)
+	})
+	if !strings.Contains(output, "````go\nbefore\n```\nafter\n````\n") {
+		t.Fatalf("adaptive fenced output = %q", output)
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{
@@ -123,6 +167,74 @@ func TestPrintLocationsUsesRangeStartWithoutPointLine(t *testing.T) {
 	})
 	if output != "found.go:4\n" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestPrintResultsEscapesControlCharactersInRepositoryPaths(t *testing.T) {
+	const hostilePath = "safe.go\n\x1b[31m# injected"
+	const escapedPath = `"safe.go\n\x1b[31m# injected"`
+
+	locations := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path: hostilePath,
+			Line: 7,
+		}}, repoview.ReturnLocations)
+	})
+	if locations != escapedPath+":7\n" {
+		t.Fatalf("location output = %q", locations)
+	}
+
+	scopes := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path:      hostilePath,
+			StartLine: 4,
+			EndLine:   6,
+			Code:      "safe code",
+		}}, repoview.ReturnScope)
+	})
+	if !strings.HasPrefix(scopes, "# "+escapedPath+":4-6\n") ||
+		strings.Contains(scopes, "\n\x1b[31m# injected") {
+		t.Fatalf("scope output = %q", scopes)
+	}
+}
+
+func TestPrintChangedResponseEscapesControlCharactersInMetadata(t *testing.T) {
+	output := captureStdout(t, func() {
+		printChangedResponse(repoview.ChangedResponse{
+			HeadCommit:  "abc123",
+			HeadSubject: "safe\n# injected\x1b[31m",
+			Base:        "main\x1b[2J",
+			BaseCommit:  "def456",
+		}, repoview.ReturnLocations)
+	})
+	if strings.Contains(output, "\n# injected") || strings.ContainsRune(output, '\x1b') ||
+		!strings.Contains(output, `"safe\n# injected\x1b[31m"`) ||
+		!strings.Contains(output, `"main\x1b[2J"`) {
+		t.Fatalf("changed metadata output = %q", output)
+	}
+}
+
+func TestSingleInspectErrorEscapesControlCharactersInPath(t *testing.T) {
+	root := t.TempDir()
+	const name = "hostile\n\x1b[31m.go"
+	if err := os.WriteFile(
+		filepath.Join(root, name),
+		[]byte("package demo\n"),
+		0o600,
+	); err != nil {
+		t.Skipf("control-character filenames unavailable: %v", err)
+	}
+
+	status := 0
+	output := captureStderr(t, func() {
+		status = run([]string{
+			"inspect", name + ":99", "--root", root, "--return", "line",
+		})
+	})
+	if status != 1 || strings.ContainsRune(output, '\x1b') ||
+		strings.Contains(output, "hostile\n") ||
+		!strings.Contains(output, `hostile\n\x1b[31m.go`) {
+		t.Fatalf("status = %d, stderr = %q", status, output)
 	}
 }
 
@@ -343,6 +455,13 @@ func TestOptionCapRejectsZeroValueBypasses(t *testing.T) {
 	if err := enforceOptionCap("--max-code-lines", 0, "REPO_VIEW_MAX_CODE_LINES_CAP"); err == nil ||
 		!strings.Contains(err.Error(), "use --return locations to omit code") {
 		t.Fatalf("code error = %v", err)
+	}
+}
+
+func TestContextCapAllowsExplicitZero(t *testing.T) {
+	t.Setenv("REPO_VIEW_CONTEXT_CAP", "0")
+	if err := enforceOptionCap("--context", 0, "REPO_VIEW_CONTEXT_CAP"); err != nil {
+		t.Fatalf("explicit zero context rejected: %v", err)
 	}
 }
 
@@ -1297,6 +1416,32 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = writer
 	defer func() {
 		os.Stdout = previous
+	}()
+
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(output)
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	previous := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = previous
 	}()
 
 	fn()
