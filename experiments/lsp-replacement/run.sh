@@ -229,10 +229,17 @@ case "${generation_model_mode}" in
   pinned)
     generation_model="${generation_model:-gpt-5.6-sol}"
     generation_model_args=(-m "${generation_model}")
+    generation_model_configuration=pinned
     ;;
   router)
+    if [[ -n "${generation_model}" ]]; then
+      printf '%s\n' \
+        '--model/LSP_MODEL requires --model-mode pinned; router mode configures no model' >&2
+      exit 2
+    fi
     generation_model="router-selected"
     generation_model_args=()
+    generation_model_configuration=none
     ;;
   *)
     printf 'invalid --model-mode: %s\n' "${generation_model_mode}" >&2
@@ -870,6 +877,10 @@ validate_baseline_run() {
   validate_baseline_manifest_field "${manifest}" base_commit "${resolved_base}"
   validate_baseline_manifest_field "${manifest}" base_ref "${base_ref}"
   validate_baseline_manifest_field "${manifest}" model "${generation_model}"
+  validate_baseline_manifest_field \
+    "${manifest}" model_mode "${generation_model_mode}"
+  validate_baseline_manifest_field \
+    "${manifest}" model_configuration "${generation_model_configuration}"
   validate_baseline_manifest_field \
     "${manifest}" codex_version "${expected_codex_version}"
   validate_baseline_manifest_field \
@@ -2897,7 +2908,7 @@ write_run_manifest() {
   --arg prompt_commit "${prompt_commit}" \
   --arg model "${generation_model}" \
   --arg model_mode "${generation_model_mode}" \
-  --arg model_configuration "$([[ "${generation_model_mode}" == "router" ]] && printf none || printf pinned)" \
+  --arg model_configuration "${generation_model_configuration}" \
   --arg codex_version "${actual_codex_version}" \
   --arg generation_isolation "${generation_isolation}" \
   --arg generation_config_sha256 "${generation_config_sha256}" \
@@ -3031,8 +3042,9 @@ run_case() {
     stem="optimized-${case_profile}-${case_task}"
     if [[ "${mode}" == "prepare" ]]; then
       navigation_prompt_guard="$(cat <<EOF
-MANDATORY experiment navigation protocol: your first repository command must be exactly:
+MANDATORY experiment navigation protocol: your first command execution must be exactly:
 repo-view changed --root . --base ${resolved_base} --return ${profile_return} --context ${profile_context} --limit ${profile_limit} --max-code-lines ${profile_max_code} --max-patch-lines ${profile_max_patch} --json
+Do not execute any command before it.
 Use repo-view for repository source navigation. Do not use git, rg, grep, sed, cat, nl, head, tail, find, ls, or direct file reads under the repository root. Shell commands are allowed only for tests or for dependency and standard-library evidence outside the repository after repo-view has supplied the repository evidence. This protocol is part of the task and its mechanical validation; an answer produced after bypassing it is invalid.
 Do not run repo-view --help or any subcommand --help, and do not experiment with unsupported flags such as --related. A rejected attempt still invalidates the run. Every find, inspect, and outline command must include --root ., --context 20 or less, --limit ${profile_limit} or less, --max-code-lines ${profile_max_code} or less, --max-patch-lines ${profile_max_patch} or less, and --json. Valid forms are:
 - repo-view find SYMBOL... --root . --include defs|refs|both --return locations|line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json

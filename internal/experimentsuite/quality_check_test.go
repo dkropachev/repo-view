@@ -200,6 +200,40 @@ func TestQualityCheckUsesJQMultilineRegexSemantics(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONDigestMatchesJQForUnicodeSeparators(t *testing.T) {
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("canonical JSON digest test requires jq: %v", err)
+	}
+	const document = `{"root":"/tmp/source","separators":"line\u2028paragraph\u2029end","literal":"\\u2028 and \\u2029"}`
+	const filter = `
+def normalize_roots:
+  if type == "object" then
+    with_entries(.value |= normalize_roots)
+    | if has("root") then .root = "<target-root>" else . end
+  elif type == "array" then
+    map(normalize_roots)
+  else
+    .
+  end;
+normalize_roots
+`
+	command := exec.Command(jqPath, "-cS", filter)
+	command.Stdin = strings.NewReader(document)
+	canonical, err := command.Output()
+	if err != nil {
+		t.Fatalf("jq canonicalization failed: %v", err)
+	}
+	for _, separator := range []string{"\u2028", "\u2029"} {
+		if !strings.Contains(string(canonical), separator) {
+			t.Fatalf("jq output omits literal separator %U: %q", []rune(separator)[0], canonical)
+		}
+	}
+	if got, want := canonicalJSONDigest([]byte(document), true), sha256Bytes(canonical); got != want {
+		t.Fatalf("Go canonical digest = %s, jq digest = %s; jq=%q", got, want, canonical)
+	}
+}
+
 func TestQualityCheckJudgePromptAndTaskPromptDigestBinding(t *testing.T) {
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
@@ -326,9 +360,10 @@ func TestQualityCheckJudgeCacheAndArtifactSelection(t *testing.T) {
 		},
 	})
 	writeJSON(t, filepath.Join(runDir, "changed-packet.json"), map[string]any{
-		"root":        targetRoot,
-		"head_commit": head,
-		"base_commit": head,
+		"root":               targetRoot,
+		"head_commit":        head,
+		"base_commit":        head,
+		"unicode_separators": "line\u2028paragraph\u2029end",
 	})
 	writeJSON(t, filepath.Join(runDir, "manifest.json"), map[string]any{
 		"schema_version":    1,
@@ -467,6 +502,10 @@ func TestQualityCheckJudgeCacheAndArtifactSelection(t *testing.T) {
 	if err := os.WriteFile(countPath, []byte("0\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	invocationCountPath := filepath.Join(runDir, "codex-invocation-count")
+	if err := os.WriteFile(invocationCountPath, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	exitStatusPath := filepath.Join(runDir, "codex-exit-status")
 	if err := os.WriteFile(exitStatusPath, []byte("0\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -478,6 +517,9 @@ func TestQualityCheckJudgeCacheAndArtifactSelection(t *testing.T) {
 	fakeCodex := `#!/bin/sh
 set -eu
 fixture_root="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+invocation_count="$(sed -n '1p' "$fixture_root/codex-invocation-count")"
+invocation_count=$((invocation_count + 1))
+printf '%s\n' "$invocation_count" > "$fixture_root/codex-invocation-count"
 if [ -n "${OPENAI_API_KEY+x}${CODEX_HOSTILE+x}${HTTPS_PROXY+x}${RUST_LOG+x}" ]; then
   exit 86
 fi
@@ -665,6 +707,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 			strings.HasPrefix(variable, "GIT_CONFIG_GLOBAL=") ||
 			strings.HasPrefix(variable, "QUALITY_HOOK_MARKER=") ||
 			strings.HasPrefix(variable, "QUALITY_FSMONITOR_MARKER=") ||
+			strings.HasPrefix(variable, "LSP_JUDGE_MODEL=") ||
 			strings.HasPrefix(variable, "LSP_JUDGE_MODEL_MODE=") {
 			continue
 		}
@@ -825,6 +868,14 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 			t.Fatal(err)
 		}
 	}
+	codexInvocationCount := func() string {
+		t.Helper()
+		content, err := os.ReadFile(invocationCountPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(string(content))
+	}
 
 	command := qualityCheckCommand("1", "--enforce")
 	output, err := command.CombinedOutput()
@@ -879,10 +930,189 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 	); err != nil {
 		t.Fatalf("script aggregate is not consumable: %v", err)
 	}
+	qualityDir := filepath.Join(runDir, "quality")
+	inputsPath := filepath.Join(qualityDir, "inputs.json")
+	aggregateQualityPath := filepath.Join(qualityDir, "quality.json")
+	markerPath := filepath.Join(qualityDir, "aggregate-manifest.json")
+	originalInputs, err := os.ReadFile(inputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalQuality, err := os.ReadFile(aggregateQualityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalMarker, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var emptyVerdictQuality map[string]any
+	var emptyVerdictMarker map[string]any
+	if json.Unmarshal(originalQuality, &emptyVerdictQuality) != nil ||
+		json.Unmarshal(originalMarker, &emptyVerdictMarker) != nil {
+		t.Fatal("decode verdict integrity fixture")
+	}
+	emptyVerdictQuality["verdicts"] = []any{}
+	writeJSON(t, aggregateQualityPath, emptyVerdictQuality)
+	emptyQualityDigest, err := sha256File(aggregateQualityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyVerdictMarker["files"].(map[string]any)["quality.json"] =
+		emptyQualityDigest
+	writeJSON(t, markerPath, emptyVerdictMarker)
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "verdicts disagree") {
+		t.Fatalf("empty quality verdicts error = %v", err)
+	}
+	if err := os.WriteFile(aggregateQualityPath, originalQuality, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(markerPath, originalMarker, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	staticPath := filepath.Join(qualityDir, "static.json")
+	originalStatic, err := os.ReadFile(staticPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var flippedStatic map[string]any
+	var flippedQuality map[string]any
+	var flippedMarker map[string]any
+	if json.Unmarshal(originalStatic, &flippedStatic) != nil ||
+		json.Unmarshal(originalQuality, &flippedQuality) != nil ||
+		json.Unmarshal(originalMarker, &flippedMarker) != nil {
+		t.Fatal("decode coherent static integrity fixture")
+	}
+	for _, rawCase := range flippedStatic["cases"].([]any) {
+		current := rawCase.(map[string]any)
+		if current["variant"] == "optimized" {
+			current["accounting_pass"] = false
+			current["navigation_pass"] = false
+			current["required_pass"] = false
+		}
+	}
+	for _, rawComparison := range flippedStatic["comparisons"].([]any) {
+		comparison := rawComparison.(map[string]any)
+		comparison["accounting_pass"] = false
+		comparison["navigation_pass"] = false
+		comparison["required_pass"] = false
+		comparison["static_not_worse"] = false
+	}
+	flippedQuality["static"] = flippedStatic
+	for _, rawVerdict := range flippedQuality["verdicts"].([]any) {
+		verdict := rawVerdict.(map[string]any)
+		verdict["accounting_pass"] = false
+		verdict["navigation_pass"] = false
+		verdict["static_not_worse"] = false
+		verdict["quality_pass"] = false
+	}
+	writeJSON(t, staticPath, flippedStatic)
+	writeJSON(t, aggregateQualityPath, flippedQuality)
+	for name, path := range map[string]string{
+		"static.json": staticPath, "quality.json": aggregateQualityPath,
+	} {
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		flippedMarker["files"].(map[string]any)[name] = digest
+	}
+	writeJSON(t, markerPath, flippedMarker)
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "static.json cases disagree") {
+		t.Fatalf("coherently flipped static aggregate error = %v", err)
+	}
+	for path, content := range map[string][]byte{
+		staticPath: originalStatic, aggregateQualityPath: originalQuality,
+		markerPath: originalMarker,
+	} {
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var fabricatedInputs map[string]any
+	var fabricatedQuality map[string]any
+	var fabricatedMarker map[string]any
+	if json.Unmarshal(originalInputs, &fabricatedInputs) != nil ||
+		json.Unmarshal(originalQuality, &fabricatedQuality) != nil ||
+		json.Unmarshal(originalMarker, &fabricatedMarker) != nil {
+		t.Fatal("decode strict aggregate fixture")
+	}
+	fabricatedInputs["validation"].(map[string]any)["judge_repeats"] = 0
+	fabricatedInputs["validation"].(map[string]any)["enforce"] = true
+	fabricatedQuality["required_judge_count"] = 0
+	for _, rawVerdict := range fabricatedQuality["verdicts"].([]any) {
+		verdict := rawVerdict.(map[string]any)
+		verdict["required_judge_count"] = 0
+		verdict["judge_complete"] = true
+	}
+	writeJSON(t, inputsPath, fabricatedInputs)
+	writeJSON(t, aggregateQualityPath, fabricatedQuality)
+	files := fabricatedMarker["files"].(map[string]any)
+	for name, path := range map[string]string{
+		"inputs.json":  inputsPath,
+		"quality.json": aggregateQualityPath,
+	} {
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = digest
+	}
+	writeJSON(t, markerPath, fabricatedMarker)
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "judge_repeats=0") {
+		t.Fatalf("fabricated zero-repeat strict aggregate error = %v", err)
+	}
+	for path, content := range map[string][]byte{
+		inputsPath: originalInputs, aggregateQualityPath: originalQuality, markerPath: originalMarker,
+	} {
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	runQualityCheck("1")
 	if got := codexCount(); got != "1" {
 		t.Fatalf("unchanged inputs executed codex again: count = %s", got)
+	}
+	beforeReuseInvocations := codexInvocationCount()
+	runQualityCheck("1", "--reuse-judges-only")
+	if got := codexCount(); got != "1" {
+		t.Fatalf("reuse-only executed codex: count = %s", got)
+	}
+	if got := codexInvocationCount(); got != beforeReuseInvocations {
+		t.Fatalf("reuse-only invoked codex (including --version): %s -> %s", beforeReuseInvocations, got)
+	}
+	resultSidecar := filepath.Join(
+		runDir,
+		"quality",
+		"judge-explain-1.result.sha256",
+	)
+	validResultSidecar, err := os.ReadFile(resultSidecar)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(resultSidecar, []byte(strings.Repeat("0", 64)+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	command = qualityCheckCommand("1", "--reuse-judges-only")
+	output, err = command.CombinedOutput()
+	if err == nil || !strings.Contains(
+		string(output),
+		"required reusable judge artifact is missing or invalid",
+	) {
+		t.Fatalf("reuse-only accepted invalid sidecar: %v\n%s", err, output)
+	}
+	if got := codexCount(); got != "1" {
+		t.Fatalf("failed reuse-only executed codex: count = %s", got)
+	}
+	if got := codexInvocationCount(); got != beforeReuseInvocations {
+		t.Fatalf("failed reuse-only invoked codex: %s -> %s", beforeReuseInvocations, got)
+	}
+	if err := os.WriteFile(resultSidecar, validResultSidecar, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	runQualityCheck("01")
 	if got := codexCount(); got != "1" {
@@ -1020,6 +1250,64 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 
 	runQualityCheck("0", "--bind-legacy-judges")
 	assertQualityCheckJudgeAggregate(t, runDir, 2, 2, false)
+	if _, err := SummarizeEvidence(runDir, nil); err != nil {
+		t.Fatalf("legacy attested aggregate is not consumable: %v", err)
+	}
+	legacyAttestationPath := filepath.Join(
+		runDir,
+		"quality",
+		"judge-explain-10.legacy-attestation.json",
+	)
+	legacyInputsPath := filepath.Join(runDir, "quality", "inputs.json")
+	legacyMarkerPath := filepath.Join(runDir, "quality", "aggregate-manifest.json")
+	originalLegacyAttestation, err := os.ReadFile(legacyAttestationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLegacyInputs, err := os.ReadFile(legacyInputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalLegacyMarker, err := os.ReadFile(legacyMarkerPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyAttestationPath, []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var rewrittenLegacyInputs map[string]any
+	var rewrittenLegacyMarker map[string]any
+	if json.Unmarshal(originalLegacyInputs, &rewrittenLegacyInputs) != nil ||
+		json.Unmarshal(originalLegacyMarker, &rewrittenLegacyMarker) != nil {
+		t.Fatal("decode legacy aggregate commitments")
+	}
+	attestationDigest, err := sha256File(legacyAttestationPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrittenLegacyInputs["inputs"].(map[string]any)["quality/judge-explain-10.legacy-attestation.json"] = attestationDigest
+	rewrittenLegacyInputs["snapshots"].(map[string]any)["judges/judge-explain-10.legacy-attestation.json"] = attestationDigest
+	writeJSON(t, legacyInputsPath, rewrittenLegacyInputs)
+	rewrittenInputsDigest, err := sha256File(legacyInputsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewrittenLegacyMarker["files"].(map[string]any)["inputs.json"] =
+		rewrittenInputsDigest
+	writeJSON(t, legacyMarkerPath, rewrittenLegacyMarker)
+	if _, err := SummarizeEvidence(runDir, nil); err == nil ||
+		!strings.Contains(err.Error(), "invalid attestation schema") {
+		t.Fatalf("empty legacy attestation error = %v", err)
+	}
+	for path, content := range map[string][]byte{
+		legacyAttestationPath: originalLegacyAttestation,
+		legacyInputsPath:      originalLegacyInputs,
+		legacyMarkerPath:      originalLegacyMarker,
+	} {
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if _, err := os.Stat(filepath.Join(
 		runDir,
 		"quality",
@@ -1385,6 +1673,27 @@ func TestQualityCheckRejectsInvalidJudgeOptions(t *testing.T) {
 	if got := string(output); got != "invalid --model-mode: automatic\n" {
 		t.Fatalf("invalid model mode output = %q", got)
 	}
+	t.Setenv("LSP_JUDGE_MODEL", "custom-judge")
+	command = exec.Command(
+		bashPath,
+		filepath.Join(
+			repoRoot,
+			"experiments",
+			"lsp-replacement",
+			"quality-check.sh",
+		),
+		t.TempDir(),
+		"--model-mode",
+		"router",
+	)
+	output, err = command.CombinedOutput()
+	if err == nil {
+		t.Fatalf("quality-check silently ignored a configured judge model:\n%s", output)
+	}
+	if got := string(output); got !=
+		"LSP_JUDGE_MODEL requires --model-mode pinned; router mode configures no model\n" {
+		t.Fatalf("router judge model output = %q", got)
+	}
 }
 
 func TestQualityCheckRejectsSymlinkedQualityDirectory(t *testing.T) {
@@ -1608,6 +1917,43 @@ func TestQualityCheckRejectsVacuousAndMismatchedEvidence(t *testing.T) {
 			t.Fatalf("boolean counter result = %v\n%s", err, output)
 		}
 	})
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{
+			name: "repository read bypass count",
+			mutate: func(current map[string]any) {
+				current["repository_read_bypass_command_count"] = 1
+			},
+		},
+		{
+			name: "repository read bypass provenance",
+			mutate: func(current map[string]any) {
+				current["repository_read_bypass_command_count"] = 1
+				current["repository_read_bypass_commands"] = []any{"awk go.mod"}
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			runDir := t.TempDir()
+			current := qualityCheckMetricCase(
+				"baseline-explain", "explain", "baseline", "baseline",
+			)
+			testCase.mutate(current)
+			writeJSON(t, filepath.Join(runDir, "metrics.json"), map[string]any{
+				"cases": []any{current},
+			})
+			command := exec.Command(
+				bashPath, qualityCheck, runDir, "--skip-analyze",
+			)
+			output, err := command.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "invalid metrics.json") {
+				t.Fatalf("bypass accounting result = %v\n%s", err, output)
+			}
+		})
+	}
 
 	t.Run("incompatible metrics schema", func(t *testing.T) {
 		runDir := t.TempDir()
@@ -2044,6 +2390,144 @@ func TestQualityCheckRejectsVacuousAndMismatchedEvidence(t *testing.T) {
 			t.Fatalf("legacy import provenance result = %v\n%s", err, output)
 		}
 	})
+
+	t.Run("baseline-only import permits mechanical marker delta", func(t *testing.T) {
+		runDir := newStrictRun(t)
+		manifestPath := filepath.Join(runDir, "manifest.json")
+		manifestContent, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var currentManifest map[string]any
+		if err := json.Unmarshal(manifestContent, &currentManifest); err != nil {
+			t.Fatal(err)
+		}
+		currentManifest["variant_selection"] = "optimized"
+		currentManifest["baseline_from"] = "baseline-only"
+		writeJSON(t, manifestPath, currentManifest)
+
+		currentConfigPath := filepath.Join(runDir, "generation-config.json")
+		currentConfigContent, err := os.ReadFile(currentConfigPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var baselineConfig map[string]any
+		if err := json.Unmarshal(currentConfigContent, &baselineConfig); err != nil {
+			t.Fatal(err)
+		}
+		sourceCaseFiles := make(map[string]any)
+		sourceCaseDigests := make(map[string]any)
+		for name, relative := range currentManifest["case_prompt_files"].(map[string]any) {
+			if strings.HasPrefix(name, "baseline-") {
+				sourceCaseFiles[name] = relative
+			}
+		}
+		for name, digest := range currentManifest["case_prompt_digests"].(map[string]any) {
+			if strings.HasPrefix(name, "baseline-") {
+				sourceCaseDigests[name] = digest
+			}
+		}
+		baselineConfig["case_prompt_files"] = sourceCaseFiles
+		baselineConfig["case_prompt_digests"] = sourceCaseDigests
+		baselineConfig["mechanical_navigation_semantics_enforced"] = false
+		baselineConfigContent, err := json.Marshal(baselineConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(runDir, "baseline-source-generation-config.json"),
+			baselineConfigContent,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		baselineManifestContent, err := json.Marshal(currentManifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var baselineManifest map[string]any
+		if err := json.Unmarshal(baselineManifestContent, &baselineManifest); err != nil {
+			t.Fatal(err)
+		}
+		baselineManifest["variant_selection"] = "baseline"
+		baselineManifest["baseline_from"] = nil
+		baselineManifest["case_prompt_files"] = sourceCaseFiles
+		baselineManifest["case_prompt_digests"] = sourceCaseDigests
+		baselineManifest["mechanical_navigation_semantics_enforced"] = false
+		baselineManifest["generation_config_sha256"] = sha256Bytes(
+			baselineConfigContent,
+		)
+		writeJSON(
+			t,
+			filepath.Join(runDir, "baseline-source-manifest.json"),
+			baselineManifest,
+		)
+
+		for source, destination := range map[string]string{
+			"profiles-snapshot.tsv":            "baseline-source-profiles-snapshot.tsv",
+			"prompts/explain.txt":              "baseline-source-prompts/explain.txt",
+			"baseline-explain.user-prompt.txt": "baseline-source-baseline-explain.user-prompt.txt",
+		} {
+			content, err := os.ReadFile(filepath.Join(runDir, source))
+			if err != nil {
+				t.Fatal(err)
+			}
+			destinationPath := filepath.Join(runDir, destination)
+			if err := os.MkdirAll(filepath.Dir(destinationPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(destinationPath, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		command := exec.Command(
+			bashPath,
+			qualityCheck,
+			runDir,
+			"--skip-analyze",
+			"--enforce",
+			"--judge-repeats", "1",
+		)
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(
+			string(output),
+			"pre-judge quality gate failed",
+		) {
+			t.Fatalf("baseline-only import result = %v\n%s", err, output)
+		}
+		if strings.Contains(
+			string(output),
+			"imported baseline generation config disagrees",
+		) {
+			t.Fatalf("mechanical marker delta was rejected:\n%s", output)
+		}
+
+		baselineManifest["model"] = "router-selected"
+		baselineManifest["model_mode"] = "router"
+		baselineManifest["model_configuration"] = "none"
+		writeJSON(
+			t,
+			filepath.Join(runDir, "baseline-source-manifest.json"),
+			baselineManifest,
+		)
+		command = exec.Command(
+			bashPath,
+			qualityCheck,
+			runDir,
+			"--skip-analyze",
+			"--enforce",
+			"--judge-repeats", "1",
+		)
+		output, err = command.CombinedOutput()
+		if err == nil || !strings.Contains(
+			string(output),
+			"imported baseline source manifest disagrees",
+		) {
+			t.Fatalf("model-routing mismatch result = %v\n%s", err, output)
+		}
+	})
 }
 
 func TestQualityCheckDeepNavigationRequiresPositiveUnexceededCap(t *testing.T) {
@@ -2396,6 +2880,8 @@ func qualityCheckMetricCase(
 		"repo_view_navigation_semantic_violation_commands": []any{},
 		"repo_view_budget_tamper_command_count":            0,
 		"repo_view_budget_tamper_commands":                 []any{},
+		"repository_read_bypass_command_count":             0,
+		"repository_read_bypass_commands":                  []any{},
 		"repo_view_bounds": map[string]any{
 			"limit":           0,
 			"context":         0,
@@ -2528,6 +3014,8 @@ func requireQualityCheckTools(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("quality-check integration requires a Unix shell environment")
 	}
+	t.Setenv("LSP_JUDGE_MODEL", "")
+	t.Setenv("LSP_JUDGE_MODEL_MODE", "")
 	var bashPath string
 	for _, name := range []string{
 		"bash",
@@ -2629,5 +3117,28 @@ func assertQualityCheckJudgeAggregate(
 	}
 	if usage.Totals.RunCount != wantUsage {
 		t.Fatalf("judge usage run_count = %d, want %d", usage.Totals.RunCount, wantUsage)
+	}
+
+	var quality struct {
+		SchemaVersion int `json:"schema_version"`
+		Evaluator     struct {
+			ModelMode   string `json:"model_mode"`
+			Environment struct {
+				Filesystem struct {
+					CodexExecutable string `json:"codex_executable"`
+				} `json:"filesystem"`
+			} `json:"environment"`
+		} `json:"evaluator"`
+	}
+	content, err = os.ReadFile(filepath.Join(runDir, "quality", "quality.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(content, &quality); err != nil {
+		t.Fatal(err)
+	}
+	if quality.SchemaVersion != 5 || quality.Evaluator.ModelMode != "router" ||
+		quality.Evaluator.Environment.Filesystem.CodexExecutable != "read" {
+		t.Fatalf("quality evaluator provenance = %+v", quality)
 	}
 }

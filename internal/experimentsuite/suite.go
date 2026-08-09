@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -73,6 +74,7 @@ type LiveConfig struct {
 	PromptCommit string `json:"prompt_commit"`
 	Base         string `json:"base"`
 	ModelMode    string `json:"model_mode"`
+	Model        string `json:"model,omitempty"`
 }
 
 type Assertion struct {
@@ -152,67 +154,78 @@ type EvidenceMetric struct {
 }
 
 func LoadManifest(path string) (Manifest, error) {
+	manifest, _, err := LoadManifestSnapshot(path)
+	return manifest, err
+}
+
+// LoadManifestSnapshot returns the digest of the same bytes that were parsed
+// and validated. Callers can therefore record the executed manifest without a
+// second, potentially different read of the path.
+func LoadManifestSnapshot(path string) (Manifest, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return Manifest{}, err
+		return Manifest{}, "", err
 	}
 	var manifest Manifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return Manifest{}, fmt.Errorf("decode suite manifest: %w", err)
+		return Manifest{}, "", fmt.Errorf("decode suite manifest: %w", err)
 	}
 	if manifest.SchemaVersion != 1 {
-		return Manifest{}, fmt.Errorf("unsupported suite schema version %d", manifest.SchemaVersion)
+		return Manifest{}, "", fmt.Errorf("unsupported suite schema version %d", manifest.SchemaVersion)
 	}
 	seen := make(map[string]bool)
-	for _, testCase := range manifest.Cases {
+	for index := range manifest.Cases {
+		testCase := &manifest.Cases[index]
 		if !validSuiteSlug(testCase.ID) || seen[testCase.ID] {
-			return Manifest{}, fmt.Errorf("missing or duplicate suite case ID %q", testCase.ID)
+			return Manifest{}, "", fmt.Errorf("missing or duplicate suite case ID %q", testCase.ID)
 		}
 		seen[testCase.ID] = true
 		if testCase.Level < 1 ||
 			!validSuiteRelativePath(testCase.Evidence) ||
 			len(testCase.Assertions) == 0 {
-			return Manifest{}, fmt.Errorf(
+			return Manifest{}, "", fmt.Errorf(
 				"case %s requires a positive level, safe evidence path, and assertions",
 				testCase.ID,
 			)
 		}
 		if !validSHA256Digest(testCase.SourceChecksumSHA256) {
-			return Manifest{}, fmt.Errorf(
+			return Manifest{}, "", fmt.Errorf(
 				"case %s requires a lowercase source checksum SHA-256 digest",
 				testCase.ID,
 			)
 		}
 		if !validSHA256Digest(testCase.QualityAggregateSHA256) {
-			return Manifest{}, fmt.Errorf(
+			return Manifest{}, "", fmt.Errorf(
 				"case %s requires a lowercase quality aggregate SHA-256 digest",
 				testCase.ID,
 			)
 		}
-		if testCase.QualityProvenance != "" &&
-			!validQualityProvenance(testCase.QualityProvenance) {
-			return Manifest{}, fmt.Errorf(
+		if testCase.QualityProvenance == "" {
+			testCase.QualityProvenance = "strict-current"
+		}
+		if !validQualityProvenance(testCase.QualityProvenance) {
+			return Manifest{}, "", fmt.Errorf(
 				"case %s has invalid quality provenance %q",
 				testCase.ID,
 				testCase.QualityProvenance,
 			)
 		}
 		if testCase.Outcome != "accepted" && testCase.Outcome != "rejected" {
-			return Manifest{}, fmt.Errorf("case %s has invalid outcome %q", testCase.ID, testCase.Outcome)
+			return Manifest{}, "", fmt.Errorf("case %s has invalid outcome %q", testCase.ID, testCase.Outcome)
 		}
 		if testCase.Outcome == "accepted" &&
-			testCase.QualityProvenance == "non-strict" {
-			return Manifest{}, fmt.Errorf(
-				"accepted case %s cannot use non-strict quality provenance",
+			testCase.QualityProvenance != "strict-current" {
+			return Manifest{}, "", fmt.Errorf(
+				"accepted case %s requires strict-current quality provenance",
 				testCase.ID,
 			)
 		}
 		if testCase.Live != nil {
 			if testCase.Outcome != "accepted" {
-				return Manifest{}, fmt.Errorf("rejected case %s cannot be live-enabled", testCase.ID)
+				return Manifest{}, "", fmt.Errorf("rejected case %s cannot be live-enabled", testCase.ID)
 			}
 			if !validLiveConfig(*testCase.Live) {
-				return Manifest{}, fmt.Errorf("live case %s has incomplete configuration", testCase.ID)
+				return Manifest{}, "", fmt.Errorf("live case %s has incomplete configuration", testCase.ID)
 			}
 		}
 	}
@@ -222,43 +235,54 @@ func LoadManifest(path string) (Manifest, error) {
 		}
 		return manifest.Cases[i].Level < manifest.Cases[j].Level
 	})
-	return manifest, nil
+	return manifest, sha256Bytes(data), nil
 }
 
 func LoadResolutionManifest(path string) (ResolutionManifest, error) {
+	manifest, _, err := LoadResolutionManifestSnapshot(path)
+	return manifest, err
+}
+
+// LoadResolutionManifestSnapshot is the resolution-manifest counterpart of
+// LoadManifestSnapshot.
+func LoadResolutionManifestSnapshot(path string) (ResolutionManifest, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return ResolutionManifest{}, err
+		return ResolutionManifest{}, "", err
 	}
 	var manifest ResolutionManifest
 	if err := json.Unmarshal(data, &manifest); err != nil {
-		return ResolutionManifest{}, fmt.Errorf("decode resolution manifest: %w", err)
+		return ResolutionManifest{}, "", fmt.Errorf("decode resolution manifest: %w", err)
 	}
 	if manifest.SchemaVersion != 1 {
-		return ResolutionManifest{}, fmt.Errorf(
+		return ResolutionManifest{}, "", fmt.Errorf(
 			"unsupported resolution schema version %d",
 			manifest.SchemaVersion,
 		)
 	}
 	seen := make(map[string]bool)
-	for _, resolution := range manifest.Cases {
+	for index := range manifest.Cases {
+		resolution := &manifest.Cases[index]
 		if !validSuiteSlug(resolution.ID) || seen[resolution.ID] {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"missing or duplicate resolution case ID %q",
 				resolution.ID,
 			)
 		}
 		seen[resolution.ID] = true
 		if resolution.Status != "accepted" && resolution.Status != "resolved" {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolution %s has invalid status %q",
 				resolution.ID,
 				resolution.Status,
 			)
 		}
-		if resolution.QualityProvenance == "non-strict" {
-			return ResolutionManifest{}, fmt.Errorf(
-				"resolution %s cannot use non-strict quality provenance",
+		if resolution.QualityProvenance == "" {
+			resolution.QualityProvenance = "strict-current"
+		}
+		if resolution.QualityProvenance != "strict-current" {
+			return ResolutionManifest{}, "", fmt.Errorf(
+				"resolution %s requires strict-current quality provenance",
 				resolution.ID,
 			)
 		}
@@ -267,39 +291,31 @@ func LoadResolutionManifest(path string) (ResolutionManifest, error) {
 			!validSuiteRelativePath(resolution.Evidence) ||
 			len(resolution.MetricCases) == 0 ||
 			len(resolution.Assertions) == 0 {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolution %s requires cause, fix, safe evidence, metric cases, and assertions",
 				resolution.ID,
 			)
 		}
 		if !validSHA256Digest(resolution.SourceChecksumSHA256) {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolution %s requires a lowercase source checksum SHA-256 digest",
 				resolution.ID,
 			)
 		}
 		if !validSHA256Digest(resolution.QualityAggregateSHA256) {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolution %s requires a lowercase quality aggregate SHA-256 digest",
 				resolution.ID,
 			)
 		}
-		if resolution.QualityProvenance != "" &&
-			!validQualityProvenance(resolution.QualityProvenance) {
-			return ResolutionManifest{}, fmt.Errorf(
-				"resolution %s has invalid quality provenance %q",
-				resolution.ID,
-				resolution.QualityProvenance,
-			)
-		}
 		if resolution.Status == "resolved" && resolution.Repair == nil {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolved case %s requires a repair configuration",
 				resolution.ID,
 			)
 		}
 		if resolution.Repair != nil && !validLiveConfig(*resolution.Repair) {
-			return ResolutionManifest{}, fmt.Errorf(
+			return ResolutionManifest{}, "", fmt.Errorf(
 				"resolution %s has an incomplete repair configuration",
 				resolution.ID,
 			)
@@ -308,14 +324,14 @@ func LoadResolutionManifest(path string) (ResolutionManifest, error) {
 			if goTest.Description == "" ||
 				!validLocalGoPackage(goTest.Package) ||
 				goTest.Run == "" {
-				return ResolutionManifest{}, fmt.Errorf(
+				return ResolutionManifest{}, "", fmt.Errorf(
 					"resolution %s has an incomplete Go test",
 					resolution.ID,
 				)
 			}
 		}
 	}
-	return manifest, nil
+	return manifest, sha256Bytes(data), nil
 }
 
 func SelectResolutions(
@@ -703,68 +719,193 @@ func validSuiteTask(value string) bool {
 }
 
 func validLiveConfig(config LiveConfig) bool {
-	return validSuiteTask(config.Task) &&
-		validSuiteSlug(config.Profile) &&
-		validOptionalSuiteRelativePath(config.BaselineFrom) &&
-		validSuiteRelativePath(config.Source) &&
-		validGitCommit(config.Commit) &&
-		validPromptCommit(config.PromptCommit) &&
-		strings.HasPrefix(config.Commit, config.PromptCommit) &&
-		validGitCommit(config.Base) &&
-		config.Base != config.Commit &&
-		(config.ModelMode == "router" || config.ModelMode == "pinned")
+	if !validSuiteTask(config.Task) ||
+		!validSuiteSlug(config.Profile) ||
+		!validOptionalSuiteRelativePath(config.BaselineFrom) ||
+		!validSuiteRelativePath(config.Source) ||
+		!validGitCommit(config.Commit) ||
+		!validPromptCommit(config.PromptCommit) ||
+		!strings.HasPrefix(config.Commit, config.PromptCommit) ||
+		!validGitCommit(config.Base) ||
+		config.Base == config.Commit {
+		return false
+	}
+	switch config.ModelMode {
+	case "router":
+		return config.Model == ""
+	case "pinned":
+		return validModelIdentity(config.Model)
+	default:
+		return false
+	}
 }
 
-// ValidateLiveIdentity proves that a live or repair run used the repository
-// identity declared by its suite manifest. Without this check, ambient
-// LSP_TARGET_COMMIT or LSP_BASE_REF values can silently change the workload.
+func validModelIdentity(value string) bool {
+	if value == "" || len(value) > 256 || value[0] == '-' {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validGenerationModelIdentity(model, mode, configuration string) bool {
+	switch mode {
+	case "router":
+		return model == "router-selected" && configuration == "none"
+	case "pinned":
+		return validModelIdentity(model) && configuration == "pinned"
+	default:
+		return false
+	}
+}
+
+//nolint:govet,nolintlint // Keep fields in the canonical manifest order used by audit output.
+type liveRunIdentity struct {
+	SourceRepo         string   `json:"source_repo"`
+	TargetCommit       string   `json:"target_commit"`
+	PromptCommit       string   `json:"prompt_commit"`
+	BaseCommit         string   `json:"base_commit"`
+	TaskSelection      string   `json:"task_selection"`
+	VariantSelection   string   `json:"variant_selection"`
+	Profiles           []string `json:"profiles"`
+	BaselineFrom       *string  `json:"baseline_from"`
+	Model              string   `json:"model"`
+	ModelMode          string   `json:"model_mode"`
+	ModelConfiguration string   `json:"model_configuration"`
+}
+
+func expectedLiveProfiles(runDir, selection string) ([]string, error) {
+	if selection != "all" {
+		return []string{selection}, nil
+	}
+	data, err := readRegularSnapshot(filepath.Join(runDir, "profiles-snapshot.tsv"))
+	if err != nil {
+		return nil, fmt.Errorf("read live profile snapshot: %w", err)
+	}
+	var profiles []string
+	seen := make(map[string]bool)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := strings.TrimSuffix(scanner.Text(), "\r")
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		profile := strings.SplitN(line, "\t", 2)[0]
+		if !validSuiteSlug(profile) || seen[profile] {
+			return nil, fmt.Errorf("invalid live profile snapshot entry %q", profile)
+		}
+		seen[profile] = true
+		profiles = append(profiles, profile)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan live profile snapshot: %w", err)
+	}
+	if len(profiles) == 0 {
+		return nil, fmt.Errorf("live profile snapshot selects no profiles")
+	}
+	return profiles, nil
+}
+
+// ValidateLiveIdentity proves that a live or repair run used the repository,
+// workload, baseline, and model identity declared by its suite manifest.
 func ValidateLiveIdentity(
 	runDir string,
 	config LiveConfig,
-	resolvedSource ...string,
+	resolvedPaths ...string,
 ) CheckResult {
-	expectedSource := config.Source
-	if len(resolvedSource) > 0 {
-		expectedSource = resolvedSource[0]
-	}
 	result := CheckResult{
-		Description: "live run matches manifest repository and routing identity",
-		Expected: map[string]string{
-			"source_repo":   expectedSource,
-			"target_commit": config.Commit,
-			"prompt_commit": config.PromptCommit,
-			"base_commit":   config.Base,
-			"model_mode":    config.ModelMode,
-		},
+		Description: "live run matches manifest repository, workload, and routing identity",
 	}
+	if !validLiveConfig(config) {
+		result.Error = "suite live configuration is invalid"
+		return result
+	}
+	if len(resolvedPaths) > 2 {
+		result.Error = "too many resolved live identity paths"
+		return result
+	}
+	expectedSource := config.Source
+	if len(resolvedPaths) > 0 {
+		expectedSource = resolvedPaths[0]
+	}
+	expectedProfiles, err := expectedLiveProfiles(runDir, config.Profile)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	variant := "all"
+	var baselineFrom *string
+	if config.BaselineFrom != "" {
+		variant = "optimized"
+		resolvedBaseline := config.BaselineFrom
+		if len(resolvedPaths) > 1 {
+			resolvedBaseline = resolvedPaths[1]
+		}
+		baselineFrom = &resolvedBaseline
+	} else if len(resolvedPaths) > 1 {
+		result.Error = "resolved baseline supplied for a same-run live configuration"
+		return result
+	}
+	model := config.Model
+	modelConfiguration := "pinned"
+	if config.ModelMode == "router" {
+		model = "router-selected"
+		modelConfiguration = "none"
+	}
+	expected := liveRunIdentity{
+		SourceRepo:         expectedSource,
+		TargetCommit:       config.Commit,
+		PromptCommit:       config.PromptCommit,
+		BaseCommit:         config.Base,
+		TaskSelection:      config.Task,
+		VariantSelection:   variant,
+		Profiles:           expectedProfiles,
+		BaselineFrom:       baselineFrom,
+		Model:              model,
+		ModelMode:          config.ModelMode,
+		ModelConfiguration: modelConfiguration,
+	}
+	result.Expected = expected
 	data, err := os.ReadFile(filepath.Join(runDir, "manifest.json"))
 	if err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	var manifest struct {
-		SourceRepo   string `json:"source_repo"`
-		TargetCommit string `json:"target_commit"`
-		PromptCommit string `json:"prompt_commit"`
-		BaseCommit   string `json:"base_commit"`
-		ModelMode    string `json:"model_mode"`
-	}
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	var actual liveRunIdentity
+	if err := json.Unmarshal(data, &actual); err != nil {
 		result.Error = err.Error()
 		return result
 	}
-	result.Actual = map[string]string{
-		"source_repo":   manifest.SourceRepo,
-		"target_commit": manifest.TargetCommit,
-		"prompt_commit": manifest.PromptCommit,
-		"base_commit":   manifest.BaseCommit,
-		"model_mode":    manifest.ModelMode,
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		result.Error = err.Error()
+		return result
 	}
-	if manifest.SourceRepo != expectedSource ||
-		manifest.TargetCommit != config.Commit ||
-		manifest.PromptCommit != config.PromptCommit ||
-		manifest.BaseCommit != config.Base ||
-		manifest.ModelMode != config.ModelMode {
+	for _, field := range []string{
+		"source_repo",
+		"target_commit",
+		"prompt_commit",
+		"base_commit",
+		"task_selection",
+		"variant_selection",
+		"profiles",
+		"baseline_from",
+		"model",
+		"model_mode",
+		"model_configuration",
+	} {
+		if _, ok := fields[field]; !ok {
+			result.Actual = actual
+			result.Error = fmt.Sprintf("run manifest omits live identity field %s", field)
+			return result
+		}
+	}
+	result.Actual = actual
+	if !reflect.DeepEqual(actual, expected) {
 		result.Error = "run identity differs from suite manifest"
 		return result
 	}
@@ -897,11 +1038,232 @@ const qualityMetricsFormula = "effective = (input - cached_input) + 0.1 * cached
 const qualityGenerationIsolation = "root-deny-explicit-read-inherit-none-go-env-v3"
 const qualityNoCollaboration = "Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark."
 
+var qualityFeatureFlags = []string{
+	"--disable", "multi_agent",
+	"--disable", "multi_agent_v2",
+	"--disable", "enable_fanout",
+	"--disable", "collaboration_modes",
+	"--disable", "hooks",
+	"--disable", "tool_router",
+	"--disable", "workflows",
+	"--disable", "code_mode",
+	"--disable", "code_mode_host",
+	"--disable", "code_mode_only",
+}
+
+var qualityCodexEnvironment = []string{
+	"env",
+	"-i",
+	"PATH=<generation-path>",
+	"HOME=<shell-home>",
+	"CODEX_HOME=<codex-home>",
+	"LANG=C",
+	"LC_ALL=C",
+	"TZ=UTC",
+	"GOROOT=<go-root>",
+	"GOPATH=<go-path>",
+	"GOMODCACHE=<go-mod-cache>",
+	"GOCACHE=<go-cache>",
+	"GO111MODULE=on",
+	"GOENV=off",
+	"GOTOOLCHAIN=local",
+	"GOWORK=off",
+	"GOFLAGS=-mod=readonly -trimpath -buildvcs=false",
+	"GOPROXY=https://proxy.golang.org,direct",
+	"GONOPROXY=",
+	"GOPRIVATE=",
+	"GONOSUMDB=",
+	"GOSUMDB=sum.golang.org",
+	"GOINSECURE=",
+	"GOVCS=public:git|hg,private:all",
+	"GOAUTH=off",
+	"GIT_CONFIG_NOSYSTEM=1",
+	"GIT_CONFIG_GLOBAL=/dev/null",
+	"GIT_ATTR_NOSYSTEM=1",
+	"GIT_CONFIG_COUNT=10",
+	"GIT_CONFIG_KEY_0=core.hooksPath",
+	"GIT_CONFIG_VALUE_0=/dev/null",
+	"GIT_CONFIG_KEY_1=core.attributesFile",
+	"GIT_CONFIG_VALUE_1=/dev/null",
+	"GIT_CONFIG_KEY_2=core.excludesFile",
+	"GIT_CONFIG_VALUE_2=/dev/null",
+	"GIT_CONFIG_KEY_3=core.autocrlf",
+	"GIT_CONFIG_VALUE_3=false",
+	"GIT_CONFIG_KEY_4=core.eol",
+	"GIT_CONFIG_VALUE_4=lf",
+	"GIT_CONFIG_KEY_5=core.safecrlf",
+	"GIT_CONFIG_VALUE_5=false",
+	"GIT_CONFIG_KEY_6=core.fsmonitor",
+	"GIT_CONFIG_VALUE_6=false",
+	"GIT_CONFIG_KEY_7=core.untrackedCache",
+	"GIT_CONFIG_VALUE_7=false",
+	"GIT_CONFIG_KEY_8=core.sparseCheckout",
+	"GIT_CONFIG_VALUE_8=false",
+	"GIT_CONFIG_KEY_9=core.filemode",
+	"GIT_CONFIG_VALUE_9=true",
+	"GIT_TERMINAL_PROMPT=0",
+	"GIT_NO_REPLACE_OBJECTS=1",
+	"GIT_OPTIONAL_LOCKS=0",
+	"GIT_DISCOVERY_ACROSS_FILESYSTEM=0",
+	"GIT_PAGER=cat",
+	"PAGER=cat",
+}
+
+var qualityCodexIsolationFlags = []string{
+	"--ignore-user-config",
+	"--ignore-rules",
+	"-c",
+	`default_permissions="benchmark"`,
+	"-c",
+	`permissions.benchmark={extends=":read-only", filesystem={` +
+		`":root"="deny", ":minimal"="read", ` +
+		`"<worktree>"="read", "<go-root>"="read", ` +
+		`"<go-mod-cache>"="read", "<go-cache>"="read", ` +
+		`"<repo-view-cache>"="read", "<shell-home>"="read", ` +
+		`"<codex-executable>"="read", ` +
+		`"<codex-home>"="deny"}}`,
+	"-c",
+	`shell_environment_policy.inherit="none"`,
+	"-c",
+	"shell_environment_policy.ignore_default_excludes=false",
+	"-c",
+	"shell_environment_policy.experimental_use_profile=false",
+	"-c",
+	`shell_environment_policy.set={` +
+		`PATH="<repo-view-cache>/bin:<codex-bin>:` +
+		`<go-root>/bin:/usr/local/bin:/usr/bin:/bin",` +
+		`HOME="<shell-home>",LANG="C",LC_ALL="C",TZ="UTC",` +
+		`GOROOT="<go-root>",GOPATH="<go-path>",` +
+		`GOMODCACHE="<go-mod-cache>",GOCACHE="<go-cache>",` +
+		`GOENV="off",GOTOOLCHAIN="local",GOWORK="off",` +
+		`GOFLAGS="-mod=readonly -trimpath -buildvcs=false",` +
+		`GIT_CONFIG_NOSYSTEM="1",` +
+		`GIT_CONFIG_GLOBAL="/dev/null",` +
+		`GIT_ATTR_NOSYSTEM="1",GIT_CONFIG_COUNT="10",` +
+		`GIT_CONFIG_KEY_0="core.hooksPath",` +
+		`GIT_CONFIG_VALUE_0="/dev/null",` +
+		`GIT_CONFIG_KEY_1="core.attributesFile",` +
+		`GIT_CONFIG_VALUE_1="/dev/null",` +
+		`GIT_CONFIG_KEY_2="core.excludesFile",` +
+		`GIT_CONFIG_VALUE_2="/dev/null",` +
+		`GIT_CONFIG_KEY_3="core.autocrlf",` +
+		`GIT_CONFIG_VALUE_3="false",` +
+		`GIT_CONFIG_KEY_4="core.eol",GIT_CONFIG_VALUE_4="lf",` +
+		`GIT_CONFIG_KEY_5="core.safecrlf",` +
+		`GIT_CONFIG_VALUE_5="false",` +
+		`GIT_CONFIG_KEY_6="core.fsmonitor",` +
+		`GIT_CONFIG_VALUE_6="false",` +
+		`GIT_CONFIG_KEY_7="core.untrackedCache",` +
+		`GIT_CONFIG_VALUE_7="false",` +
+		`GIT_CONFIG_KEY_8="core.sparseCheckout",` +
+		`GIT_CONFIG_VALUE_8="false",` +
+		`GIT_CONFIG_KEY_9="core.filemode",` +
+		`GIT_CONFIG_VALUE_9="true",` +
+		`GIT_TERMINAL_PROMPT="0",GIT_NO_REPLACE_OBJECTS="1",` +
+		`GIT_OPTIONAL_LOCKS="0",` +
+		`GIT_DISCOVERY_ACROSS_FILESYSTEM="0",` +
+		`GIT_PAGER="cat",PAGER="cat"}`,
+	"-c",
+	"project_doc_max_bytes=0",
+	"-c",
+	"project_doc_fallback_filenames=[]",
+	"-c",
+	"mcp_servers={}",
+	"-c",
+	"apps._default.enabled=false",
+}
+
+var qualityHostGoEnvironment = []string{
+	"env",
+	"-u", "GOOS",
+	"-u", "GOARCH",
+	"-u", "GO386",
+	"-u", "GOAMD64",
+	"-u", "GOARM",
+	"-u", "GOARM64",
+	"-u", "GOMIPS",
+	"-u", "GOMIPS64",
+	"-u", "GOPPC64",
+	"-u", "GORISCV64",
+	"-u", "GOWASM",
+	"-u", "CGO_ENABLED",
+	"-u", "CC",
+	"-u", "CXX",
+	"-u", "CGO_CFLAGS",
+	"-u", "CGO_CPPFLAGS",
+	"-u", "CGO_CXXFLAGS",
+	"-u", "CGO_LDFLAGS",
+	"-u", "PKG_CONFIG",
+	"-u", "GOROOT",
+	"-u", "GOPATH",
+	"-u", "GOMODCACHE",
+	"-u", "GOCACHE",
+	"-u", "GOEXPERIMENT",
+	"-u", "GODEBUG",
+	"GO111MODULE=on",
+	"GOENV=off",
+	"GOTOOLCHAIN=local",
+	"GOWORK=off",
+	"GOFLAGS=-mod=readonly -trimpath -buildvcs=false",
+	"GOPROXY=https://proxy.golang.org,direct",
+	"GONOPROXY=",
+	"GOPRIVATE=",
+	"GONOSUMDB=",
+	"GOSUMDB=sum.golang.org",
+	"GOINSECURE=",
+	"GOVCS=public:git|hg,private:all",
+	"GOAUTH=off",
+}
+
 type qualityAggregateSnapshot struct {
 	manifestDigest string
 	outputs        map[string][]byte
 	inputs         map[string][]byte
 	validation     qualityValidation
+}
+
+// QualityReplayConfig is derived exclusively from a digest-verified aggregate
+// snapshot. Callers use it to reproduce quality aggregation without trusting
+// mutable public JSON files for judge selection or model configuration.
+type QualityReplayConfig struct {
+	AggregateSHA256 string
+	Provenance      string
+	JudgeModelMode  string
+	JudgeModel      string
+	JudgeRepeats    int
+	Enforce         bool
+}
+
+// ReadQualityReplayConfig verifies the complete committed aggregate before
+// returning any replay control recorded by it.
+func ReadQualityReplayConfig(
+	runDir string,
+	expectedManifestDigest string,
+	expectedProvenance string,
+) (QualityReplayConfig, error) {
+	aggregate, err := readQualityAggregate(runDir, expectedManifestDigest)
+	if err != nil {
+		return QualityReplayConfig{}, err
+	}
+	if aggregate.validation.AggregateStatus != expectedProvenance {
+		return QualityReplayConfig{}, fmt.Errorf(
+			"quality aggregate provenance is %q, want %q",
+			aggregate.validation.AggregateStatus,
+			expectedProvenance,
+		)
+	}
+	quality, err := decodeQualityDocument(aggregate.outputs["quality.json"])
+	if err != nil {
+		return QualityReplayConfig{}, err
+	}
+	return QualityReplayConfig{
+		AggregateSHA256: aggregate.manifestDigest,
+		Provenance:      quality.ProvenanceStatus,
+		JudgeRepeats:    quality.RequiredJudgeCount,
+		JudgeModelMode:  quality.Evaluator.ModelMode,
+		JudgeModel:      quality.Evaluator.Model,
+		Enforce:         aggregate.validation.Enforce,
+	}, nil
 }
 
 type qualityInputCommitment struct {
@@ -935,6 +1297,256 @@ type qualityAnalysisEnvironment struct {
 	GOFLAGS   string `json:"GOFLAGS"`
 }
 
+type qualityDocument struct {
+	Evaluator          qualityEvaluator `json:"evaluator"`
+	ProvenanceStatus   string           `json:"provenance_status"`
+	Static             json.RawMessage  `json:"static"`
+	Judges             json.RawMessage  `json:"judges"`
+	JudgeUsage         json.RawMessage  `json:"judge_usage"`
+	Verdicts           []qualityVerdict `json:"verdicts"`
+	SchemaVersion      int              `json:"schema_version"`
+	RequiredJudgeCount int              `json:"required_judge_count"`
+}
+
+type qualityEvaluator struct {
+	Environment  qualityEvaluatorEnvironment `json:"environment"`
+	Model        string                      `json:"model"`
+	ModelMode    string                      `json:"model_mode,omitempty"`
+	CodexVersion string                      `json:"codex_version"`
+	CacheSchema  int                         `json:"cache_schema"`
+}
+
+type qualityEvaluatorEnvironment struct {
+	GoVersion         string `json:"go_version"`
+	PermissionProfile string `json:"permission_profile"`
+	Filesystem        struct {
+		Root                 string `json:"root"`
+		MinimalRuntime       string `json:"minimal_runtime"`
+		JudgeCheckout        string `json:"judge_checkout"`
+		QualityInputSnapshot string `json:"quality_input_snapshot"`
+		GOROOT               string `json:"goroot"`
+		GOMODCACHE           string `json:"gomodcache"`
+		JudgeToolRoot        string `json:"judge_tool_root"`
+		CodexExecutable      string `json:"codex_executable"`
+		CodexHome            string `json:"codex_home"`
+		CanonicalAuth        string `json:"canonical_auth"`
+	} `json:"filesystem"`
+	Network          string `json:"network"`
+	OuterEnvironment struct {
+		Inherit   string `json:"inherit"`
+		PATH      string `json:"PATH"`
+		HOME      string `json:"HOME"`
+		TMPDIR    string `json:"TMPDIR"`
+		LANG      string `json:"LANG"`
+		LCALL     string `json:"LC_ALL"`
+		TZ        string `json:"TZ"`
+		CODEXHOME string `json:"CODEX_HOME"`
+		Auth      string `json:"auth"`
+	} `json:"outer_environment"`
+	ShellEnvironment struct {
+		Inherit          string `json:"inherit"`
+		PATH             string `json:"PATH"`
+		HOME             string `json:"HOME"`
+		TMPDIR           string `json:"TMPDIR"`
+		LANG             string `json:"LANG"`
+		LCALL            string `json:"LC_ALL"`
+		TZ               string `json:"TZ"`
+		GOROOT           string `json:"GOROOT"`
+		GOPATH           string `json:"GOPATH"`
+		GOMODCACHE       string `json:"GOMODCACHE"`
+		GOCACHE          string `json:"GOCACHE"`
+		GOENV            string `json:"GOENV"`
+		GOTOOLCHAIN      string `json:"GOTOOLCHAIN"`
+		GOWORK           string `json:"GOWORK"`
+		GOFLAGS          string `json:"GOFLAGS"`
+		GitConfiguration string `json:"git_configuration"`
+	} `json:"shell_environment"`
+}
+
+type qualityVerdict struct {
+	CoreConclusionMatch *bool                 `json:"core_conclusion_match"`
+	JudgesNotWorse      *bool                 `json:"judges_not_worse"`
+	Profile             string                `json:"profile"`
+	Task                string                `json:"task"`
+	NavigationCalls     staticNavigationCalls `json:"navigation_calls"`
+	JudgeCount          int                   `json:"judge_count"`
+	RequiredJudgeCount  int                   `json:"required_judge_count"`
+	NavigationPass      bool                  `json:"navigation_pass"`
+	JudgeEvaluated      bool                  `json:"judge_evaluated"`
+	StaticNotWorse      bool                  `json:"static_not_worse"`
+	JudgeComplete       bool                  `json:"judge_complete"`
+	AccountingPass      bool                  `json:"accounting_pass"`
+	NavigationRequired  bool                  `json:"navigation_required"`
+	QualityPass         bool                  `json:"quality_pass"`
+}
+
+type staticDocument struct {
+	Cases         []staticCase       `json:"cases"`
+	Comparisons   []staticComparison `json:"comparisons"`
+	SchemaVersion int                `json:"schema_version"`
+}
+
+type staticCase struct {
+	Task               string                `json:"task"`
+	Variant            string                `json:"variant"`
+	Profile            string                `json:"profile"`
+	Name               string                `json:"name"`
+	Criteria           []staticCriterion     `json:"criteria"`
+	NavigationCalls    staticNavigationCalls `json:"navigation_calls"`
+	PassedWeight       int                   `json:"passed_weight"`
+	TotalWeight        int                   `json:"total_weight"`
+	ScorePercent       float64               `json:"score_percent"`
+	NavigationPass     bool                  `json:"navigation_pass"`
+	AccountingPass     bool                  `json:"accounting_pass"`
+	NavigationRequired bool                  `json:"navigation_required"`
+	RequiredPass       bool                  `json:"required_pass"`
+}
+
+type staticNavigationCalls struct {
+	Total              int                  `json:"total"`
+	CommandCap         int                  `json:"command_cap"`
+	BudgetTamper       int                  `json:"budget_tamper"`
+	Changed            int                  `json:"changed"`
+	Find               int                  `json:"find"`
+	Inspect            int                  `json:"inspect"`
+	Outline            int                  `json:"outline"`
+	BoundViolations    int                  `json:"bound_violations"`
+	SimpleContract     staticSimpleContract `json:"simple_contract"`
+	DeepContract       staticDeepContract   `json:"deep_contract"`
+	CommandCapPass     bool                 `json:"command_cap_pass"`
+	CommandCapExceeded bool                 `json:"command_cap_exceeded"`
+}
+
+type staticSimpleContract struct {
+	ChangedCommandExact         bool `json:"changed_command_exact"`
+	CoreInspectCommandExact     bool `json:"core_inspect_command_exact"`
+	ConsumerInspectCommandExact bool `json:"consumer_inspect_command_exact"`
+	InspectOutputsUntruncated   bool `json:"inspect_outputs_untruncated"`
+}
+
+type staticDeepContract struct {
+	CommandSequenceExact bool `json:"command_sequence_exact"`
+	DependencyAWKExact   bool `json:"dependency_awk_exact"`
+}
+
+type staticCriterion struct {
+	ID       string `json:"id"`
+	Weight   int    `json:"weight"`
+	Required bool   `json:"required"`
+	Passed   bool   `json:"passed"`
+}
+
+type staticComparison struct {
+	Task                  string                `json:"task"`
+	Profile               string                `json:"profile"`
+	NavigationCalls       staticNavigationCalls `json:"navigation_calls"`
+	BaselineScorePercent  float64               `json:"baseline_score_percent"`
+	CandidateScorePercent float64               `json:"candidate_score_percent"`
+	NavigationRequired    bool                  `json:"navigation_required"`
+	NavigationPass        bool                  `json:"navigation_pass"`
+	AccountingPass        bool                  `json:"accounting_pass"`
+	RequiredPass          bool                  `json:"required_pass"`
+	StaticNotWorse        bool                  `json:"static_not_worse"`
+}
+
+type qualityJudgesDocument struct {
+	ProvenanceStatus string                  `json:"provenance_status"`
+	JudgeRuns        []qualityJudgeRun       `json:"judge_runs"`
+	Baselines        []qualityJudgeBaseline  `json:"baselines"`
+	Candidates       []qualityJudgeCandidate `json:"candidates"`
+}
+
+type qualityJudgeRun struct {
+	Task       string                     `json:"task"`
+	Candidates []qualityJudgeRunCandidate `json:"candidates"`
+	Baseline   qualityJudgeRunBaseline    `json:"baseline"`
+}
+
+type qualityJudgeRunBaseline struct {
+	Name              string   `json:"name"`
+	CriticalOmissions []string `json:"critical_omissions"`
+	UnsupportedClaims []string `json:"unsupported_claims"`
+	Correctness       int      `json:"correctness"`
+	Completeness      int      `json:"completeness"`
+	Grounding         int      `json:"grounding"`
+	TaskAdherence     int      `json:"task_adherence"`
+}
+
+type qualityJudgeRunCandidate struct {
+	Name                          string   `json:"name"`
+	Rationale                     string   `json:"rationale"`
+	MaterialContradictions        []string `json:"material_contradictions"`
+	CriticalOmissions             []string `json:"critical_omissions"`
+	UnsupportedClaims             []string `json:"unsupported_claims"`
+	BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
+	CandidateMaterialAdditions    []string `json:"candidate_material_additions"`
+	Grounding                     int      `json:"grounding"`
+	TaskAdherence                 int      `json:"task_adherence"`
+	Completeness                  int      `json:"completeness"`
+	Correctness                   int      `json:"correctness"`
+	CoreConclusionMatchesBaseline bool     `json:"core_conclusion_matches_baseline"`
+	NotWorseThanBaseline          bool     `json:"not_worse_than_baseline"`
+}
+
+type qualityJudgeBaseline struct {
+	Task                 string   `json:"task"`
+	Name                 string   `json:"name"`
+	CriticalOmissions    []string `json:"critical_omissions"`
+	UnsupportedClaims    []string `json:"unsupported_claims"`
+	JudgeCount           int      `json:"judge_count"`
+	AverageCorrectness   float64  `json:"average_correctness"`
+	AverageCompleteness  float64  `json:"average_completeness"`
+	AverageGrounding     float64  `json:"average_grounding"`
+	AverageTaskAdherence float64  `json:"average_task_adherence"`
+}
+
+type qualityJudgeCandidate struct {
+	Name                          string   `json:"name"`
+	Task                          string   `json:"task"`
+	CriticalOmissions             []string `json:"critical_omissions"`
+	CandidateMaterialAdditions    []string `json:"candidate_material_additions"`
+	BaselineMaterialPointsOmitted []string `json:"baseline_material_points_omitted"`
+	MaterialContradictions        []string `json:"material_contradictions"`
+	UnsupportedClaims             []string `json:"unsupported_claims"`
+	AverageGrounding              float64  `json:"average_grounding"`
+	AverageTaskAdherence          float64  `json:"average_task_adherence"`
+	AverageCompleteness           float64  `json:"average_completeness"`
+	AverageCorrectness            float64  `json:"average_correctness"`
+	JudgeCount                    int      `json:"judge_count"`
+	AllCoreConclusionMatch        bool     `json:"all_core_conclusion_match"`
+	AllNotWorse                   bool     `json:"all_not_worse"`
+}
+
+type qualityJudgeUsageDocument struct {
+	Formula string                 `json:"formula"`
+	Runs    []qualityJudgeUsageRun `json:"runs"`
+	Totals  qualityJudgeUsageTotal `json:"totals"`
+}
+
+type qualityJudgeUsageRun struct {
+	Name                        string  `json:"name"`
+	InputTokens                 int64   `json:"input_tokens"`
+	RegularInputTokens          int64   `json:"regular_input_tokens"`
+	CachedInputTokens           int64   `json:"cached_input_tokens"`
+	CachedInputEquivalentTokens float64 `json:"cached_input_equivalent_tokens"`
+	OutputTokens                int64   `json:"output_tokens"`
+	ReasoningOutputTokens       int64   `json:"reasoning_output_tokens"`
+	RawTotalTokens              int64   `json:"raw_total_tokens"`
+	EffectiveTokens             float64 `json:"effective_tokens"`
+}
+
+type qualityJudgeUsageTotal struct {
+	RunCount                    int     `json:"run_count"`
+	InputTokens                 int64   `json:"input_tokens"`
+	RegularInputTokens          int64   `json:"regular_input_tokens"`
+	CachedInputTokens           int64   `json:"cached_input_tokens"`
+	CachedInputEquivalentTokens float64 `json:"cached_input_equivalent_tokens"`
+	OutputTokens                int64   `json:"output_tokens"`
+	ReasoningOutputTokens       int64   `json:"reasoning_output_tokens"`
+	RawTotalTokens              int64   `json:"raw_total_tokens"`
+	EffectiveTokens             float64 `json:"effective_tokens"`
+}
+
 type qualityGenerationConfig struct {
 	PromptFiles                  map[string]string `json:"prompt_files"`
 	PromptDigests                map[string]string `json:"prompt_digests"`
@@ -966,6 +1578,1643 @@ func sharedQualityGenerationConfig(
 	config.CasePromptDigests = nil
 	config.MechanicalNavigationEnforced = false
 	return config
+}
+
+func validStrictGenerationConfig(
+	config qualityGenerationConfig,
+	expectedMechanicalNavigation bool,
+) bool {
+	return config.GenerationIsolation == qualityGenerationIsolation &&
+		config.DeveloperInstructions == qualityNoCollaboration &&
+		reflect.DeepEqual(config.FeatureFlags, qualityFeatureFlags) &&
+		reflect.DeepEqual(
+			config.CodexIsolationFlags,
+			qualityCodexIsolationFlags,
+		) &&
+		reflect.DeepEqual(config.CodexEnvironment, qualityCodexEnvironment) &&
+		reflect.DeepEqual(config.HostGoEnvironment, qualityHostGoEnvironment) &&
+		config.ProfilesSnapshotPath == "profiles-snapshot.tsv" &&
+		validSHA256Digest(config.ProfilesSnapshotSHA256) &&
+		len(config.PromptFiles) > 0 &&
+		len(config.PromptFiles) == len(config.PromptDigests) &&
+		len(config.CasePromptFiles) > 0 &&
+		len(config.CasePromptFiles) == len(config.CasePromptDigests) &&
+		config.MechanicalNavigationEnforced == expectedMechanicalNavigation &&
+		config.MechanicalNavigationContract.RequiredRoot == "<worktree>" &&
+		config.MechanicalNavigationContract.RequiredBaseCommit == "<resolved-base>" &&
+		config.MechanicalNavigationContract.RequiredChangedReturn == "<profile-return>" &&
+		config.MechanicalNavigationContract.RequiredChangedContext == "<profile-context>" &&
+		config.MechanicalNavigationContract.RequireNavigation == "1" &&
+		config.AuthSourcePermission == "deny-if-present"
+}
+
+func equivalentGenerationConfigsExceptMechanicalNavigation(
+	left, right []byte,
+) (bool, error) {
+	decode := func(data []byte) (map[string]any, error) {
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.UseNumber()
+		var config map[string]any
+		if err := decoder.Decode(&config); err != nil {
+			return nil, err
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); err != io.EOF {
+			if err == nil {
+				return nil, fmt.Errorf("multiple generation config values")
+			}
+			return nil, err
+		}
+		delete(config, "mechanical_navigation_semantics_enforced")
+		return config, nil
+	}
+	leftConfig, err := decode(left)
+	if err != nil {
+		return false, err
+	}
+	rightConfig, err := decode(right)
+	if err != nil {
+		return false, err
+	}
+	return reflect.DeepEqual(leftConfig, rightConfig), nil
+}
+
+func decodeStrictJSON(content []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
+}
+
+func decodeQualityDocument(content []byte) (qualityDocument, error) {
+	var document qualityDocument
+	if err := decodeStrictJSON(content, &document); err != nil {
+		return qualityDocument{}, fmt.Errorf("decode quality.json: %w", err)
+	}
+	if document.SchemaVersion != 4 && document.SchemaVersion != 5 {
+		return qualityDocument{}, fmt.Errorf(
+			"quality.json schema is %d, want 4 or 5",
+			document.SchemaVersion,
+		)
+	}
+	if document.SchemaVersion == 4 {
+		if document.Evaluator.ModelMode != "" {
+			return qualityDocument{}, fmt.Errorf(
+				"quality.json schema 4 unexpectedly records model_mode",
+			)
+		}
+		if document.Evaluator.Model == "router-selected" {
+			document.Evaluator.ModelMode = "router"
+		} else {
+			document.Evaluator.ModelMode = "pinned"
+		}
+	} else if document.Evaluator.ModelMode == "" {
+		return qualityDocument{}, fmt.Errorf(
+			"quality.json schema 5 omits evaluator model_mode",
+		)
+	}
+	if document.RequiredJudgeCount < 0 || document.RequiredJudgeCount > 100 ||
+		document.Evaluator.CacheSchema != 8 ||
+		document.Evaluator.CodexVersion == "" {
+		return qualityDocument{}, fmt.Errorf(
+			"quality.json has incompatible evaluator semantics",
+		)
+	}
+	switch document.Evaluator.ModelMode {
+	case "router":
+		if document.Evaluator.Model != "router-selected" {
+			return qualityDocument{}, fmt.Errorf(
+				"quality.json has inconsistent router evaluator identity",
+			)
+		}
+	case "pinned":
+		if !validQualityModelIdentity(document.Evaluator.Model) {
+			return qualityDocument{}, fmt.Errorf(
+				"quality.json has invalid pinned evaluator identity",
+			)
+		}
+	default:
+		return qualityDocument{}, fmt.Errorf(
+			"quality.json has invalid evaluator model mode %q",
+			document.Evaluator.ModelMode,
+		)
+	}
+	if document.Evaluator.Environment.GoVersion == "" ||
+		document.Evaluator.Environment.PermissionProfile != "quality-audit" ||
+		document.Evaluator.Environment.Network != "disabled" ||
+		document.Evaluator.Environment.Filesystem.Root != "deny" ||
+		document.Evaluator.Environment.Filesystem.JudgeCheckout != "read" ||
+		document.Evaluator.Environment.OuterEnvironment.Inherit != "none" ||
+		document.Evaluator.Environment.ShellEnvironment.Inherit != "none" {
+		return qualityDocument{}, fmt.Errorf(
+			"quality.json has incompatible evaluator environment",
+		)
+	}
+	if document.Verdicts == nil {
+		return qualityDocument{}, fmt.Errorf("quality.json omits verdicts")
+	}
+	return document, nil
+}
+
+func validQualityModelIdentity(value string) bool {
+	if value == "" || len(value) > 256 || value[0] == '-' {
+		return false
+	}
+	for index := range len(value) {
+		if value[index] < 0x21 || value[index] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func semanticJSONEqual(left, right []byte) bool {
+	var leftValue any
+	var rightValue any
+	leftDecoder := json.NewDecoder(bytes.NewReader(left))
+	leftDecoder.UseNumber()
+	rightDecoder := json.NewDecoder(bytes.NewReader(right))
+	rightDecoder.UseNumber()
+	return leftDecoder.Decode(&leftValue) == nil &&
+		rightDecoder.Decode(&rightValue) == nil &&
+		reflect.DeepEqual(leftValue, rightValue)
+}
+
+func requireJSONObjectKeys(
+	content []byte,
+	expected ...string,
+) (map[string]json.RawMessage, error) {
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(content, &object); err != nil {
+		return nil, err
+	}
+	if len(object) != len(expected) {
+		return nil, fmt.Errorf("unexpected object field set")
+	}
+	for _, key := range expected {
+		if _, ok := object[key]; !ok {
+			return nil, fmt.Errorf("object omits %s", key)
+		}
+	}
+	return object, nil
+}
+
+func validJudgeScore(score int) bool {
+	return score >= 1 && score <= 5
+}
+
+func validStringSet(values []string) bool {
+	return values != nil
+}
+
+func validateJudgeRun(run qualityJudgeRun) error {
+	if run.Task == "" || run.Baseline.Name != "baseline-"+run.Task ||
+		!validJudgeScore(run.Baseline.Correctness) ||
+		!validJudgeScore(run.Baseline.Completeness) ||
+		!validJudgeScore(run.Baseline.Grounding) ||
+		!validJudgeScore(run.Baseline.TaskAdherence) ||
+		!validStringSet(run.Baseline.CriticalOmissions) ||
+		!validStringSet(run.Baseline.UnsupportedClaims) ||
+		run.Candidates == nil || len(run.Candidates) == 0 {
+		return fmt.Errorf("judge run for %q has an invalid baseline or score schema", run.Task)
+	}
+	seen := make(map[string]bool, len(run.Candidates))
+	for _, candidate := range run.Candidates {
+		if candidate.Name == "" || seen[candidate.Name] ||
+			!validJudgeScore(candidate.Correctness) ||
+			!validJudgeScore(candidate.Completeness) ||
+			!validJudgeScore(candidate.Grounding) ||
+			!validJudgeScore(candidate.TaskAdherence) ||
+			!validStringSet(candidate.CriticalOmissions) ||
+			!validStringSet(candidate.UnsupportedClaims) ||
+			!validStringSet(candidate.MaterialContradictions) ||
+			!validStringSet(candidate.BaselineMaterialPointsOmitted) ||
+			!validStringSet(candidate.CandidateMaterialAdditions) ||
+			candidate.Rationale == "" {
+			return fmt.Errorf("judge run for %q has an invalid candidate schema", run.Task)
+		}
+		if candidate.NotWorseThanBaseline &&
+			(candidate.Correctness < run.Baseline.Correctness ||
+				candidate.Completeness < run.Baseline.Completeness ||
+				candidate.Grounding < run.Baseline.Grounding ||
+				candidate.TaskAdherence < run.Baseline.TaskAdherence ||
+				len(candidate.CriticalOmissions) != 0 ||
+				len(candidate.UnsupportedClaims) != 0 ||
+				len(candidate.MaterialContradictions) != 0 ||
+				len(candidate.BaselineMaterialPointsOmitted) != 0) {
+			return fmt.Errorf(
+				"judge run for %q claims not-worse with a material regression",
+				run.Task,
+			)
+		}
+		seen[candidate.Name] = true
+	}
+	return nil
+}
+
+func validateJudgeUsageRun(run qualityJudgeUsageRun) error {
+	if run.Name == "" || run.InputTokens < 0 || run.RegularInputTokens < 0 ||
+		run.CachedInputTokens < 0 || run.OutputTokens < 0 ||
+		run.ReasoningOutputTokens < 0 ||
+		run.CachedInputTokens > run.InputTokens ||
+		run.RegularInputTokens != run.InputTokens-run.CachedInputTokens ||
+		run.RawTotalTokens != run.InputTokens+run.OutputTokens ||
+		!equalFloat(
+			run.CachedInputEquivalentTokens,
+			float64(run.CachedInputTokens)*0.1,
+		) ||
+		!equalFloat(
+			run.EffectiveTokens,
+			float64(run.RegularInputTokens)+
+				run.CachedInputEquivalentTokens+
+				float64(run.OutputTokens),
+		) {
+		return fmt.Errorf("judge usage run %q has inconsistent token accounting", run.Name)
+	}
+	return nil
+}
+
+func equalFloat(left, right float64) bool {
+	return !math.IsNaN(left) && !math.IsInf(left, 0) && left == right
+}
+
+func judgeTaskAndRepeat(name string) (string, int, bool) {
+	if !strings.HasPrefix(name, "judge-") {
+		return "", 0, false
+	}
+	remainder := strings.TrimPrefix(name, "judge-")
+	separator := strings.LastIndexByte(remainder, '-')
+	if separator <= 0 {
+		return "", 0, false
+	}
+	repeat, err := strconv.Atoi(remainder[separator+1:])
+	if err != nil || repeat < 1 || repeat > 100 {
+		return "", 0, false
+	}
+	task := remainder[:separator]
+	switch task {
+	case "explain", "review", "deep-explain", "deep-review":
+		return task, repeat, true
+	default:
+		return "", 0, false
+	}
+}
+
+func validateQualityOutputSemantics(
+	snapshot *qualityAggregateSnapshot,
+	commitment qualityInputCommitment,
+) error {
+	qualityObject, err := requireJSONObjectKeys(
+		snapshot.outputs["quality.json"],
+		"schema_version",
+		"provenance_status",
+		"required_judge_count",
+		"evaluator",
+		"static",
+		"judges",
+		"judge_usage",
+		"verdicts",
+	)
+	if err != nil {
+		return fmt.Errorf("quality.json has an invalid exact schema: %w", err)
+	}
+	quality, err := decodeQualityDocument(snapshot.outputs["quality.json"])
+	if err != nil {
+		return err
+	}
+	evaluatorKeys := []string{
+		"model", "codex_version", "cache_schema", "environment",
+	}
+	if quality.SchemaVersion == 5 {
+		evaluatorKeys = append(evaluatorKeys, "model_mode")
+	}
+	if _, err := requireJSONObjectKeys(
+		qualityObject["evaluator"],
+		evaluatorKeys...,
+	); err != nil {
+		return fmt.Errorf("quality.json evaluator has an invalid exact schema: %w", err)
+	}
+	if quality.ProvenanceStatus != commitment.Validation.AggregateStatus ||
+		quality.RequiredJudgeCount != commitment.Validation.JudgeRepeats ||
+		quality.Evaluator.CacheSchema != commitment.Validation.JudgeCacheSchema {
+		return fmt.Errorf("quality.json disagrees with committed validation semantics")
+	}
+
+	if _, err := requireJSONObjectKeys(
+		snapshot.outputs["judges.json"],
+		"provenance_status", "judge_runs", "baselines", "candidates",
+	); err != nil {
+		return fmt.Errorf("judges.json has an invalid exact schema: %w", err)
+	}
+	var judges qualityJudgesDocument
+	if err := decodeStrictJSON(snapshot.outputs["judges.json"], &judges); err != nil {
+		return fmt.Errorf("decode judges.json: %w", err)
+	}
+	if judges.ProvenanceStatus != commitment.Validation.AggregateStatus ||
+		judges.JudgeRuns == nil || judges.Baselines == nil || judges.Candidates == nil {
+		return fmt.Errorf("judges.json has inconsistent provenance or collections")
+	}
+	for _, run := range judges.JudgeRuns {
+		if err := validateJudgeRun(run); err != nil {
+			return err
+		}
+	}
+	if err := validateJudgeMembership(snapshot.inputs["metrics.json"], judges, commitment); err != nil {
+		return err
+	}
+
+	if _, err := requireJSONObjectKeys(
+		snapshot.outputs["judge-usage.json"],
+		"formula", "runs", "totals",
+	); err != nil {
+		return fmt.Errorf("judge-usage.json has an invalid exact schema: %w", err)
+	}
+	var usage qualityJudgeUsageDocument
+	if err := decodeStrictJSON(snapshot.outputs["judge-usage.json"], &usage); err != nil {
+		return fmt.Errorf("decode judge-usage.json: %w", err)
+	}
+	if usage.Formula != qualityMetricsFormula || usage.Runs == nil ||
+		usage.Totals.RunCount != len(usage.Runs) ||
+		len(usage.Runs) != len(judges.JudgeRuns) {
+		return fmt.Errorf("judge-usage.json has incompatible run accounting")
+	}
+	total := qualityJudgeUsageTotal{RunCount: len(usage.Runs)}
+	seenUsage := make(map[string]bool, len(usage.Runs))
+	for _, run := range usage.Runs {
+		if seenUsage[run.Name] {
+			return fmt.Errorf("judge-usage.json repeats run %q", run.Name)
+		}
+		seenUsage[run.Name] = true
+		if err := validateJudgeUsageRun(run); err != nil {
+			return err
+		}
+		total.InputTokens += run.InputTokens
+		total.RegularInputTokens += run.RegularInputTokens
+		total.CachedInputTokens += run.CachedInputTokens
+		total.CachedInputEquivalentTokens += run.CachedInputEquivalentTokens
+		total.OutputTokens += run.OutputTokens
+		total.ReasoningOutputTokens += run.ReasoningOutputTokens
+		total.RawTotalTokens += run.RawTotalTokens
+		total.EffectiveTokens += run.EffectiveTokens
+	}
+	if !reflect.DeepEqual(total, usage.Totals) {
+		return fmt.Errorf("judge-usage.json totals disagree with its runs")
+	}
+
+	if !semanticJSONEqual(quality.Judges, snapshot.outputs["judges.json"]) ||
+		!semanticJSONEqual(quality.JudgeUsage, snapshot.outputs["judge-usage.json"]) ||
+		!semanticJSONEqual(quality.Static, snapshot.outputs["static.json"]) {
+		return fmt.Errorf("quality.json embeds outputs from a different aggregation")
+	}
+	if err := validateStaticAndVerdicts(snapshot, quality, judges); err != nil {
+		return err
+	}
+	if commitment.Validation.StrictEvidence {
+		if commitment.Validation.JudgeRepeats == 0 && len(judges.JudgeRuns) != 0 {
+			return fmt.Errorf(
+				"strict aggregate records judge_repeats=0 but contains judge runs",
+			)
+		}
+		if len(judges.JudgeRuns) == 0 && commitment.Validation.JudgeRepeats != 0 {
+			return fmt.Errorf("strict judges.json omits required judge runs")
+		}
+		if len(judges.JudgeRuns) != len(usage.Runs) {
+			return fmt.Errorf("strict judge run and usage counts disagree")
+		}
+		for _, verdict := range quality.Verdicts {
+			if verdict.RequiredJudgeCount != commitment.Validation.JudgeRepeats ||
+				verdict.JudgeCount < 0 ||
+				verdict.JudgeComplete !=
+					(commitment.Validation.JudgeRepeats == 0 ||
+						verdict.JudgeCount >= commitment.Validation.JudgeRepeats) {
+				return fmt.Errorf("quality.json verdict has inconsistent judge counts")
+			}
+		}
+	}
+	if err := validateCommittedJudgeSidecars(
+		snapshot,
+		commitment,
+		quality,
+		judges,
+		usage,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateStaticAndVerdicts(
+	snapshot *qualityAggregateSnapshot,
+	quality qualityDocument,
+	judges qualityJudgesDocument,
+) error {
+	if _, err := requireJSONObjectKeys(
+		snapshot.outputs["static.json"],
+		"schema_version", "cases", "comparisons",
+	); err != nil {
+		return fmt.Errorf("static.json has an invalid exact schema: %w", err)
+	}
+	var static staticDocument
+	if err := decodeStrictJSON(snapshot.outputs["static.json"], &static); err != nil {
+		return fmt.Errorf("decode static.json: %w", err)
+	}
+	if static.SchemaVersion != 1 || static.Cases == nil || static.Comparisons == nil {
+		return fmt.Errorf("static.json has incompatible schema or collections")
+	}
+	type metricCase struct {
+		AnswerFile                   string `json:"answer_file"`
+		Task                         string `json:"task"`
+		Variant                      string `json:"variant"`
+		Profile                      string `json:"profile"`
+		Name                         string `json:"name"`
+		BoundViolations              int    `json:"repo_view_bound_violation_count"`
+		OutlineCalls                 int    `json:"repo_view_outline_invocation_count"`
+		CommandCap                   int    `json:"repo_view_invocation_cap"`
+		RepoViewCalls                int    `json:"repo_view_invocation_count"`
+		BudgetTamper                 int    `json:"repo_view_budget_tamper_command_count"`
+		ChangedCalls                 int    `json:"repo_view_changed_invocation_count"`
+		FindCalls                    int    `json:"repo_view_find_invocation_count"`
+		InspectCalls                 int    `json:"repo_view_inspect_invocation_count"`
+		SimpleCoreInspectExact       bool   `json:"repo_view_simple_core_inspect_command_exact"`
+		DeepDependencyAWKExact       bool   `json:"repo_view_deep_dependency_awk_exact"`
+		SimpleChangedCommandExact    bool   `json:"repo_view_simple_changed_command_exact"`
+		CommandCapExceeded           bool   `json:"repo_view_invocation_cap_exceeded"`
+		SimpleConsumerInspectExact   bool   `json:"repo_view_simple_consumer_inspect_command_exact"`
+		SimpleOutputsUntruncated     bool   `json:"repo_view_simple_inspect_outputs_untruncated"`
+		DeepCommandSequenceExact     bool   `json:"repo_view_deep_command_sequence_exact"`
+		Completed                    bool   `json:"completed"`
+		ToolAccounting               bool   `json:"tool_call_accounting_valid"`
+		InvocationAccounting         bool   `json:"repo_view_invocation_accounting_valid"`
+		RepoViewToolAccounting       bool   `json:"repo_view_tool_call_accounting_valid"`
+		BudgetAccounting             bool   `json:"repo_view_budget_accounting_valid"`
+		CommandShapeValid            bool   `json:"repo_view_command_shape_valid"`
+		FirstInvocationChanged       bool   `json:"repo_view_first_invocation_changed"`
+		NavigationSemanticsValid     bool   `json:"repo_view_navigation_semantics_valid"`
+		MechanicalNavigationEnforced bool   `json:"mechanical_navigation_semantics_enforced"`
+	}
+	var metrics struct {
+		Cases []metricCase `json:"cases"`
+	}
+	if err := json.Unmarshal(snapshot.inputs["metrics.json"], &metrics); err != nil {
+		return fmt.Errorf("decode metrics for static validation: %w", err)
+	}
+	var rubric struct {
+		Tasks map[string]struct {
+			Criteria []struct {
+				ID       string   `json:"id"`
+				AllOf    []string `json:"all_of"`
+				NoneOf   []string `json:"none_of"`
+				Weight   int      `json:"weight"`
+				Required bool     `json:"required"`
+			} `json:"criteria"`
+		} `json:"tasks"`
+	}
+	rubricBytes := snapshot.inputs[qualityEvaluatorBundlePath("quality-rubric.json")]
+	if err := json.Unmarshal(rubricBytes, &rubric); err != nil || len(rubric.Tasks) == 0 {
+		return fmt.Errorf("decode committed quality rubric for static validation")
+	}
+	expectedCases := make([]staticCase, 0, len(metrics.Cases))
+	for _, metric := range metrics.Cases {
+		if !metric.Completed {
+			continue
+		}
+		answer, ok := snapshot.inputs[metric.AnswerFile]
+		if !ok {
+			return fmt.Errorf("static case %s omits its committed answer", metric.Name)
+		}
+		rubricTask, ok := rubric.Tasks[metric.Task]
+		if !ok || len(rubricTask.Criteria) == 0 {
+			return fmt.Errorf("static case %s has no task rubric", metric.Name)
+		}
+		criteria := make([]staticCriterion, len(rubricTask.Criteria))
+		passedWeight := 0
+		totalWeight := 0
+		for index, criterion := range rubricTask.Criteria {
+			passed := true
+			for _, pattern := range criterion.AllOf {
+				matched, err := regexp.MatchString("(?is)"+pattern, string(answer))
+				if err != nil || !matched {
+					passed = false
+					break
+				}
+			}
+			if passed {
+				for _, pattern := range criterion.NoneOf {
+					matched, err := regexp.MatchString("(?is)"+pattern, string(answer))
+					if err != nil || matched {
+						passed = false
+						break
+					}
+				}
+			}
+			criteria[index] = staticCriterion{
+				ID: criterion.ID, Weight: criterion.Weight,
+				Required: criterion.Required, Passed: passed,
+			}
+			totalWeight += criterion.Weight
+			if passed {
+				passedWeight += criterion.Weight
+			}
+		}
+		optimized := metric.Variant == "optimized"
+		accountingPass := !optimized ||
+			(metric.ToolAccounting && metric.InvocationAccounting &&
+				metric.RepoViewToolAccounting && metric.CommandShapeValid &&
+				metric.MechanicalNavigationEnforced &&
+				(metric.CommandCap == 0 || metric.BudgetAccounting))
+		deepTask := strings.HasPrefix(metric.Task, "deep-")
+		navigationPass := !optimized ||
+			(accountingPass && metric.RepoViewCalls >= 1 &&
+				metric.ChangedCalls == 1 && metric.FirstInvocationChanged &&
+				metric.NavigationSemanticsValid && metric.BoundViolations == 0 &&
+				metric.BudgetTamper == 0 &&
+				(!deepTask ||
+					(metric.FindCalls >= 1 &&
+						metric.InspectCalls+metric.OutlineCalls >= 1 &&
+						metric.CommandCap > 0 && !metric.CommandCapExceeded &&
+						metric.RepoViewCalls <= metric.CommandCap)))
+		commandCapPass := ((!optimized || !deepTask) && metric.CommandCap == 0) ||
+			(metric.CommandCap > 0 && !metric.CommandCapExceeded &&
+				metric.RepoViewCalls <= metric.CommandCap)
+		navigationCalls := staticNavigationCalls{
+			Total: metric.RepoViewCalls, CommandCap: metric.CommandCap,
+			CommandCapPass:     commandCapPass,
+			CommandCapExceeded: metric.CommandCapExceeded,
+			BudgetTamper:       metric.BudgetTamper, Changed: metric.ChangedCalls,
+			Find: metric.FindCalls, Inspect: metric.InspectCalls,
+			Outline: metric.OutlineCalls, BoundViolations: metric.BoundViolations,
+			SimpleContract: staticSimpleContract{
+				ChangedCommandExact:         metric.SimpleChangedCommandExact,
+				CoreInspectCommandExact:     metric.SimpleCoreInspectExact,
+				ConsumerInspectCommandExact: metric.SimpleConsumerInspectExact,
+				InspectOutputsUntruncated:   metric.SimpleOutputsUntruncated,
+			},
+			DeepContract: staticDeepContract{
+				CommandSequenceExact: metric.DeepCommandSequenceExact,
+				DependencyAWKExact:   metric.DeepDependencyAWKExact,
+			},
+		}
+		requiredCriteriaPass := true
+		for _, criterion := range criteria {
+			if criterion.Required && !criterion.Passed {
+				requiredCriteriaPass = false
+			}
+		}
+		score := float64(passedWeight) / float64(totalWeight) * 100
+		expectedCases = append(expectedCases, staticCase{
+			Name: metric.Name, Task: metric.Task, Variant: metric.Variant,
+			Profile: metric.Profile, NavigationRequired: optimized,
+			AccountingPass: accountingPass, NavigationPass: navigationPass,
+			NavigationCalls: navigationCalls, Criteria: criteria,
+			PassedWeight: passedWeight, TotalWeight: totalWeight,
+			ScorePercent: score,
+			RequiredPass: accountingPass && navigationPass && requiredCriteriaPass,
+		})
+	}
+	if !reflect.DeepEqual(static.Cases, expectedCases) {
+		return fmt.Errorf("static.json cases disagree with metrics, answers, or rubric")
+	}
+	baselineByTask := make(map[string]staticCase)
+	for _, current := range expectedCases {
+		if current.Variant == "baseline" {
+			if _, exists := baselineByTask[current.Task]; !exists {
+				baselineByTask[current.Task] = current
+			}
+		}
+	}
+	var expectedComparisons []staticComparison
+	for _, current := range expectedCases {
+		if current.Variant != "optimized" {
+			continue
+		}
+		baseline, ok := baselineByTask[current.Task]
+		if !ok {
+			continue
+		}
+		expectedComparisons = append(expectedComparisons, staticComparison{
+			Task: current.Task, Profile: current.Profile,
+			BaselineScorePercent:  baseline.ScorePercent,
+			CandidateScorePercent: current.ScorePercent,
+			NavigationRequired:    current.NavigationRequired,
+			NavigationPass:        current.NavigationPass,
+			AccountingPass:        current.AccountingPass,
+			NavigationCalls:       current.NavigationCalls,
+			RequiredPass:          current.RequiredPass,
+			StaticNotWorse: current.RequiredPass &&
+				current.ScorePercent >= baseline.ScorePercent,
+		})
+	}
+	if expectedComparisons == nil {
+		expectedComparisons = []staticComparison{}
+	}
+	if !reflect.DeepEqual(static.Comparisons, expectedComparisons) {
+		return fmt.Errorf("static.json comparisons disagree with static cases")
+	}
+	judgeByName := make(map[string]qualityJudgeCandidate)
+	for _, judge := range judges.Candidates {
+		judgeByName[judge.Task+"\x00"+judge.Name] = judge
+	}
+	expectedVerdicts := make([]qualityVerdict, 0, len(expectedComparisons))
+	for _, comparison := range expectedComparisons {
+		candidateName := "optimized-" + comparison.Profile + "-" + comparison.Task
+		if comparison.Profile == "default" {
+			candidateName = "optimized-" + comparison.Task
+		}
+		judge, evaluated := judgeByName[comparison.Task+"\x00"+candidateName]
+		judgeCount := 0
+		var judgesNotWorse *bool
+		var coreMatch *bool
+		if evaluated {
+			judgeCount = judge.JudgeCount
+			notWorse := judge.AllNotWorse
+			core := judge.AllCoreConclusionMatch
+			judgesNotWorse = &notWorse
+			coreMatch = &core
+		}
+		judgeComplete := quality.RequiredJudgeCount == 0 ||
+			(evaluated && judgeCount >= quality.RequiredJudgeCount)
+		expectedVerdicts = append(expectedVerdicts, qualityVerdict{
+			Task: comparison.Task, Profile: comparison.Profile,
+			NavigationRequired: comparison.NavigationRequired,
+			NavigationPass:     comparison.NavigationPass,
+			AccountingPass:     comparison.AccountingPass,
+			NavigationCalls:    comparison.NavigationCalls,
+			StaticNotWorse:     comparison.StaticNotWorse,
+			JudgeEvaluated:     evaluated, JudgeCount: judgeCount,
+			RequiredJudgeCount: quality.RequiredJudgeCount,
+			JudgeComplete:      judgeComplete, JudgesNotWorse: judgesNotWorse,
+			CoreConclusionMatch: coreMatch,
+			QualityPass: comparison.StaticNotWorse && judgeComplete &&
+				(!evaluated || judge.AllNotWorse),
+		})
+	}
+	if !reflect.DeepEqual(quality.Verdicts, expectedVerdicts) {
+		return fmt.Errorf("quality.json verdicts disagree with static and judge outputs")
+	}
+	return nil
+}
+
+func validateJudgeMembership(
+	metricsBytes []byte,
+	judges qualityJudgesDocument,
+	commitment qualityInputCommitment,
+) error {
+	var metrics struct {
+		Cases []struct {
+			Name      string `json:"name"`
+			Task      string `json:"task"`
+			Variant   string `json:"variant"`
+			Completed bool   `json:"completed"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(metricsBytes, &metrics); err != nil {
+		return fmt.Errorf("decode metrics for judge membership: %w", err)
+	}
+	baselines := make(map[string]bool)
+	candidates := make(map[string]map[string]bool)
+	for _, current := range metrics.Cases {
+		if !current.Completed {
+			continue
+		}
+		switch current.Variant {
+		case "baseline":
+			baselines[current.Task] = current.Name == "baseline-"+current.Task
+		case "optimized":
+			if candidates[current.Task] == nil {
+				candidates[current.Task] = make(map[string]bool)
+			}
+			candidates[current.Task][current.Name] = true
+		}
+	}
+	runCounts := make(map[string]int)
+	for _, run := range judges.JudgeRuns {
+		expected := candidates[run.Task]
+		if !baselines[run.Task] || len(expected) == 0 ||
+			len(run.Candidates) != len(expected) {
+			return fmt.Errorf("judge run task %s is not a completed metrics matrix", run.Task)
+		}
+		for _, candidate := range run.Candidates {
+			if !expected[candidate.Name] {
+				return fmt.Errorf(
+					"judge run task %s contains unknown candidate %s",
+					run.Task,
+					candidate.Name,
+				)
+			}
+		}
+		runCounts[run.Task]++
+	}
+	if commitment.Validation.StrictEvidence && commitment.Validation.JudgeRepeats > 0 {
+		for task, expected := range candidates {
+			if baselines[task] && len(expected) > 0 &&
+				runCounts[task] != commitment.Validation.JudgeRepeats {
+				return fmt.Errorf(
+					"strict judge task %s has %d runs, want %d",
+					task,
+					runCounts[task],
+					commitment.Validation.JudgeRepeats,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func validateCommittedJudgeSidecars(
+	snapshot *qualityAggregateSnapshot,
+	commitment qualityInputCommitment,
+	quality qualityDocument,
+	judges qualityJudgesDocument,
+	usage qualityJudgeUsageDocument,
+) error {
+	expectedPaths := make(map[string]bool)
+	strictRepeats := make(map[string]map[int]bool)
+	for index, usageRun := range usage.Runs {
+		task, repeat, ok := judgeTaskAndRepeat(usageRun.Name)
+		if !ok || judges.JudgeRuns[index].Task != task {
+			return fmt.Errorf(
+				"judge usage run %q is not bound to its judges.json run",
+				usageRun.Name,
+			)
+		}
+		if strictRepeats[task] == nil {
+			strictRepeats[task] = make(map[int]bool)
+		}
+		if strictRepeats[task][repeat] {
+			return fmt.Errorf("judge task %s repeats slot %d", task, repeat)
+		}
+		strictRepeats[task][repeat] = true
+
+		currentSuffixes := []string{
+			"json", "jsonl", "exit-code", "inputs.sha256", "result.sha256",
+		}
+		legacySuffixes := []string{
+			"json", "jsonl", "exit-code", "legacy-attestation.json",
+		}
+		currentComplete := completeJudgeSidecarSet(
+			snapshot.inputs,
+			usageRun.Name,
+			currentSuffixes,
+		)
+		legacyComplete := completeJudgeSidecarSet(
+			snapshot.inputs,
+			usageRun.Name,
+			legacySuffixes,
+		)
+		if commitment.Validation.StrictEvidence && !currentComplete {
+			return fmt.Errorf(
+				"strict judge %s omits a current-cache sidecar",
+				usageRun.Name,
+			)
+		}
+		if !currentComplete && !legacyComplete {
+			return fmt.Errorf("judge %s has an incomplete sidecar set", usageRun.Name)
+		}
+		selectedSuffixes := currentSuffixes
+		if !currentComplete {
+			selectedSuffixes = legacySuffixes
+		}
+		for _, suffix := range selectedSuffixes {
+			expectedPaths["quality/"+usageRun.Name+"."+suffix] = true
+		}
+		output := snapshot.inputs["quality/"+usageRun.Name+".json"]
+		log := snapshot.inputs["quality/"+usageRun.Name+".jsonl"]
+		exitCode := snapshot.inputs["quality/"+usageRun.Name+".exit-code"]
+		if strings.TrimSpace(string(exitCode)) != "0" ||
+			!semanticJSONEqual(output, mustMarshalJSON(judges.JudgeRuns[index])) {
+			return fmt.Errorf("judge %s output or exit code is not bound to judges.json", usageRun.Name)
+		}
+		logUsage, finalOutput, err := readCommittedJudgeLog(log)
+		if err != nil {
+			return fmt.Errorf("judge %s transcript: %w", usageRun.Name, err)
+		}
+		logUsage.Name = usageRun.Name
+		if !semanticJSONEqual(output, finalOutput) ||
+			!reflect.DeepEqual(logUsage, usageRun) {
+			return fmt.Errorf(
+				"judge %s transcript is not bound to its output and usage",
+				usageRun.Name,
+			)
+		}
+		if currentComplete {
+			inputDigest := strings.TrimSpace(string(
+				snapshot.inputs["quality/"+usageRun.Name+".inputs.sha256"],
+			))
+			expectedInputDigest, err := expectedJudgeInputDigest(
+				snapshot,
+				commitment,
+				quality,
+				usageRun.Name,
+			)
+			if err != nil {
+				return err
+			}
+			storedResult := strings.TrimSpace(string(
+				snapshot.inputs["quality/"+usageRun.Name+".result.sha256"],
+			))
+			expectedResult := committedJudgeResultDigest(
+				usageRun.Name,
+				inputDigest,
+				output,
+				log,
+				"0",
+			)
+			if !validSHA256Digest(inputDigest) ||
+				inputDigest != expectedInputDigest ||
+				storedResult != expectedResult {
+				return fmt.Errorf(
+					"judge %s has an invalid input/result binding",
+					usageRun.Name,
+				)
+			}
+		} else {
+			attestation := snapshot.inputs["quality/"+usageRun.Name+".legacy-attestation.json"]
+			expectedInputDigest, err := expectedLegacyJudgeInputDigest(
+				snapshot,
+				usageRun.Name,
+			)
+			if err != nil {
+				return err
+			}
+			if err := validateLegacyJudgeAttestation(
+				attestation,
+				usageRun.Name,
+				expectedInputDigest,
+				output,
+				log,
+				exitCode,
+			); err != nil {
+				return err
+			}
+		}
+	}
+	if commitment.Validation.StrictEvidence {
+		if commitment.Validation.JudgeRepeats == 0 && len(usage.Runs) != 0 {
+			return fmt.Errorf(
+				"strict aggregate records judge_repeats=0 but contains judge runs",
+			)
+		}
+		for task, repeats := range strictRepeats {
+			if len(repeats) != commitment.Validation.JudgeRepeats {
+				return fmt.Errorf(
+					"strict judge task %s has %d runs, want %d",
+					task,
+					len(repeats),
+					commitment.Validation.JudgeRepeats,
+				)
+			}
+			for repeat := 1; repeat <= commitment.Validation.JudgeRepeats; repeat++ {
+				if !repeats[repeat] {
+					return fmt.Errorf(
+						"strict judge task %s omits repeat %d",
+						task,
+						repeat,
+					)
+				}
+			}
+		}
+	}
+	for relative := range commitment.Inputs {
+		if strings.HasPrefix(relative, "quality/judge-") &&
+			!expectedPaths[relative] {
+			return fmt.Errorf("quality input commits unselected judge sidecar %s", relative)
+		}
+	}
+	return validateJudgeAggregates(judges)
+}
+
+func completeJudgeSidecarSet(
+	inputs map[string][]byte,
+	name string,
+	suffixes []string,
+) bool {
+	for _, suffix := range suffixes {
+		if _, ok := inputs["quality/"+name+"."+suffix]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func mustMarshalJSON(value any) []byte {
+	content, _ := json.Marshal(value)
+	return content
+}
+
+func committedJudgeResultDigest(
+	name string,
+	inputDigest string,
+	output []byte,
+	log []byte,
+	exitCode string,
+) string {
+	var binding bytes.Buffer
+	fmt.Fprintf(&binding, "judge-cache-schema\x008\x00")
+	fmt.Fprintf(&binding, "judge-identity\x00%s\x00", name)
+	fmt.Fprintf(&binding, "input-digest\x00%s\x00", inputDigest)
+	fmt.Fprintf(&binding, "output-sha256\x00%s\x00", sha256Bytes(output))
+	fmt.Fprintf(&binding, "jsonl-sha256\x00%s\x00", sha256Bytes(log))
+	fmt.Fprintf(&binding, "exit-code\x00%s\x00", exitCode)
+	return sha256Bytes(binding.Bytes())
+}
+
+func expectedJudgeInputDigest(
+	snapshot *qualityAggregateSnapshot,
+	commitment qualityInputCommitment,
+	quality qualityDocument,
+	judgeName string,
+) (string, error) {
+	task, _, ok := judgeTaskAndRepeat(judgeName)
+	if !ok {
+		return "", fmt.Errorf("invalid committed judge identity %q", judgeName)
+	}
+	var manifest struct {
+		PromptFiles     map[string]string `json:"prompt_files"`
+		CasePromptFiles map[string]string `json:"case_prompt_files"`
+		TargetCommit    string            `json:"target_commit"`
+	}
+	if err := json.Unmarshal(snapshot.inputs["manifest.json"], &manifest); err != nil ||
+		!validGitCommit(manifest.TargetCommit) {
+		return "", fmt.Errorf("committed judge %s has no valid target commit", judgeName)
+	}
+	var metrics struct {
+		Cases []struct {
+			Name       string `json:"name"`
+			Task       string `json:"task"`
+			Variant    string `json:"variant"`
+			Profile    string `json:"profile"`
+			AnswerFile string `json:"answer_file"`
+			Completed  bool   `json:"completed"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(snapshot.inputs["metrics.json"], &metrics); err != nil {
+		return "", fmt.Errorf("decode committed judge metrics: %w", err)
+	}
+	type candidateInput struct {
+		name       string
+		profile    string
+		userPrompt []byte
+		answer     []byte
+		transcript []byte
+		packet     []byte
+	}
+	var candidates []candidateInput
+	for _, current := range metrics.Cases {
+		if !current.Completed || current.Task != task || current.Variant != "optimized" {
+			continue
+		}
+		packetPath := "changed-packet-" + current.Profile + ".json"
+		if current.Profile == "default" {
+			_, oldName := snapshot.inputs["changed-packet.json"]
+			_, explicitName := snapshot.inputs[packetPath]
+			if oldName == explicitName {
+				return "", fmt.Errorf(
+					"committed judge %s has ambiguous default packet",
+					judgeName,
+				)
+			}
+			if oldName {
+				packetPath = "changed-packet.json"
+			}
+		}
+		userPromptPath := manifest.CasePromptFiles[current.Name]
+		userPrompt, userPromptOK := snapshot.inputs[userPromptPath]
+		answer, answerOK := snapshot.inputs[current.AnswerFile]
+		transcript, transcriptOK := snapshot.inputs[current.Name+".jsonl"]
+		packet, packetOK := snapshot.inputs[packetPath]
+		if userPromptPath == "" || !userPromptOK || !answerOK ||
+			!transcriptOK || !packetOK {
+			return "", fmt.Errorf("committed judge %s omits candidate inputs", judgeName)
+		}
+		candidates = append(candidates, candidateInput{
+			name:       current.Name,
+			profile:    current.Profile,
+			userPrompt: userPrompt,
+			answer:     answer,
+			transcript: transcript,
+			packet:     packet,
+		})
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		leftRecord := candidates[left].name + "\t" + candidates[left].profile
+		rightRecord := candidates[right].name + "\t" + candidates[right].profile
+		return leftRecord < rightRecord
+	})
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("committed judge %s has no candidates", judgeName)
+	}
+	candidateNames := make([]string, len(candidates))
+	var candidateSemantics strings.Builder
+	for index, candidate := range candidates {
+		candidateNames[index] = candidate.name
+		fmt.Fprintf(
+			&candidateSemantics,
+			"- %s: exact_user_prompt=<candidate-user-prompt-%d>; answer=<candidate-answer-%d>; transcript=<candidate-transcript-%d>; changed_packet=<candidate-packet-%d>\n",
+			candidate.name,
+			index,
+			index,
+			index,
+			index,
+		)
+	}
+	candidateNamesJSON, _ := json.Marshal(candidateNames)
+	promptSemantics := renderCommittedJudgePromptSemantics(
+		manifest.TargetCommit,
+		task,
+		"baseline-"+task,
+		strings.Join(candidateNames, " "),
+		candidateSemantics.String(),
+	)
+	modelConfiguration := "routing=router-selected;model-configuration=none"
+	if quality.Evaluator.ModelMode == "pinned" {
+		modelConfiguration = "model=" + quality.Evaluator.Model +
+			";model-reasoning-effort=high"
+	}
+	rubric := snapshot.inputs[qualityEvaluatorBundlePath("quality-rubric.json")]
+	schema := snapshot.inputs[qualityEvaluatorBundlePath("quality-output-schema.json")]
+	taskPromptPath := manifest.PromptFiles[task]
+	baselineUserPromptPath := manifest.CasePromptFiles["baseline-"+task]
+	taskPrompt := snapshot.inputs[taskPromptPath]
+	baselineUserPrompt := snapshot.inputs[baselineUserPromptPath]
+	baselineAnswer := snapshot.inputs["answers/baseline-"+task+".md"]
+	baselineTranscript := snapshot.inputs["baseline-"+task+".jsonl"]
+	if rubric == nil || schema == nil || taskPromptPath == "" || taskPrompt == nil ||
+		baselineUserPromptPath == "" || baselineUserPrompt == nil ||
+		baselineAnswer == nil || baselineTranscript == nil {
+		return "", fmt.Errorf("committed judge %s omits baseline evaluator inputs", judgeName)
+	}
+	var binding bytes.Buffer
+	writeJudgeDigestField(&binding, "judge-cache-schema", "8")
+	writeJudgeDigestField(&binding, "judge-identity", judgeName)
+	writeJudgeDigestField(&binding, "target-commit", manifest.TargetCommit)
+	writeJudgeDigestField(&binding, "task", task)
+	writeJudgeDigestField(&binding, "baseline", "baseline-"+task)
+	writeJudgeDigestField(&binding, "candidate-identities", string(candidateNamesJSON))
+	writeJudgeDigestField(&binding, "developer-instructions", qualityNoCollaboration)
+	writeJudgeDigestField(
+		&binding,
+		"evaluator-config",
+		"codex-exec;private-codex-home=auth-only-and-tool-denied;"+
+			modelConfiguration+";codex-version="+quality.Evaluator.CodexVersion+
+			";permissions=quality-audit;ephemeral=true;json=true;output-schema=true",
+	)
+	writeJudgeDigestField(&binding, "prompt-semantics", promptSemantics)
+	for _, featureFlag := range qualityFeatureFlags {
+		writeJudgeDigestField(&binding, "feature-flag", featureFlag)
+	}
+	for _, semantic := range commitment.JudgeEnvironmentSemantics {
+		writeJudgeDigestField(&binding, "isolation-semantics", semantic)
+	}
+	writeJudgeDigestInput(&binding, "json-input", "quality-rubric", canonicalJSONDigest(rubric, false))
+	writeJudgeDigestInput(&binding, "json-input", "quality-output-schema", canonicalJSONDigest(schema, false))
+	writeJudgeDigestInput(&binding, "file-input", "task-prompt", sha256Bytes(taskPrompt))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-user-prompt", sha256Bytes(baselineUserPrompt))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-answer", sha256Bytes(baselineAnswer))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-transcript", sha256Bytes(baselineTranscript))
+	for index, candidate := range candidates {
+		writeJudgeDigestInput(
+			&binding,
+			"file-input",
+			fmt.Sprintf("candidate-user-prompt-%d", index),
+			sha256Bytes(candidate.userPrompt),
+		)
+		writeJudgeDigestInput(
+			&binding,
+			"file-input",
+			fmt.Sprintf("candidate-answer-%d", index),
+			sha256Bytes(candidate.answer),
+		)
+		writeJudgeDigestInput(
+			&binding,
+			"file-input",
+			fmt.Sprintf("candidate-transcript-%d", index),
+			sha256Bytes(candidate.transcript),
+		)
+		writeJudgeDigestInput(
+			&binding,
+			"json-input",
+			fmt.Sprintf("candidate-packet-%d", index),
+			canonicalJSONDigest(candidate.packet, true),
+		)
+	}
+	return sha256Bytes(binding.Bytes()), nil
+}
+
+type legacyJudgeAttestation struct {
+	Provenance struct {
+		Model          string `json:"model"`
+		CodexVersion   string `json:"codex_version"`
+		Isolation      string `json:"isolation"`
+		OperatorAction string `json:"operator_action"`
+	} `json:"provenance"`
+	Status           string `json:"status"`
+	ArtifactIdentity string `json:"artifact_identity"`
+	InputSHA256      string `json:"input_sha256"`
+	OutputSHA256     string `json:"output_sha256"`
+	TranscriptSHA256 string `json:"transcript_sha256"`
+	ExitCodeSHA256   string `json:"exit_code_sha256"`
+	Transcript       struct {
+		Contract                       string `json:"contract"`
+		OutputMatchesFinalAgentMessage bool   `json:"output_matches_final_agent_message"`
+		SchemaValidNumericOutput       bool   `json:"schema_valid_numeric_output"`
+	} `json:"transcript_validation"`
+	SchemaVersion int `json:"schema_version"`
+	ExitCode      int `json:"exit_code"`
+}
+
+func validateLegacyJudgeAttestation(
+	content []byte,
+	artifactIdentity string,
+	expectedInputDigest string,
+	output []byte,
+	transcript []byte,
+	exitCode []byte,
+) error {
+	if _, err := requireJSONObjectKeys(
+		content,
+		"schema_version",
+		"status",
+		"artifact_identity",
+		"provenance",
+		"input_sha256",
+		"output_sha256",
+		"transcript_sha256",
+		"exit_code",
+		"exit_code_sha256",
+		"transcript_validation",
+	); err != nil {
+		return fmt.Errorf("legacy judge %s has an invalid attestation schema: %w", artifactIdentity, err)
+	}
+	var attestation legacyJudgeAttestation
+	if err := decodeStrictJSON(content, &attestation); err != nil {
+		return fmt.Errorf("decode legacy judge %s attestation: %w", artifactIdentity, err)
+	}
+	if attestation.SchemaVersion != 2 ||
+		attestation.Status != "legacy-unisolated-attested" ||
+		attestation.ArtifactIdentity != artifactIdentity ||
+		attestation.Provenance.Model != "unknown" ||
+		attestation.Provenance.CodexVersion != "unknown" ||
+		attestation.Provenance.Isolation != "legacy-unisolated" ||
+		attestation.Provenance.OperatorAction != "--bind-legacy-judges" ||
+		attestation.InputSHA256 != expectedInputDigest ||
+		attestation.OutputSHA256 != sha256Bytes(output) ||
+		attestation.TranscriptSHA256 != sha256Bytes(transcript) ||
+		attestation.ExitCode != 0 ||
+		attestation.ExitCodeSHA256 != sha256Bytes(exitCode) ||
+		attestation.Transcript.Contract !=
+			"ordered-lifecycle-and-command-pairing-v1" ||
+		!attestation.Transcript.OutputMatchesFinalAgentMessage ||
+		!attestation.Transcript.SchemaValidNumericOutput {
+		return fmt.Errorf("legacy judge %s has an invalid attestation binding", artifactIdentity)
+	}
+	return nil
+}
+
+func expectedLegacyJudgeInputDigest(
+	snapshot *qualityAggregateSnapshot,
+	judgeName string,
+) (string, error) {
+	task, _, ok := judgeTaskAndRepeat(judgeName)
+	if !ok {
+		return "", fmt.Errorf("invalid legacy judge identity %q", judgeName)
+	}
+	var manifest struct {
+		PromptFiles     map[string]string `json:"prompt_files"`
+		CasePromptFiles map[string]string `json:"case_prompt_files"`
+		TargetCommit    string            `json:"target_commit"`
+	}
+	if err := json.Unmarshal(snapshot.inputs["manifest.json"], &manifest); err != nil ||
+		!validGitCommit(manifest.TargetCommit) {
+		return "", fmt.Errorf("legacy judge %s has no valid target commit", judgeName)
+	}
+	type candidate struct {
+		name       string
+		profile    string
+		userPrompt []byte
+		answer     []byte
+		transcript []byte
+		packet     []byte
+	}
+	var metrics struct {
+		Cases []struct {
+			Name       string `json:"name"`
+			Task       string `json:"task"`
+			Variant    string `json:"variant"`
+			Profile    string `json:"profile"`
+			AnswerFile string `json:"answer_file"`
+			Completed  bool   `json:"completed"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(snapshot.inputs["metrics.json"], &metrics); err != nil {
+		return "", fmt.Errorf("decode legacy judge metrics: %w", err)
+	}
+	var candidates []candidate
+	for _, current := range metrics.Cases {
+		if !current.Completed || current.Task != task || current.Variant != "optimized" {
+			continue
+		}
+		packetPath := "changed-packet-" + current.Profile + ".json"
+		if current.Profile == "default" {
+			if _, ok := snapshot.inputs["changed-packet.json"]; ok {
+				packetPath = "changed-packet.json"
+			}
+		}
+		userPromptPath := manifest.CasePromptFiles[current.Name]
+		userPrompt, userPromptOK := snapshot.inputs[userPromptPath]
+		answer, answerOK := snapshot.inputs[current.AnswerFile]
+		transcript, transcriptOK := snapshot.inputs[current.Name+".jsonl"]
+		packet, packetOK := snapshot.inputs[packetPath]
+		if userPromptPath == "" || !userPromptOK || !answerOK ||
+			!transcriptOK || !packetOK {
+			return "", fmt.Errorf("legacy judge %s omits candidate inputs", judgeName)
+		}
+		candidates = append(candidates, candidate{
+			name: current.Name, profile: current.Profile,
+			userPrompt: userPrompt, answer: answer,
+			transcript: transcript, packet: packet,
+		})
+	}
+	sort.Slice(candidates, func(left, right int) bool {
+		return candidates[left].name+"\t"+candidates[left].profile <
+			candidates[right].name+"\t"+candidates[right].profile
+	})
+	if len(candidates) == 0 {
+		return "", fmt.Errorf("legacy judge %s has no candidates", judgeName)
+	}
+	names := make([]string, len(candidates))
+	var semanticList strings.Builder
+	for index, current := range candidates {
+		names[index] = current.name
+		fmt.Fprintf(
+			&semanticList,
+			"- %s: exact_user_prompt=<candidate-user-prompt-%d>; answer=<candidate-answer-%d>; transcript=<candidate-transcript-%d>; changed_packet=<candidate-packet-%d>\n",
+			current.name, index, index, index, index,
+		)
+	}
+	namesJSON, _ := json.Marshal(names)
+	prompt := renderCommittedJudgePromptSemantics(
+		manifest.TargetCommit,
+		task,
+		"baseline-"+task,
+		strings.Join(names, " "),
+		semanticList.String(),
+	)
+	rubric := snapshot.inputs[qualityEvaluatorBundlePath("quality-rubric.json")]
+	schema := snapshot.inputs[qualityEvaluatorBundlePath("quality-output-schema.json")]
+	taskPromptPath := manifest.PromptFiles[task]
+	baselineUserPromptPath := manifest.CasePromptFiles["baseline-"+task]
+	taskPrompt := snapshot.inputs[taskPromptPath]
+	baselineUserPrompt := snapshot.inputs[baselineUserPromptPath]
+	baselineAnswer := snapshot.inputs["answers/baseline-"+task+".md"]
+	baselineTranscript := snapshot.inputs["baseline-"+task+".jsonl"]
+	if rubric == nil || schema == nil || taskPromptPath == "" || taskPrompt == nil ||
+		baselineUserPromptPath == "" || baselineUserPrompt == nil ||
+		baselineAnswer == nil || baselineTranscript == nil {
+		return "", fmt.Errorf("legacy judge %s omits baseline evaluator inputs", judgeName)
+	}
+	var binding bytes.Buffer
+	writeJudgeDigestField(&binding, "legacy-judge-attestation-schema", "2")
+	writeJudgeDigestField(&binding, "status", "legacy-unisolated-attested")
+	writeJudgeDigestField(&binding, "artifact-identity", judgeName)
+	writeJudgeDigestField(&binding, "model", "unknown")
+	writeJudgeDigestField(&binding, "codex-version", "unknown")
+	writeJudgeDigestField(&binding, "isolation", "legacy-unisolated")
+	writeJudgeDigestField(&binding, "target-commit", manifest.TargetCommit)
+	writeJudgeDigestField(&binding, "task", task)
+	writeJudgeDigestField(&binding, "baseline", "baseline-"+task)
+	writeJudgeDigestField(&binding, "candidate-identities", string(namesJSON))
+	writeJudgeDigestField(&binding, "prompt-semantics", prompt)
+	writeJudgeDigestInput(&binding, "json-input", "quality-rubric", canonicalJSONDigest(rubric, false))
+	writeJudgeDigestInput(&binding, "json-input", "quality-output-schema", canonicalJSONDigest(schema, false))
+	writeJudgeDigestInput(&binding, "file-input", "task-prompt", sha256Bytes(taskPrompt))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-user-prompt", sha256Bytes(baselineUserPrompt))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-answer", sha256Bytes(baselineAnswer))
+	writeJudgeDigestInput(&binding, "file-input", "baseline-transcript", sha256Bytes(baselineTranscript))
+	for index, current := range candidates {
+		writeJudgeDigestInput(&binding, "file-input", fmt.Sprintf("candidate-user-prompt-%d", index), sha256Bytes(current.userPrompt))
+		writeJudgeDigestInput(&binding, "file-input", fmt.Sprintf("candidate-answer-%d", index), sha256Bytes(current.answer))
+		writeJudgeDigestInput(&binding, "file-input", fmt.Sprintf("candidate-transcript-%d", index), sha256Bytes(current.transcript))
+		writeJudgeDigestInput(&binding, "json-input", fmt.Sprintf("candidate-packet-%d", index), canonicalJSONDigest(current.packet, true))
+	}
+	return sha256Bytes(binding.Bytes()), nil
+}
+
+func writeJudgeDigestField(buffer *bytes.Buffer, name, value string) {
+	fmt.Fprintf(buffer, "%s\x00%s\x00", name, value)
+}
+
+func writeJudgeDigestInput(
+	buffer *bytes.Buffer,
+	kind, name, digest string,
+) {
+	fmt.Fprintf(buffer, "%s\x00%s\x00%s\x00", kind, name, digest)
+}
+
+func canonicalJSONDigest(content []byte, normalizeRoots bool) string {
+	decoder := json.NewDecoder(bytes.NewReader(content))
+	decoder.UseNumber()
+	var value any
+	if decoder.Decode(&value) != nil {
+		return ""
+	}
+	if normalizeRoots {
+		value = normalizeJSONRoots(value)
+	}
+	var canonical bytes.Buffer
+	encoder := json.NewEncoder(&canonical)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return ""
+	}
+	return sha256Bytes(jqCompatibleUnicodeSeparators(canonical.Bytes()))
+}
+
+// encoding/json always escapes U+2028 and U+2029, even when HTML escaping is
+// disabled. jq -cS writes both separators as literal UTF-8. Convert only the
+// genuine JSON escapes that encoding/json emitted; an even run of backslashes
+// represents literal text such as `\u2028` and must remain escaped.
+func jqCompatibleUnicodeSeparators(content []byte) []byte {
+	result := make([]byte, 0, len(content))
+	for index := 0; index < len(content); {
+		if content[index] != '\\' {
+			result = append(result, content[index])
+			index++
+			continue
+		}
+		end := index
+		for end < len(content) && content[end] == '\\' {
+			end++
+		}
+		if (end-index)%2 == 1 && end+5 <= len(content) &&
+			content[end] == 'u' &&
+			(string(content[end+1:end+5]) == "2028" ||
+				string(content[end+1:end+5]) == "2029") {
+			result = append(result, content[index:end-1]...)
+			result = append(result, 0xe2, 0x80)
+			if content[end+4] == '8' {
+				result = append(result, 0xa8)
+			} else {
+				result = append(result, 0xa9)
+			}
+			index = end + 5
+			continue
+		}
+		result = append(result, content[index:end]...)
+		index = end
+	}
+	return result
+}
+
+func normalizeJSONRoots(value any) any {
+	switch current := value.(type) {
+	case map[string]any:
+		for key, nested := range current {
+			current[key] = normalizeJSONRoots(nested)
+		}
+		if _, ok := current["root"]; ok {
+			current["root"] = "<target-root>"
+		}
+		return current
+	case []any:
+		for index := range current {
+			current[index] = normalizeJSONRoots(current[index])
+		}
+		return current
+	default:
+		return value
+	}
+}
+
+func renderCommittedJudgePromptSemantics(
+	targetCommit, task, baselineName, candidateNames, candidates string,
+) string {
+	return fmt.Sprintf(`Act as an independent code-review quality evaluator. The authoritative source checkout is <target-root> at commit %s. Read the shared task prompt at <task-prompt>, the task rubric at <quality-rubric>, the baseline's exact user prompt at <baseline-user-prompt>, the baseline answer at <baseline-answer>, its raw transcript at <baseline-transcript>, and each candidate's exact user prompt, answer, transcript, and changed packet:
+%s
+Independently inspect any source in the authoritative checkout needed to verify claims. Each changed packet is that candidate profile's navigation output, not the evaluator's sole ground truth. A claim supported by the source or its answer's raw transcript is grounded even when it is absent from its changed packet. Validate claims about executed commands, tests, or sandbox failures from that answer's transcript. Do not treat a different checkout prefix as broken when the linked file exists at the same commit.
+
+Mandatory evaluator input protocol:
+1. Read the shared task prompt, rubric, baseline exact user prompt, baseline answer, every candidate exact user prompt, changed packet, answer, and transcript in separate commands. Never concatenate multiple evaluator inputs into one command output. Issue exactly one shell command at a time and wait for its completed result before issuing the next; parallel command execution invalidates the audit.
+2. Read each baseline and candidate answer through EOF before scoring. Use a line count and bounded chunks when needed, and verify the final chunk was seen.
+3. If any command output is truncated, issue narrower reads for the missing content before drawing a conclusion.
+4. Before reporting a critical omission, unsupported negative claim, material contradiction, or baseline point omitted, search the candidate answer directly for each supposedly missing concept and read the matching section. Do not infer omission from an earlier truncated read.
+
+The shared task prompt and rubric define common answer scope. Each case's exact user prompt governs only that case's task adherence and claims about what was requested. Never apply an optimized profile's navigation constraints or answer instructions to the baseline or to another profile.
+
+Score every answer absolutely against the authoritative source, shared task prompt, rubric, and its own exact user prompt for the requested %s task. Assign correctness, completeness, grounding, and task-adherence scores against those requirements, never against the baseline's length or exploratory breadth. The baseline is only a comparator, not ground truth. Do not reward verbosity. A shorter answer can receive the same completeness score when it fully covers the requested scope. Penalize factual errors, genuinely unsupported claims, missed required behavior or findings, and failure to answer the task.
+
+For each candidate, also compare behavior to baseline: core_conclusion_matches_baseline is true when the main technical conclusion and finding set align; material_contradictions contains only candidate claims contradicted by authoritative source or by the candidate's own answer/transcript; baseline_material_points_omitted contains only correct baseline content that is required by the shared task prompt or rubric, or is necessary to make the candidate's own core conclusion correct and adequately grounded, and that the candidate loses without equally strong substitute coverage; candidate_material_additions lists material correct content the candidate adds. Do not count extra examples, optional breadth, exhaustive unaffected-method lists, or deeper call-chain tracing beyond an accurately stated evidence boundary as baseline material points omitted. Treat an explicit and accurate construction-only limitation as satisfying a construction-versus-consumption distinction unless the shared task prompt or rubric expressly requires a proven consuming chain. A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction. Set not_worse_than_baseline true only when the candidate has no material correctness, completeness, grounding, or task-adherence regression. Output task exactly %s, baseline name exactly %s, and exactly these candidate names: %s. Every score must be an integer from 1 through 5; never emit zero placeholder scores or omit a candidate. Return JSON matching the provided schema. Read only and do not modify files.`, targetCommit, candidates, task, task, baselineName, candidateNames)
+}
+
+func readCommittedJudgeLog(
+	content []byte,
+) (qualityJudgeUsageRun, []byte, error) {
+	var usage qualityJudgeUsageRun
+	var hasUsage bool
+	var finalOutput []byte
+	scanner := bufio.NewScanner(bytes.NewReader(content))
+	buffer := make([]byte, 64*1024)
+	scanner.Buffer(buffer, 16*1024*1024)
+	for scanner.Scan() {
+		var event struct {
+			Usage *struct {
+				InputTokens           int64 `json:"input_tokens"`
+				CachedInputTokens     int64 `json:"cached_input_tokens"`
+				OutputTokens          int64 `json:"output_tokens"`
+				ReasoningOutputTokens int64 `json:"reasoning_output_tokens"`
+			} `json:"usage"`
+			Item struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"item"`
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+			return qualityJudgeUsageRun{}, nil, fmt.Errorf("invalid JSONL event: %w", err)
+		}
+		if event.Type == "item.completed" && event.Item.Type == "agent_message" {
+			var document any
+			if json.Unmarshal([]byte(event.Item.Text), &document) == nil {
+				finalOutput = []byte(event.Item.Text)
+			}
+		}
+		if event.Type == "turn.completed" && event.Usage != nil {
+			hasUsage = true
+			usage.InputTokens = event.Usage.InputTokens
+			usage.CachedInputTokens = event.Usage.CachedInputTokens
+			usage.RegularInputTokens = usage.InputTokens - usage.CachedInputTokens
+			usage.CachedInputEquivalentTokens = float64(usage.CachedInputTokens) * 0.1
+			usage.OutputTokens = event.Usage.OutputTokens
+			usage.ReasoningOutputTokens = event.Usage.ReasoningOutputTokens
+			usage.RawTotalTokens = usage.InputTokens + usage.OutputTokens
+			usage.EffectiveTokens = float64(usage.RegularInputTokens) +
+				usage.CachedInputEquivalentTokens + float64(usage.OutputTokens)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return qualityJudgeUsageRun{}, nil, err
+	}
+	if !hasUsage || len(finalOutput) == 0 {
+		return qualityJudgeUsageRun{}, nil, fmt.Errorf(
+			"missing final agent output or completed-turn usage",
+		)
+	}
+	return usage, finalOutput, nil
+}
+
+func validateJudgeAggregates(judges qualityJudgesDocument) error {
+	type group struct {
+		candidates map[string][]qualityJudgeRunCandidate
+		baseline   []qualityJudgeRunBaseline
+	}
+	groups := make(map[string]*group)
+	for _, run := range judges.JudgeRuns {
+		current := groups[run.Task]
+		if current == nil {
+			current = &group{candidates: make(map[string][]qualityJudgeRunCandidate)}
+			groups[run.Task] = current
+		}
+		current.baseline = append(current.baseline, run.Baseline)
+		for _, candidate := range run.Candidates {
+			current.candidates[candidate.Name] = append(
+				current.candidates[candidate.Name],
+				candidate,
+			)
+		}
+	}
+	seenBaselines := make(map[string]bool)
+	for _, baseline := range judges.Baselines {
+		key := baseline.Task + "\x00" + baseline.Name
+		current := groups[baseline.Task]
+		if seenBaselines[key] || current == nil ||
+			baseline.Name != "baseline-"+baseline.Task ||
+			baseline.JudgeCount != len(current.baseline) ||
+			baseline.JudgeCount == 0 ||
+			!validBaselineAggregate(baseline, current.baseline) {
+			return fmt.Errorf("judges.json has an invalid baseline aggregate")
+		}
+		seenBaselines[key] = true
+	}
+	if len(seenBaselines) != len(groups) {
+		return fmt.Errorf("judges.json omits a baseline aggregate")
+	}
+	seenCandidates := make(map[string]bool)
+	expectedCandidateCount := 0
+	for _, current := range groups {
+		expectedCandidateCount += len(current.candidates)
+	}
+	for _, candidate := range judges.Candidates {
+		key := candidate.Task + "\x00" + candidate.Name
+		current := groups[candidate.Task]
+		if seenCandidates[key] || current == nil ||
+			candidate.JudgeCount != len(current.candidates[candidate.Name]) ||
+			candidate.JudgeCount == 0 ||
+			!validCandidateAggregate(
+				candidate,
+				current.candidates[candidate.Name],
+			) {
+			return fmt.Errorf("judges.json has an invalid candidate aggregate")
+		}
+		seenCandidates[key] = true
+	}
+	if len(seenCandidates) != expectedCandidateCount {
+		return fmt.Errorf("judges.json omits a candidate aggregate")
+	}
+	return nil
+}
+
+func validBaselineAggregate(
+	aggregate qualityJudgeBaseline,
+	runs []qualityJudgeRunBaseline,
+) bool {
+	var correctness, completeness, grounding, adherence int
+	var omissions, unsupported []string
+	for _, run := range runs {
+		correctness += run.Correctness
+		completeness += run.Completeness
+		grounding += run.Grounding
+		adherence += run.TaskAdherence
+		omissions = append(omissions, run.CriticalOmissions...)
+		unsupported = append(unsupported, run.UnsupportedClaims...)
+	}
+	count := float64(len(runs))
+	return aggregate.AverageCorrectness == float64(correctness)/count &&
+		aggregate.AverageCompleteness == float64(completeness)/count &&
+		aggregate.AverageGrounding == float64(grounding)/count &&
+		aggregate.AverageTaskAdherence == float64(adherence)/count &&
+		reflect.DeepEqual(aggregate.CriticalOmissions, uniqueSortedStrings(omissions)) &&
+		reflect.DeepEqual(aggregate.UnsupportedClaims, uniqueSortedStrings(unsupported))
+}
+
+func validCandidateAggregate(
+	aggregate qualityJudgeCandidate,
+	runs []qualityJudgeRunCandidate,
+) bool {
+	var correctness, completeness, grounding, adherence int
+	allNotWorse := true
+	allCore := true
+	var omissions, unsupported, contradictions, baselineOmissions, additions []string
+	for _, run := range runs {
+		correctness += run.Correctness
+		completeness += run.Completeness
+		grounding += run.Grounding
+		adherence += run.TaskAdherence
+		allNotWorse = allNotWorse && run.NotWorseThanBaseline
+		allCore = allCore && run.CoreConclusionMatchesBaseline
+		omissions = append(omissions, run.CriticalOmissions...)
+		unsupported = append(unsupported, run.UnsupportedClaims...)
+		contradictions = append(contradictions, run.MaterialContradictions...)
+		baselineOmissions = append(
+			baselineOmissions,
+			run.BaselineMaterialPointsOmitted...,
+		)
+		additions = append(additions, run.CandidateMaterialAdditions...)
+	}
+	count := float64(len(runs))
+	return aggregate.AllNotWorse == allNotWorse &&
+		aggregate.AllCoreConclusionMatch == allCore &&
+		aggregate.AverageCorrectness == float64(correctness)/count &&
+		aggregate.AverageCompleteness == float64(completeness)/count &&
+		aggregate.AverageGrounding == float64(grounding)/count &&
+		aggregate.AverageTaskAdherence == float64(adherence)/count &&
+		reflect.DeepEqual(aggregate.CriticalOmissions, uniqueSortedStrings(omissions)) &&
+		reflect.DeepEqual(aggregate.UnsupportedClaims, uniqueSortedStrings(unsupported)) &&
+		reflect.DeepEqual(
+			aggregate.MaterialContradictions,
+			uniqueSortedStrings(contradictions),
+		) &&
+		reflect.DeepEqual(
+			aggregate.BaselineMaterialPointsOmitted,
+			uniqueSortedStrings(baselineOmissions),
+		) &&
+		reflect.DeepEqual(
+			aggregate.CandidateMaterialAdditions,
+			uniqueSortedStrings(additions),
+		)
+}
+
+func uniqueSortedStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	sort.Strings(result)
+	if result == nil {
+		return []string{}
+	}
+	return result
 }
 
 func readQualityAggregate(
@@ -1097,6 +3346,9 @@ func readQualityAggregate(
 	if err := validateMaterialQualityInputs(snapshot, commitment); err != nil {
 		return nil, err
 	}
+	if err := validateQualityOutputSemantics(snapshot, commitment); err != nil {
+		return nil, err
+	}
 	currentQualityDirInfo, err := os.Lstat(qualityDir)
 	if err != nil ||
 		!currentQualityDirInfo.IsDir() ||
@@ -1184,7 +3436,9 @@ func validateQualityInputCommitment(commitment qualityInputCommitment) error {
 	switch commitment.Validation.AggregateStatus {
 	case "strict-current":
 		if !commitment.Validation.StrictEvidence ||
-			commitment.Validation.BindLegacyJudges {
+			commitment.Validation.BindLegacyJudges ||
+			(commitment.Validation.JudgeRepeats == 0 &&
+				!commitment.Validation.Enforce) {
 			return fmt.Errorf(
 				"quality input commitment has inconsistent strict provenance",
 			)
@@ -1200,7 +3454,8 @@ func validateQualityInputCommitment(commitment qualityInputCommitment) error {
 		}
 	case "non-strict":
 		if commitment.Validation.StrictEvidence ||
-			commitment.Validation.BindLegacyJudges {
+			commitment.Validation.BindLegacyJudges ||
+			commitment.Validation.Enforce {
 			return fmt.Errorf(
 				"quality input commitment has inconsistent non-strict provenance",
 			)
@@ -1512,65 +3767,7 @@ func validateMaterialQualityInputs(
 			return fmt.Errorf("decode generation-config.json fields: %w", err)
 		}
 		if len(generationConfigFields) != 15 ||
-			generationConfig.GenerationIsolation != qualityGenerationIsolation ||
-			generationConfig.DeveloperInstructions != qualityNoCollaboration ||
-			!reflect.DeepEqual(
-				generationConfig.FeatureFlags,
-				[]string{
-					"--disable", "multi_agent",
-					"--disable", "multi_agent_v2",
-					"--disable", "enable_fanout",
-					"--disable", "collaboration_modes",
-					"--disable", "hooks",
-					"--disable", "tool_router",
-					"--disable", "workflows",
-					"--disable", "code_mode",
-					"--disable", "code_mode_host",
-					"--disable", "code_mode_only",
-				},
-			) ||
-			!containsAll(
-				generationConfig.CodexIsolationFlags,
-				"--ignore-user-config",
-				"--ignore-rules",
-			) ||
-			!containsAll(
-				generationConfig.CodexEnvironment,
-				"env",
-				"-i",
-				"GOENV=off",
-				"GOTOOLCHAIN=local",
-				"GOWORK=off",
-			) ||
-			!containsAll(
-				generationConfig.HostGoEnvironment,
-				"env",
-				"GOENV=off",
-				"GOTOOLCHAIN=local",
-				"GOWORK=off",
-			) ||
-			generationConfig.ProfilesSnapshotPath !=
-				"profiles-snapshot.tsv" ||
-			!validSHA256Digest(
-				generationConfig.ProfilesSnapshotSHA256,
-			) ||
-			len(generationConfig.PromptFiles) == 0 ||
-			len(generationConfig.PromptFiles) !=
-				len(generationConfig.PromptDigests) ||
-			len(generationConfig.CasePromptFiles) == 0 ||
-			len(generationConfig.CasePromptFiles) !=
-				len(generationConfig.CasePromptDigests) ||
-			!generationConfig.MechanicalNavigationEnforced ||
-			generationConfig.MechanicalNavigationContract.RequiredRoot !=
-				"<worktree>" ||
-			generationConfig.MechanicalNavigationContract.RequiredBaseCommit !=
-				"<resolved-base>" ||
-			generationConfig.MechanicalNavigationContract.RequiredChangedReturn !=
-				"<profile-return>" ||
-			generationConfig.MechanicalNavigationContract.RequiredChangedContext !=
-				"<profile-context>" ||
-			generationConfig.MechanicalNavigationContract.RequireNavigation != "1" ||
-			generationConfig.AuthSourcePermission != "deny-if-present" {
+			!validStrictGenerationConfig(generationConfig, true) {
 			return fmt.Errorf(
 				"generation-config.json has incompatible strict generation semantics",
 			)
@@ -1661,19 +3858,21 @@ func validateMaterialQualityInputs(
 			PromptFiles            map[string]string `json:"prompt_files"`
 			CasePromptDigests      map[string]string `json:"case_prompt_digests"`
 			CasePromptFiles        map[string]string `json:"case_prompt_files"`
-			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
-			VariantSelection       string            `json:"variant_selection"`
+			GoVersion              string            `json:"go_version"`
+			TargetCommit           string            `json:"target_commit"`
 			GenerationIsolation    string            `json:"generation_isolation"`
 			GenerationConfigSHA256 string            `json:"generation_config_sha256"`
 			ProfilesSnapshotPath   string            `json:"profiles_snapshot_path"`
-			GoVersion              string            `json:"go_version"`
+			ProfilesSnapshotSHA256 string            `json:"profiles_snapshot_sha256"`
 			CodexVersion           string            `json:"codex_version"`
 			Model                  string            `json:"model"`
 			TaskSelection          string            `json:"task_selection"`
-			TargetCommit           string            `json:"target_commit"`
+			VariantSelection       string            `json:"variant_selection"`
 			PromptCommit           string            `json:"prompt_commit"`
 			BaseCommit             string            `json:"base_commit"`
 			BaseRef                string            `json:"base_ref"`
+			ModelConfiguration     string            `json:"model_configuration"`
+			ModelMode              string            `json:"model_mode"`
 			Profiles               []string          `json:"profiles"`
 			SchemaVersion          int               `json:"schema_version"`
 			MechanicalNavigation   bool              `json:"mechanical_navigation_semantics_enforced"`
@@ -1685,6 +3884,26 @@ func validateMaterialQualityInputs(
 			return fmt.Errorf("snapshotted manifest has incompatible schema")
 		}
 		if commitment.Validation.StrictEvidence {
+			var qualitySchema struct {
+				SchemaVersion int `json:"schema_version"`
+			}
+			if err := json.Unmarshal(
+				snapshot.outputs["quality.json"],
+				&qualitySchema,
+			); err != nil {
+				return fmt.Errorf("decode quality schema for manifest identity: %w", err)
+			}
+			generationModelValid := validGenerationModelIdentity(
+				manifest.Model,
+				manifest.ModelMode,
+				manifest.ModelConfiguration,
+			)
+			if qualitySchema.SchemaVersion == 4 &&
+				manifest.Model == "router-selected" &&
+				manifest.ModelMode == "" &&
+				manifest.ModelConfiguration == "" {
+				generationModelValid = true
+			}
 			if !validGitCommit(manifest.TargetCommit) ||
 				!validPromptCommit(manifest.PromptCommit) ||
 				!strings.HasPrefix(
@@ -1693,7 +3912,7 @@ func validateMaterialQualityInputs(
 				) ||
 				!validGitCommit(manifest.BaseCommit) ||
 				manifest.BaseRef == "" ||
-				manifest.Model == "" ||
+				!generationModelValid ||
 				manifest.CodexVersion == "" ||
 				manifest.GoVersion == "" {
 				return fmt.Errorf(
@@ -1836,6 +4055,8 @@ func validateMaterialQualityInputs(
 				BaseCommit             string            `json:"base_commit"`
 				BaseRef                string            `json:"base_ref"`
 				Model                  string            `json:"model"`
+				ModelMode              string            `json:"model_mode"`
+				ModelConfiguration     string            `json:"model_configuration"`
 				CodexVersion           string            `json:"codex_version"`
 				GoVersion              string            `json:"go_version"`
 				SchemaVersion          int               `json:"schema_version"`
@@ -1847,9 +4068,29 @@ func validateMaterialQualityInputs(
 			); err != nil {
 				return fmt.Errorf("decode baseline source manifest: %w", err)
 			}
+			var baselineManifestFields map[string]json.RawMessage
+			if err := json.Unmarshal(
+				baselineManifestBytes,
+				&baselineManifestFields,
+			); err != nil {
+				return fmt.Errorf("decode baseline source manifest fields: %w", err)
+			}
+			mechanicalMarker, ok := baselineManifestFields["mechanical_navigation_semantics_enforced"]
+			var baselineMechanicalNavigation *bool
+			if !ok || json.Unmarshal(
+				mechanicalMarker,
+				&baselineMechanicalNavigation,
+			) != nil || baselineMechanicalNavigation == nil {
+				return fmt.Errorf(
+					"baseline source manifest has an invalid mechanical navigation marker",
+				)
+			}
 			if baselineManifest.SchemaVersion != 1 ||
 				baselineManifest.GenerationIsolation !=
 					manifest.GenerationIsolation ||
+				!validSHA256Digest(
+					baselineManifest.GenerationConfigSHA256,
+				) ||
 				baselineManifest.ProfilesSnapshotPath !=
 					manifest.ProfilesSnapshotPath ||
 				baselineManifest.ProfilesSnapshotSHA256 !=
@@ -1867,6 +4108,9 @@ func validateMaterialQualityInputs(
 				baselineManifest.BaseCommit != manifest.BaseCommit ||
 				baselineManifest.BaseRef != manifest.BaseRef ||
 				baselineManifest.Model != manifest.Model ||
+				baselineManifest.ModelMode != manifest.ModelMode ||
+				baselineManifest.ModelConfiguration !=
+					manifest.ModelConfiguration ||
 				baselineManifest.CodexVersion != manifest.CodexVersion ||
 				baselineManifest.GoVersion != manifest.GoVersion {
 				return fmt.Errorf(
@@ -1901,24 +4145,16 @@ func validateMaterialQualityInputs(
 					"imported quality input omits baseline source generation config",
 				)
 			}
-			if !validSHA256Digest(
-				baselineManifest.GenerationConfigSHA256,
-			) || sha256Bytes(baselineConfigBytes) !=
+			if sha256Bytes(baselineConfigBytes) !=
 				baselineManifest.GenerationConfigSHA256 {
 				return fmt.Errorf(
-					"baseline source generation config digest disagrees with source manifest",
+					"baseline source generation config disagrees with its manifest digest",
 				)
 			}
 			var baselineConfig qualityGenerationConfig
 			var baselineConfigFields map[string]json.RawMessage
-			if err := json.Unmarshal(
-				baselineConfigBytes,
-				&baselineConfig,
-			); err != nil {
-				return fmt.Errorf(
-					"decode baseline source generation config: %w",
-					err,
-				)
+			if err := json.Unmarshal(baselineConfigBytes, &baselineConfig); err != nil {
+				return fmt.Errorf("decode baseline source generation config: %w", err)
 			}
 			if err := json.Unmarshal(
 				baselineConfigBytes,
@@ -1930,8 +4166,16 @@ func validateMaterialQualityInputs(
 				)
 			}
 			if len(baselineConfigFields) != 15 ||
-				baselineConfig.GenerationIsolation !=
-					baselineManifest.GenerationIsolation ||
+				!validStrictGenerationConfig(
+					baselineConfig,
+					baselineManifest.MechanicalNavigation,
+				) {
+				return fmt.Errorf(
+					"baseline source generation config has incompatible strict generation semantics",
+				)
+			}
+			if baselineConfig.GenerationIsolation !=
+				baselineManifest.GenerationIsolation ||
 				baselineConfig.ProfilesSnapshotPath !=
 					baselineManifest.ProfilesSnapshotPath ||
 				baselineConfig.ProfilesSnapshotSHA256 !=
@@ -1953,13 +4197,17 @@ func validateMaterialQualityInputs(
 					baselineManifest.CasePromptDigests,
 				) ||
 				baselineConfig.MechanicalNavigationEnforced !=
-					baselineManifest.MechanicalNavigation ||
-				!reflect.DeepEqual(
-					sharedQualityGenerationConfig(baselineConfig),
-					sharedQualityGenerationConfig(generationConfig),
-				) {
+					baselineManifest.MechanicalNavigation {
 				return fmt.Errorf(
 					"baseline source generation config disagrees with quality run",
+				)
+			}
+			if !reflect.DeepEqual(
+				sharedQualityGenerationConfig(baselineConfig),
+				sharedQualityGenerationConfig(generationConfig),
+			) {
+				return fmt.Errorf(
+					"baseline source generation config differs beyond mechanical navigation enforcement",
 				)
 			}
 			baselineProfilesBytes, ok :=
@@ -2083,19 +4331,6 @@ func qualityManifestTasks(selection string) ([]string, bool) {
 	default:
 		return nil, false
 	}
-}
-
-func containsAll(values []string, required ...string) bool {
-	seen := make(map[string]bool, len(values))
-	for _, value := range values {
-		seen[value] = true
-	}
-	for _, value := range required {
-		if !seen[value] {
-			return false
-		}
-	}
-	return true
 }
 
 func SummarizeEvidence(runDir string, names []string) ([]EvidenceMetric, error) {

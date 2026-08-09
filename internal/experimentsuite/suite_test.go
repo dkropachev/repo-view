@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,6 +23,132 @@ type qualityCriterion struct {
 	ID     string   `json:"id"`
 	AllOf  []string `json:"all_of"`
 	NoneOf []string `json:"none_of"`
+}
+
+func TestValidateJudgeRunEnforcesNotWorseSemantics(t *testing.T) {
+	valid := func() qualityJudgeRun {
+		return qualityJudgeRun{
+			Task: "review",
+			Baseline: qualityJudgeRunBaseline{
+				Name: "baseline-review", Correctness: 4, Completeness: 4,
+				Grounding: 4, TaskAdherence: 4,
+				CriticalOmissions: []string{"", "duplicate", "duplicate"},
+				UnsupportedClaims: []string{},
+			},
+			Candidates: []qualityJudgeRunCandidate{{
+				Name: "optimized-review", Correctness: 4, Completeness: 4,
+				Grounding: 4, TaskAdherence: 4,
+				CriticalOmissions: []string{}, UnsupportedClaims: []string{},
+				CoreConclusionMatchesBaseline: true,
+				NotWorseThanBaseline:          true,
+				MaterialContradictions:        []string{},
+				BaselineMaterialPointsOmitted: []string{},
+				CandidateMaterialAdditions:    []string{"", "duplicate", "duplicate"},
+				Rationale:                     "grounded",
+			}},
+		}
+	}
+	if err := validateJudgeRun(valid()); err != nil {
+		t.Fatalf("producer-valid duplicate/empty array values rejected: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*qualityJudgeRunCandidate)
+	}{
+		{"lower correctness", func(candidate *qualityJudgeRunCandidate) {
+			candidate.Correctness = 3
+		}},
+		{"lower completeness", func(candidate *qualityJudgeRunCandidate) {
+			candidate.Completeness = 3
+		}},
+		{"lower grounding", func(candidate *qualityJudgeRunCandidate) {
+			candidate.Grounding = 3
+		}},
+		{"lower adherence", func(candidate *qualityJudgeRunCandidate) {
+			candidate.TaskAdherence = 3
+		}},
+		{"critical omission", func(candidate *qualityJudgeRunCandidate) {
+			candidate.CriticalOmissions = []string{"material"}
+		}},
+		{"unsupported claim", func(candidate *qualityJudgeRunCandidate) {
+			candidate.UnsupportedClaims = []string{"material"}
+		}},
+		{"contradiction", func(candidate *qualityJudgeRunCandidate) {
+			candidate.MaterialContradictions = []string{"material"}
+		}},
+		{"baseline omission", func(candidate *qualityJudgeRunCandidate) {
+			candidate.BaselineMaterialPointsOmitted = []string{"material"}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			run := valid()
+			test.mutate(&run.Candidates[0])
+			if err := validateJudgeRun(run); err == nil ||
+				!strings.Contains(err.Error(), "claims not-worse") {
+				t.Fatalf("coherent not-worse mutation error = %v", err)
+			}
+		})
+	}
+}
+
+func manifestCaseFixture(outcome string) map[string]any {
+	digest := strings.Repeat("1", 64)
+	return map[string]any{
+		"id":                       "01-safe",
+		"level":                    1,
+		"complexity":               "fixture",
+		"outcome":                  outcome,
+		"evidence":                 "current/simple",
+		"source_checksum_sha256":   digest,
+		"quality_aggregate_sha256": digest,
+		"description":              "fixture",
+		"assertions": []any{map[string]any{
+			"description": "fixture",
+			"source":      "metrics.json",
+			"field":       "schema_version",
+			"operator":    "equals",
+			"value":       2,
+		}},
+	}
+}
+
+func liveConfigFixture() map[string]any {
+	return map[string]any{
+		"task":          "explain",
+		"profile":       "guarded-high",
+		"baseline_from": "",
+		"source":        "fixtures/source.git",
+		"commit":        strings.Repeat("a", 40),
+		"prompt_commit": strings.Repeat("a", 9),
+		"base":          strings.Repeat("b", 40),
+		"model_mode":    "router",
+	}
+}
+
+func resolutionCaseFixture(status string) map[string]any {
+	digest := strings.Repeat("1", 64)
+	fixture := map[string]any{
+		"id":                       "01-safe",
+		"status":                   status,
+		"root_cause":               "fixture",
+		"fix":                      "fixture",
+		"evidence":                 "current/simple",
+		"source_checksum_sha256":   digest,
+		"quality_aggregate_sha256": digest,
+		"metric_cases":             []any{"baseline-explain"},
+		"assertions": []any{map[string]any{
+			"description": "fixture",
+			"source":      "metrics.json",
+			"field":       "schema_version",
+			"operator":    "equals",
+			"value":       2,
+		}},
+	}
+	if status == "resolved" {
+		fixture["repair"] = liveConfigFixture()
+	}
+	return fixture
 }
 
 func TestLoadManifestRejectsPlaceholderAndUnsafeFields(t *testing.T) {
@@ -119,6 +246,111 @@ func TestLoadManifestRejectsPlaceholderAndUnsafeFields(t *testing.T) {
 	}
 }
 
+func TestManifestSnapshotsNormalizeProvenanceAndHashParsedBytes(t *testing.T) {
+	manifestPath := filepath.Join(t.TempDir(), "cases.json")
+	writeJSON(t, manifestPath, map[string]any{
+		"schema_version": 1,
+		"cases":          []any{manifestCaseFixture("accepted")},
+	})
+	parsedBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, digest, err := LoadManifestSnapshot(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Cases[0].QualityProvenance != "strict-current" {
+		t.Fatalf(
+			"normalized provenance = %q, want strict-current",
+			manifest.Cases[0].QualityProvenance,
+		)
+	}
+	if digest != sha256Bytes(parsedBytes) {
+		t.Fatalf("snapshot digest = %q, want digest of parsed bytes", digest)
+	}
+	if err := os.WriteFile(manifestPath, append(parsedBytes, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mutatedBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if digest == sha256Bytes(mutatedBytes) {
+		t.Fatal("snapshot digest changed to match a later manifest rewrite")
+	}
+}
+
+func TestAcceptedManifestCasesRequireStrictCurrentProvenance(t *testing.T) {
+	for _, provenance := range []string{"legacy-unisolated-attested", "non-strict"} {
+		t.Run(provenance, func(t *testing.T) {
+			fixture := manifestCaseFixture("accepted")
+			fixture["quality_provenance"] = provenance
+			manifestPath := filepath.Join(t.TempDir(), "cases.json")
+			writeJSON(t, manifestPath, map[string]any{
+				"schema_version": 1,
+				"cases":          []any{fixture},
+			})
+			if _, err := LoadManifest(manifestPath); err == nil ||
+				!strings.Contains(err.Error(), "requires strict-current") {
+				t.Fatalf("accepted %s provenance error = %v", provenance, err)
+			}
+		})
+	}
+
+	fixture := manifestCaseFixture("rejected")
+	fixture["quality_provenance"] = "legacy-unisolated-attested"
+	manifestPath := filepath.Join(t.TempDir(), "rejected-cases.json")
+	writeJSON(t, manifestPath, map[string]any{
+		"schema_version": 1,
+		"cases":          []any{fixture},
+	})
+	if _, err := LoadManifest(manifestPath); err != nil {
+		t.Fatalf("rejected historical provenance was rejected: %v", err)
+	}
+}
+
+func TestResolutionSnapshotsRequireStrictCurrentAndHashParsedBytes(t *testing.T) {
+	manifestPath := filepath.Join(t.TempDir(), "resolutions.json")
+	writeJSON(t, manifestPath, map[string]any{
+		"schema_version": 1,
+		"cases":          []any{resolutionCaseFixture("accepted")},
+	})
+	parsedBytes, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, digest, err := LoadResolutionManifestSnapshot(manifestPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Cases[0].QualityProvenance != "strict-current" {
+		t.Fatalf(
+			"normalized resolution provenance = %q, want strict-current",
+			manifest.Cases[0].QualityProvenance,
+		)
+	}
+	if digest != sha256Bytes(parsedBytes) {
+		t.Fatalf("resolution digest = %q, want digest of parsed bytes", digest)
+	}
+
+	for _, status := range []string{"accepted", "resolved"} {
+		t.Run(status, func(t *testing.T) {
+			fixture := resolutionCaseFixture(status)
+			fixture["quality_provenance"] = "legacy-unisolated-attested"
+			path := filepath.Join(t.TempDir(), "resolutions.json")
+			writeJSON(t, path, map[string]any{
+				"schema_version": 1,
+				"cases":          []any{fixture},
+			})
+			if _, err := LoadResolutionManifest(path); err == nil ||
+				!strings.Contains(err.Error(), "requires strict-current") {
+				t.Fatalf("%s legacy provenance error = %v", status, err)
+			}
+		})
+	}
+}
+
 func TestLoadManifestRejectsUnanchoredLiveConfiguration(t *testing.T) {
 	validDigest := strings.Repeat("1", 64)
 	baseLive := func() map[string]any {
@@ -142,6 +374,12 @@ func TestLoadManifestRejectsUnanchoredLiveConfiguration(t *testing.T) {
 		{name: "prompt not commit prefix", mutate: func(live map[string]any) { live["prompt_commit"] = strings.Repeat("c", 9) }},
 		{name: "same base", mutate: func(live map[string]any) { live["base"] = strings.Repeat("a", 40) }},
 		{name: "unknown model mode", mutate: func(live map[string]any) { live["model_mode"] = "automatic" }},
+		{name: "pinned without model", mutate: func(live map[string]any) { live["model_mode"] = "pinned" }},
+		{name: "router with ignored model", mutate: func(live map[string]any) { live["model"] = "gpt-fixture" }},
+		{name: "unsafe pinned model", mutate: func(live map[string]any) {
+			live["model_mode"] = "pinned"
+			live["model"] = "-option"
+		}},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			live := baseLive()
@@ -186,19 +424,90 @@ func TestValidateLiveIdentity(t *testing.T) {
 		ModelMode:    "router",
 	}
 	runDir := t.TempDir()
-	writeJSON(t, filepath.Join(runDir, "manifest.json"), map[string]any{
-		"source_repo":   config.Source,
-		"target_commit": config.Commit,
-		"prompt_commit": config.PromptCommit,
-		"base_commit":   config.Base,
-		"model_mode":    config.ModelMode,
-	})
+	manifestFixture := func(config LiveConfig, baselineFrom any) map[string]any {
+		variant := "all"
+		if baselineFrom != nil {
+			variant = "optimized"
+		}
+		model := config.Model
+		modelConfiguration := "pinned"
+		if config.ModelMode == "router" {
+			model = "router-selected"
+			modelConfiguration = "none"
+		}
+		return map[string]any{
+			"source_repo":         config.Source,
+			"target_commit":       config.Commit,
+			"prompt_commit":       config.PromptCommit,
+			"base_commit":         config.Base,
+			"task_selection":      config.Task,
+			"variant_selection":   variant,
+			"profiles":            []any{config.Profile},
+			"baseline_from":       baselineFrom,
+			"model":               model,
+			"model_mode":          config.ModelMode,
+			"model_configuration": modelConfiguration,
+		}
+	}
+	writeJSON(
+		t,
+		filepath.Join(runDir, "manifest.json"),
+		manifestFixture(config, nil),
+	)
 	if result := ValidateLiveIdentity(runDir, config); !result.Passed {
 		t.Fatalf("ValidateLiveIdentity rejected matching identity: %+v", result)
 	}
-	config.Commit = strings.Repeat("c", 40)
-	if result := ValidateLiveIdentity(runDir, config); result.Passed {
-		t.Fatalf("ValidateLiveIdentity accepted mismatched identity: %+v", result)
+
+	for _, testCase := range []struct {
+		name   string
+		mutate func(map[string]any)
+	}{
+		{name: "task", mutate: func(manifest map[string]any) { manifest["task_selection"] = "review" }},
+		{name: "profile", mutate: func(manifest map[string]any) { manifest["profiles"] = []any{"other-profile"} }},
+		{name: "variant", mutate: func(manifest map[string]any) { manifest["variant_selection"] = "baseline" }},
+		{name: "baseline", mutate: func(manifest map[string]any) { manifest["baseline_from"] = "/other/run" }},
+		{name: "model", mutate: func(manifest map[string]any) { manifest["model"] = "ambient-model" }},
+		{name: "model mode", mutate: func(manifest map[string]any) { manifest["model_mode"] = "pinned" }},
+		{name: "model configuration", mutate: func(manifest map[string]any) { manifest["model_configuration"] = "pinned" }},
+		{name: "missing field", mutate: func(manifest map[string]any) { delete(manifest, "task_selection") }},
+	} {
+		t.Run("rejects "+testCase.name+" mismatch", func(t *testing.T) {
+			manifest := manifestFixture(config, nil)
+			testCase.mutate(manifest)
+			writeJSON(t, filepath.Join(runDir, "manifest.json"), manifest)
+			if result := ValidateLiveIdentity(runDir, config); result.Passed {
+				t.Fatalf("ValidateLiveIdentity accepted mismatched identity: %+v", result)
+			}
+		})
+	}
+
+	pinned := config
+	pinned.ModelMode = "pinned"
+	pinned.Model = "gpt-fixture"
+	writeJSON(
+		t,
+		filepath.Join(runDir, "manifest.json"),
+		manifestFixture(pinned, nil),
+	)
+	if result := ValidateLiveIdentity(runDir, pinned); !result.Passed {
+		t.Fatalf("ValidateLiveIdentity rejected pinned model identity: %+v", result)
+	}
+
+	baseline := config
+	baseline.BaselineFrom = "baselines/accepted"
+	resolvedBaseline := filepath.Join(runDir, "resolved-baseline")
+	writeJSON(
+		t,
+		filepath.Join(runDir, "manifest.json"),
+		manifestFixture(baseline, resolvedBaseline),
+	)
+	if result := ValidateLiveIdentity(
+		runDir,
+		baseline,
+		baseline.Source,
+		resolvedBaseline,
+	); !result.Passed {
+		t.Fatalf("ValidateLiveIdentity rejected bound baseline identity: %+v", result)
 	}
 }
 
@@ -241,6 +550,163 @@ func TestLoadResolutionManifestRejectsUnsafeExecutionPaths(t *testing.T) {
 				t.Fatal("LoadResolutionManifest accepted a non-local Go package")
 			}
 		})
+	}
+}
+
+func strictGenerationConfigFixture(
+	mechanicalNavigation bool,
+) qualityGenerationConfig {
+	config := qualityGenerationConfig{
+		GenerationIsolation:          qualityGenerationIsolation,
+		DeveloperInstructions:        qualityNoCollaboration,
+		FeatureFlags:                 append([]string(nil), qualityFeatureFlags...),
+		CodexIsolationFlags:          append([]string(nil), qualityCodexIsolationFlags...),
+		CodexEnvironment:             append([]string(nil), qualityCodexEnvironment...),
+		HostGoEnvironment:            append([]string(nil), qualityHostGoEnvironment...),
+		ProfilesSnapshotPath:         "profiles-snapshot.tsv",
+		ProfilesSnapshotSHA256:       strings.Repeat("1", 64),
+		PromptFiles:                  map[string]string{"explain": "prompts/explain.txt"},
+		PromptDigests:                map[string]string{"explain": strings.Repeat("2", 64)},
+		CasePromptFiles:              map[string]string{"baseline-explain": "baseline-explain.user-prompt.txt"},
+		CasePromptDigests:            map[string]string{"baseline-explain": strings.Repeat("3", 64)},
+		MechanicalNavigationEnforced: mechanicalNavigation,
+		AuthSourcePermission:         "deny-if-present",
+	}
+	config.MechanicalNavigationContract.RequiredRoot = "<worktree>"
+	config.MechanicalNavigationContract.RequiredBaseCommit = "<resolved-base>"
+	config.MechanicalNavigationContract.RequiredChangedReturn = "<profile-return>"
+	config.MechanicalNavigationContract.RequiredChangedContext = "<profile-context>"
+	config.MechanicalNavigationContract.RequireNavigation = "1"
+	return config
+}
+
+func TestStrictGenerationConfigRequiresExactIsolation(t *testing.T) {
+	if config := strictGenerationConfigFixture(true); !validStrictGenerationConfig(config, true) {
+		t.Fatal("exact current strict generation config was rejected")
+	}
+	for _, testCase := range []struct {
+		name   string
+		mutate func(*qualityGenerationConfig)
+	}{
+		{
+			name: "overriding codex config",
+			mutate: func(config *qualityGenerationConfig) {
+				config.CodexIsolationFlags = append(
+					config.CodexIsolationFlags,
+					"-c",
+					`default_permissions="danger-full-access"`,
+				)
+			},
+		},
+		{
+			name: "contradictory codex environment",
+			mutate: func(config *qualityGenerationConfig) {
+				config.CodexEnvironment = append(config.CodexEnvironment, "GOENV=/tmp/goenv")
+			},
+		},
+		{
+			name: "incomplete host Go environment",
+			mutate: func(config *qualityGenerationConfig) {
+				config.HostGoEnvironment = config.HostGoEnvironment[:len(config.HostGoEnvironment)-1]
+			},
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			config := strictGenerationConfigFixture(true)
+			testCase.mutate(&config)
+			if validStrictGenerationConfig(config, true) {
+				t.Fatal("strict generation validation accepted non-exact isolation")
+			}
+		})
+	}
+}
+
+func TestStrictGenerationConfigMatchesRunScriptContract(t *testing.T) {
+	manifest := map[string]any{
+		"profiles_snapshot_sha256":                 strings.Repeat("1", 64),
+		"mechanical_navigation_semantics_enforced": true,
+		"prompt_files":                             map[string]string{"explain": "prompts/explain.txt"},
+		"prompt_digests":                           map[string]string{"explain": strings.Repeat("2", 64)},
+		"case_prompt_files":                        map[string]string{"baseline-explain": "baseline-explain.user-prompt.txt"},
+		"case_prompt_digests":                      map[string]string{"baseline-explain": strings.Repeat("3", 64)},
+	}
+	currentBytes := runScriptGenerationConfig(t, manifest)
+	var current qualityGenerationConfig
+	if err := json.Unmarshal(currentBytes, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !validStrictGenerationConfig(current, true) {
+		t.Fatal("suite strict isolation contract drifted from run.sh generation config")
+	}
+
+	manifest["mechanical_navigation_semantics_enforced"] = false
+	baselineBytes := runScriptGenerationConfig(t, manifest)
+	var baseline qualityGenerationConfig
+	if err := json.Unmarshal(baselineBytes, &baseline); err != nil {
+		t.Fatal(err)
+	}
+	if !validStrictGenerationConfig(baseline, false) {
+		t.Fatal("suite baseline isolation contract drifted from run.sh generation config")
+	}
+	equivalent, err := equivalentGenerationConfigsExceptMechanicalNavigation(
+		baselineBytes,
+		currentBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !equivalent {
+		t.Fatal("run.sh configs differ beyond their mechanical marker")
+	}
+}
+
+func TestBaselineGenerationConfigMayDifferOnlyByMechanicalNavigation(t *testing.T) {
+	current := strictGenerationConfigFixture(true)
+	currentBytes, err := json.Marshal(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, sourceMechanicalNavigation := range []bool{false, true} {
+		t.Run(strconv.FormatBool(sourceMechanicalNavigation), func(t *testing.T) {
+			baseline := strictGenerationConfigFixture(sourceMechanicalNavigation)
+			baselineBytes, err := json.Marshal(baseline)
+			if err != nil {
+				t.Fatal(err)
+			}
+			equivalent, err := equivalentGenerationConfigsExceptMechanicalNavigation(
+				baselineBytes,
+				currentBytes,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !equivalent {
+				t.Fatal("source config was not equivalent after removing mechanical marker")
+			}
+			if !validStrictGenerationConfig(
+				baseline,
+				sourceMechanicalNavigation,
+			) {
+				t.Fatal("strict source generation config was rejected")
+			}
+		})
+	}
+
+	baseline := strictGenerationConfigFixture(false)
+	baseline.CodexEnvironment = append(baseline.CodexEnvironment, "GOENV=/tmp/goenv")
+	baselineBytes, err := json.Marshal(baseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalent, err := equivalentGenerationConfigsExceptMechanicalNavigation(
+		baselineBytes,
+		currentBytes,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if equivalent {
+		t.Fatal("baseline config drift beyond the mechanical marker was accepted")
 	}
 }
 
@@ -880,7 +1346,9 @@ func TestQualityCheckUsesCurrentJudgeFormat(t *testing.T) {
 		"A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction",
 		"never against the baseline's length or exploratory breadth",
 		"unless the shared task prompt or rubric expressly requires a proven consuming chain",
-		"schema_version: 4",
+		"without equally strong substitute coverage",
+		"schema_version: 5",
+		"model_mode: $judge_model_mode",
 		"judge_cache_schema=8",
 		"result.sha256",
 		"aggregate-manifest.json",
@@ -1268,7 +1736,7 @@ func TestSummarizeEvidence(t *testing.T) {
 			"task":                        "deep-review",
 			"variant":                     "optimized",
 			"profile":                     "verified",
-			"completed":                   true,
+			"completed":                   false,
 			"regular_input_tokens":        100,
 			"cached_input_tokens":         200,
 			"output_tokens":               30,
@@ -1322,23 +1790,15 @@ func TestSummarizeEvidence(t *testing.T) {
 		}
 	}
 	writeJSON(t, filepath.Join(runDir, "quality", "static.json"), map[string]any{
-		"cases": []any{map[string]any{
-			"name":          "candidate",
-			"score_percent": 100,
-			"required_pass": true,
-		}},
+		"schema_version": 1,
+		"cases":          []any{},
+		"comparisons":    []any{},
 	})
 	writeJSON(t, filepath.Join(runDir, "quality", "judges.json"), map[string]any{
-		"candidates": []any{map[string]any{
-			"name":                      "candidate",
-			"judge_count":               2,
-			"all_not_worse":             true,
-			"all_core_conclusion_match": true,
-			"average_correctness":       5,
-			"average_completeness":      5,
-			"average_grounding":         5,
-			"average_task_adherence":    5,
-		}},
+		"provenance_status": "strict-current",
+		"judge_runs":        []any{},
+		"baselines":         []any{},
+		"candidates":        []any{},
 	})
 	writeQualityAggregateManifest(t, runDir)
 
@@ -1355,9 +1815,9 @@ func TestSummarizeEvidence(t *testing.T) {
 		got.OtherToolCalls != 1 ||
 		!got.HasComparison ||
 		got.EffectiveReductionPercent != 50 ||
-		got.StaticScorePercent != 100 ||
-		got.JudgeStatus != "not-worse" ||
-		!got.JudgeCoreConclusionMatch {
+		got.StaticScorePercent != 0 ||
+		got.JudgeStatus != "" ||
+		got.JudgeCoreConclusionMatch {
 		t.Fatalf("summary = %+v", got)
 	}
 
@@ -1724,6 +2184,12 @@ func normalizeQualityFixture(t *testing.T, filePath string, root map[string]any)
 		if _, ok := root["model"]; !ok {
 			root["model"] = "fixture-model"
 		}
+		if _, ok := root["model_mode"]; !ok {
+			root["model_mode"] = "pinned"
+		}
+		if _, ok := root["model_configuration"]; !ok {
+			root["model_configuration"] = "pinned"
+		}
 		if _, ok := root["codex_version"]; !ok {
 			root["codex_version"] = "fixture-codex"
 		}
@@ -1829,37 +2295,12 @@ func normalizeQualityFixture(t *testing.T, filePath string, root map[string]any)
 			root["case_prompt_digests"] = casePromptDigests
 		}
 		generationConfig, err := json.Marshal(map[string]any{
-			"generation_isolation":            qualityGenerationIsolation,
-			"baseline_developer_instructions": "Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark.",
-			"feature_flags": []any{
-				"--disable", "multi_agent",
-				"--disable", "multi_agent_v2",
-				"--disable", "enable_fanout",
-				"--disable", "collaboration_modes",
-				"--disable", "hooks",
-				"--disable", "tool_router",
-				"--disable", "workflows",
-				"--disable", "code_mode",
-				"--disable", "code_mode_host",
-				"--disable", "code_mode_only",
-			},
-			"codex_isolation_flags": []any{
-				"--ignore-user-config",
-				"--ignore-rules",
-			},
-			"codex_environment": []any{
-				"env",
-				"-i",
-				"GOENV=off",
-				"GOTOOLCHAIN=local",
-				"GOWORK=off",
-			},
-			"host_go_environment": []any{
-				"env",
-				"GOENV=off",
-				"GOTOOLCHAIN=local",
-				"GOWORK=off",
-			},
+			"generation_isolation":                     qualityGenerationIsolation,
+			"baseline_developer_instructions":          "Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark.",
+			"feature_flags":                            append([]string(nil), qualityFeatureFlags...),
+			"codex_isolation_flags":                    append([]string(nil), qualityCodexIsolationFlags...),
+			"codex_environment":                        append([]string(nil), qualityCodexEnvironment...),
+			"host_go_environment":                      append([]string(nil), qualityHostGoEnvironment...),
 			"profiles_snapshot_path":                   "profiles-snapshot.tsv",
 			"profiles_snapshot_sha256":                 profilesDigest,
 			"prompt_files":                             root["prompt_files"],
@@ -2056,6 +2497,47 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 	if err := os.MkdirAll(qualityDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
+	staticPath := filepath.Join(qualityDir, "static.json")
+	if _, err := os.Stat(staticPath); os.IsNotExist(err) {
+		writeJSON(t, staticPath, map[string]any{
+			"schema_version": 1,
+			"cases":          []any{},
+			"comparisons":    []any{},
+		})
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	judgesPath := filepath.Join(qualityDir, "judges.json")
+	if _, err := os.Stat(judgesPath); os.IsNotExist(err) {
+		writeJSON(t, judgesPath, map[string]any{
+			"provenance_status": "strict-current",
+			"judge_runs":        []any{},
+			"baselines":         []any{},
+			"candidates":        []any{},
+		})
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	usagePath := filepath.Join(qualityDir, "judge-usage.json")
+	if _, err := os.Stat(usagePath); os.IsNotExist(err) {
+		writeJSON(t, usagePath, map[string]any{
+			"formula": qualityMetricsFormula,
+			"runs":    []any{},
+			"totals": map[string]any{
+				"run_count":                      0,
+				"input_tokens":                   0,
+				"regular_input_tokens":           0,
+				"cached_input_tokens":            0,
+				"cached_input_equivalent_tokens": 0,
+				"output_tokens":                  0,
+				"reasoning_output_tokens":        0,
+				"raw_total_tokens":               0,
+				"effective_tokens":               0,
+			},
+		})
+	} else if err != nil {
+		t.Fatal(err)
+	}
 	inputDigests := make(map[string]string)
 	metricsPath := filepath.Join(runDir, "metrics.json")
 	strictEvidence := false
@@ -2143,6 +2625,54 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 	} else if !os.IsNotExist(err) {
 		t.Fatal(err)
 	}
+	status := "non-strict"
+	if strictEvidence {
+		status = "strict-current"
+	}
+	// Normalize the empty test aggregates to the exact current schemas. Tests
+	// that need judge content create a complete aggregate explicitly.
+	var judgesProbe struct {
+		JudgeRuns []any `json:"judge_runs"`
+	}
+	if content, err := os.ReadFile(judgesPath); err == nil &&
+		json.Unmarshal(content, &judgesProbe) == nil &&
+		judgesProbe.JudgeRuns != nil {
+		var normalizedJudges map[string]any
+		if err := json.Unmarshal(content, &normalizedJudges); err != nil {
+			t.Fatal(err)
+		}
+		normalizedJudges["provenance_status"] = status
+		writeJSON(t, judgesPath, normalizedJudges)
+		var staticDocument any
+		var judgesDocument any
+		var usageDocument any
+		for path, destination := range map[string]*any{
+			staticPath: &staticDocument,
+			judgesPath: &judgesDocument,
+			usagePath:  &usageDocument,
+		} {
+			content, err := os.ReadFile(path)
+			if err != nil || json.Unmarshal(content, destination) != nil {
+				t.Fatalf("decode aggregate fixture %s: %v", path, err)
+			}
+		}
+		writeJSON(t, filepath.Join(qualityDir, "quality.json"), map[string]any{
+			"schema_version":       5,
+			"provenance_status":    status,
+			"required_judge_count": 0,
+			"evaluator": map[string]any{
+				"model":         "router-selected",
+				"model_mode":    "router",
+				"codex_version": "codex-cli fixture",
+				"cache_schema":  8,
+				"environment":   qualityEvaluatorEnvironmentFixture(),
+			},
+			"static":      staticDocument,
+			"judges":      judgesDocument,
+			"judge_usage": usageDocument,
+			"verdicts":    []any{},
+		})
+	}
 	snapshotDigests := make(map[string]string)
 	for relative, digest := range inputDigests {
 		snapshotDigests[qualitySnapshotName(relative)] = digest
@@ -2152,7 +2682,12 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 		"quality-output-schema.json",
 	} {
 		bundlePath := qualityEvaluatorBundlePath(snapshotName)
-		content := []byte("fixture evaluator input: " + snapshotName + "\n")
+		content, err := os.ReadFile(filepath.Join(
+			"..", "..", "experiments", "lsp-replacement", snapshotName,
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
 		fullPath := filepath.Join(runDir, filepath.FromSlash(bundlePath))
 		if err := os.WriteFile(fullPath, content, 0o644); err != nil {
 			t.Fatal(err)
@@ -2178,7 +2713,11 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 	writeJSON(t, filepath.Join(qualityDir, "inputs.json"), map[string]any{
 		"schema_version": 1,
 		"validation": map[string]any{
-			"strict_evidence": strictEvidence,
+			"strict_evidence":    strictEvidence,
+			"enforce":            strictEvidence,
+			"bind_legacy_judges": false,
+			"skip_analyze":       false,
+			"judge_repeats":      0,
 			"aggregate_status": func() string {
 				if strictEvidence {
 					return "strict-current"
@@ -2227,6 +2766,39 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 	})
 }
 
+func qualityEvaluatorEnvironmentFixture() map[string]any {
+	return map[string]any{
+		"go_version":         "go version go1.26.5 fixture/fixture",
+		"permission_profile": "quality-audit",
+		"filesystem": map[string]any{
+			"root":                   "deny",
+			"minimal_runtime":        "read",
+			"judge_checkout":         "read",
+			"quality_input_snapshot": "read",
+			"goroot":                 "read",
+			"gomodcache":             "read",
+			"judge_tool_root":        "write",
+			"codex_executable":       "read",
+			"codex_home":             "deny",
+			"canonical_auth":         "deny-when-present",
+		},
+		"network": "disabled",
+		"outer_environment": map[string]any{
+			"inherit": "none", "PATH": "/bin", "HOME": "<home>",
+			"TMPDIR": "<tmp>", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+			"CODEX_HOME": "<codex-home>", "auth": "staged-auth-json-only",
+		},
+		"shell_environment": map[string]any{
+			"inherit": "none", "PATH": "/bin", "HOME": "<home>",
+			"TMPDIR": "<tmp>", "LANG": "C", "LC_ALL": "C", "TZ": "UTC",
+			"GOROOT": "<goroot>", "GOPATH": "<gopath>",
+			"GOMODCACHE": "<gomodcache>", "GOCACHE": "<gocache>",
+			"GOENV": "off", "GOTOOLCHAIN": "local", "GOWORK": "off",
+			"GOFLAGS": "-mod=readonly", "git_configuration": "hardened",
+		},
+	}
+}
+
 func setQualityAggregateStrictEvidence(
 	t *testing.T,
 	runDir string,
@@ -2247,12 +2819,31 @@ func setQualityAggregateStrictEvidence(
 		t.Fatal("quality input fixture has no validation object")
 	}
 	validation["strict_evidence"] = strict
+	validation["enforce"] = strict
 	if strict {
 		validation["aggregate_status"] = "strict-current"
 	} else {
 		validation["aggregate_status"] = "non-strict"
 	}
 	writeJSON(t, inputsPath, inputs)
+	status := validation["aggregate_status"].(string)
+	judgesPath := filepath.Join(runDir, "quality", "judges.json")
+	var judges map[string]any
+	content, err = os.ReadFile(judgesPath)
+	if err != nil || json.Unmarshal(content, &judges) != nil {
+		t.Fatalf("decode judges fixture: %v", err)
+	}
+	judges["provenance_status"] = status
+	writeJSON(t, judgesPath, judges)
+	qualityPath := filepath.Join(runDir, "quality", "quality.json")
+	var quality map[string]any
+	content, err = os.ReadFile(qualityPath)
+	if err != nil || json.Unmarshal(content, &quality) != nil {
+		t.Fatalf("decode quality fixture: %v", err)
+	}
+	quality["provenance_status"] = status
+	quality["judges"] = judges
+	writeJSON(t, qualityPath, quality)
 
 	markerPath := filepath.Join(runDir, "quality", "aggregate-manifest.json")
 	var marker map[string]any
@@ -2267,13 +2858,19 @@ func setQualityAggregateStrictEvidence(
 	if !ok {
 		t.Fatal("quality aggregate fixture has no files object")
 	}
-	digest, err := sha256File(inputsPath)
-	if err != nil {
-		t.Fatal(err)
+	for name, path := range map[string]string{
+		"inputs.json":  inputsPath,
+		"judges.json":  judgesPath,
+		"quality.json": qualityPath,
+	} {
+		digest, err := sha256File(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		files[name] = digest
 	}
-	files["inputs.json"] = digest
 	writeJSON(t, markerPath, marker)
-	digest, err = sha256File(markerPath)
+	digest, err := sha256File(markerPath)
 	if err != nil {
 		t.Fatal(err)
 	}

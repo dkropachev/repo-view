@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -530,6 +531,25 @@ func TestRunScriptDefaultDoesNotConfigureModel(t *testing.T) {
 		manifest["model_mode"] != "router" ||
 		manifest["model_configuration"] != "none" {
 		t.Fatalf("router-selected manifest = %#v", manifest)
+	}
+}
+
+func TestRunScriptRejectsConfiguredModelInRouterMode(t *testing.T) {
+	bashPath, runScript := requireRunScriptTestTools(t, "bash")
+	t.Setenv("LSP_MODEL", "")
+	t.Setenv("LSP_MODEL_MODE", "router")
+	output, err := exec.Command(
+		bashPath,
+		runScript,
+		"--model", "custom-model",
+		"--dry-run",
+	).CombinedOutput()
+	assertRunScriptExit(t, err, 2, output)
+	if !strings.Contains(
+		string(output),
+		"--model/LSP_MODEL requires --model-mode pinned",
+	) {
+		t.Fatalf("router/model diagnostic = %q", output)
 	}
 }
 
@@ -1774,7 +1794,8 @@ func TestRunScriptResolvesNamedBaseFromRequestedSource(t *testing.T) {
 		bashPath,
 		runScript,
 		"--task", "explain",
-		"--variant", "baseline",
+		"--variant", "optimized",
+		"--profile", "guarded-high",
 		"--baseline-from", baselineDir,
 		"--run-id", "source-base",
 		"--source", sourceB,
@@ -2345,6 +2366,26 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 			jsonl:      stringPointer(runScriptCompletedJSONL),
 			exitCode:   stringPointer("0\n"),
 			wantOutput: "baseline manifest model mismatch:",
+		},
+		{
+			name:     "model mode mismatch",
+			manifest: true,
+			mutate: func(manifest map[string]any) {
+				manifest["model_mode"] = "pinned"
+			},
+			jsonl:      stringPointer(runScriptCompletedJSONL),
+			exitCode:   stringPointer("0\n"),
+			wantOutput: "baseline manifest model_mode mismatch:",
+		},
+		{
+			name:     "model configuration mismatch",
+			manifest: true,
+			mutate: func(manifest map[string]any) {
+				manifest["model_configuration"] = "pinned"
+			},
+			jsonl:      stringPointer(runScriptCompletedJSONL),
+			exitCode:   stringPointer("0\n"),
+			wantOutput: "baseline manifest model_configuration mismatch:",
 		},
 		{
 			name:     "Codex version mismatch",
@@ -3544,6 +3585,7 @@ func TestRunScriptImportsBaselineOnlyIntoOptimizedRun(t *testing.T) {
 		runScript,
 		"--task", "explain",
 		"--variant", "optimized",
+		"--profile", "guarded-high",
 		"--baseline-from", baselineDir,
 		"--run-id", "compatible",
 		"--source", sourceRepo,
@@ -3605,6 +3647,26 @@ func TestRunScriptImportsBaselineOnlyIntoOptimizedRun(t *testing.T) {
 	}
 	if !bytes.Equal(importedBaselinePrompt, currentBaselinePrompt) {
 		t.Fatal("imported baseline exact prompt differs from current commitment")
+	}
+	var importedConfig, currentConfig map[string]any
+	if err := json.Unmarshal(importedGenerationConfig, &importedConfig); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(currentGenerationConfig, &currentConfig); err != nil {
+		t.Fatal(err)
+	}
+	if importedConfig["mechanical_navigation_semantics_enforced"] != false ||
+		currentConfig["mechanical_navigation_semantics_enforced"] != true {
+		t.Fatalf("mechanical markers = imported:%#v current:%#v", importedConfig, currentConfig)
+	}
+	delete(importedConfig, "mechanical_navigation_semantics_enforced")
+	delete(currentConfig, "mechanical_navigation_semantics_enforced")
+	delete(importedConfig, "case_prompt_files")
+	delete(currentConfig, "case_prompt_files")
+	delete(importedConfig, "case_prompt_digests")
+	delete(currentConfig, "case_prompt_digests")
+	if !reflect.DeepEqual(importedConfig, currentConfig) {
+		t.Fatalf("imported generation config invariants differ:\n%s", importedGenerationConfig)
 	}
 	assertRunCompletionMarker(t, runDir, "success", 0)
 	checksumCommand := exec.Command("sha256sum", "-c", "source-SHA256SUMS")
@@ -3712,6 +3774,8 @@ func requireRunScriptTestTools(t *testing.T, tools ...string) (string, string) {
 	if runtime.GOOS == "windows" {
 		t.Skip("run.sh integration requires a Unix shell environment")
 	}
+	t.Setenv("LSP_MODEL", "")
+	t.Setenv("LSP_MODEL_MODE", "")
 	var bashPath string
 	for _, tool := range tools {
 		path, err := exec.LookPath(tool)
@@ -3908,7 +3972,6 @@ exit 99
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"GOFLAGS=-buildvcs=false",
 		"GOWORK=off",
-		"LSP_MODEL=test-model",
 		"LSP_CODEX_VERSION=codex-test 1",
 		"LSP_GO_VERSION="+expectedGoVersion,
 	)
@@ -4465,6 +4528,8 @@ func runScriptBaselineManifest(
 		"base_commit":          baseCommit,
 		"base_ref":             baseRef,
 		"model":                "router-selected",
+		"model_mode":           "router",
+		"model_configuration":  "none",
 		"codex_version":        "codex-test 1",
 		"generation_isolation": runScriptGenerationIsolation,
 		"mechanical_navigation_semantics_enforced": false,

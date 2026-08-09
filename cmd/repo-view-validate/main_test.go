@@ -8,6 +8,16 @@ import (
 	"testing"
 )
 
+func TestRunRejectsNonPositiveCases(t *testing.T) {
+	for _, value := range []string{"0", "-1"} {
+		t.Run(value, func(t *testing.T) {
+			if status := run([]string{"--cases", value}); status != 2 {
+				t.Fatalf("run --cases %s status = %d, want 2", value, status)
+			}
+		})
+	}
+}
+
 func TestEnsureManagedRepositoriesClonesOnceAndReuses(t *testing.T) {
 	remote := initializeValidationRepository(t, "remote")
 	root := t.TempDir()
@@ -81,6 +91,47 @@ func TestEnsureManagedRepositoriesClonesOnceAndReuses(t *testing.T) {
 	}
 	if content, err := os.ReadFile(marker); err != nil || string(content) != "preserve me\n" {
 		t.Fatalf("existing clone marker changed: content=%q err=%v", content, err)
+	}
+}
+
+func TestEnsureManagedRepositoriesReusesRelativeLocalOrigin(t *testing.T) {
+	remote := initializeValidationRepository(t, "relative-remote")
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeRemote, err := filepath.Rel(workingDirectory, remote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	specPath := filepath.Join(root, "repositories.tsv")
+	cloneRoot := filepath.Join(root, "clones")
+	if err := os.WriteFile(
+		specPath,
+		[]byte("sample\t"+relativeRemote+"\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ensureManagedRepositories(specPath, cloneRoot); err != nil {
+		t.Fatalf("initial clone: %v", err)
+	}
+	if _, _, err := ensureManagedRepositories(specPath, cloneRoot); err != nil {
+		t.Fatalf("reuse relative clone: %v", err)
+	}
+}
+
+func TestRepositoryOriginsResolveRelativeURLsFromTheirUseSites(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "clones", "sample")
+	actualRemote := filepath.Join(root, "clones", "remote")
+	if !repositoryOriginsEqual("../remote", actualRemote, repository) {
+		t.Fatal("equivalent local origins were rejected")
+	}
+	if repositoryOriginsEqual("../remote", "../remote", repository) {
+		t.Fatal("equal relative text with different resolution bases was accepted")
 	}
 }
 
@@ -355,6 +406,33 @@ struct Caller {
 	}
 	if validated != 1 {
 		t.Fatalf("validated Swift symbols = %d, want 1", validated)
+	}
+}
+
+func TestDiscoverReposIncludesLinkedWorktrees(t *testing.T) {
+	repository := initializeValidationRepository(t, "worktree-source")
+	root := t.TempDir()
+	worktree := filepath.Join(root, "linked-worktree")
+	validationGit(t, repository, "worktree", "add", worktree, "HEAD")
+
+	repositories, _, err := discoverRepos("", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 || repositories[0] != worktree {
+		t.Fatalf("repositories = %#v, want [%q]", repositories, worktree)
+	}
+}
+
+func TestReadSourceFilesPropagatesScannerErrors(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "oversized.go")
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", maximumSourceLineBytes+1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readSourceFiles(root); err == nil ||
+		!strings.Contains(err.Error(), "token too long") {
+		t.Fatalf("readSourceFiles error = %v", err)
 	}
 }
 

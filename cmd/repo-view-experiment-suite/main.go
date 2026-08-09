@@ -83,6 +83,26 @@ type evidencePreparationOutcome struct {
 	quality  string
 }
 
+type evidencePreparationKey struct {
+	runDir            string
+	qualityProvenance string
+	qualityDigest     string
+	judgeModelMode    string
+	judgeModel        string
+	judgeRepeats      int
+	skipAnalyze       bool
+	skipQuality       bool
+	enforce           bool
+}
+
+type strictQualityReplayConfig struct {
+	qualityDigest  string
+	judgeModelMode string
+	judgeModel     string
+	judgeRepeats   int
+	enforce        bool
+}
+
 type evidencePreparationTracker struct {
 	outcomes map[string]evidencePreparationOutcome
 }
@@ -202,7 +222,9 @@ func run(ctx context.Context, args []string) int {
 	if opts.repairAttempt != "" {
 		opts.repairAttempt = resolve(opts.repoRoot, opts.repairAttempt)
 	}
-	manifest, err := experimentsuite.LoadManifest(opts.manifestPath)
+	manifest, manifestSHA256, err := experimentsuite.LoadManifestSnapshot(
+		opts.manifestPath,
+	)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -266,12 +288,15 @@ func run(ctx context.Context, args []string) int {
 		return 0
 	}
 	var selectedResolutions []experimentsuite.ResolutionCase
+	var resolutionManifestSHA256 string
 	if command == "resolve" || command == "repair" {
-		resolutionManifest, err := experimentsuite.LoadResolutionManifest(opts.resolutionPath)
+		resolutionManifest, digest, err :=
+			experimentsuite.LoadResolutionManifestSnapshot(opts.resolutionPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			return 1
 		}
+		resolutionManifestSHA256 = digest
 		selectedResolutions, err = experimentsuite.SelectResolutions(
 			resolutionManifest,
 			selected,
@@ -321,7 +346,7 @@ func run(ctx context.Context, args []string) int {
 		StartedAt:      started.Format(time.RFC3339Nano),
 		FinishedAt:     finished.Format(time.RFC3339Nano),
 		Manifest:       opts.manifestPath,
-		ManifestSHA256: fileSHA256(opts.manifestPath),
+		ManifestSHA256: manifestSHA256,
 		Cases:          results,
 		Passed:         allPassed(results),
 	}
@@ -330,7 +355,7 @@ func run(ctx context.Context, args []string) int {
 	}
 	if command == "resolve" || command == "repair" {
 		result.ResolutionManifest = opts.resolutionPath
-		result.ResolutionManifestSHA256 = fileSHA256(opts.resolutionPath)
+		result.ResolutionManifestSHA256 = resolutionManifestSHA256
 	}
 	if err := writeResults(opts.outputDir, result); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -349,7 +374,7 @@ func replay(
 	cases []experimentsuite.Case,
 	tracker *evidencePreparationTracker,
 ) []caseResult {
-	prepared := make(map[string]evidencePreparationOutcome)
+	prepared := make(map[evidencePreparationKey]evidencePreparationOutcome)
 	var results []caseResult
 	for _, testCase := range cases {
 		runDir := filepath.Join(opts.evidenceRoot, filepath.FromSlash(testCase.Evidence))
@@ -361,7 +386,7 @@ func replay(
 			QualityProvenance: testCase.QualityProvenance,
 			Evidence:          runDir,
 		}
-		if _, err := os.Stat(runDir); err != nil {
+		if err := ensureRealDirectoryPath(runDir); err != nil {
 			tracker.record(runDir, evidencePreparationOutcome{
 				analysis: evidenceStageNotRun,
 				quality:  evidenceStageNotRun,
@@ -382,6 +407,7 @@ func replay(
 			opts,
 			runDir,
 			testCase.QualityProvenance,
+			testCase.QualityAggregateSHA256,
 			prepared,
 			tracker,
 		); err != nil {
@@ -425,7 +451,7 @@ func resolveCases(
 	for _, resolution := range resolutions {
 		resolutionByID[resolution.ID] = resolution
 	}
-	prepared := make(map[string]evidencePreparationOutcome)
+	prepared := make(map[evidencePreparationKey]evidencePreparationOutcome)
 	testOutcomes := make(map[string]goTestOutcome)
 	var results []caseResult
 	for _, testCase := range cases {
@@ -450,12 +476,21 @@ func resolveCases(
 		for _, evidence := range []struct {
 			dir        string
 			provenance string
+			digest     string
 		}{
-			{fixtureRunDir, testCase.QualityProvenance},
-			{runDir, resolution.QualityProvenance},
+			{
+				fixtureRunDir,
+				testCase.QualityProvenance,
+				testCase.QualityAggregateSHA256,
+			},
+			{
+				runDir,
+				resolution.QualityProvenance,
+				resolution.QualityAggregateSHA256,
+			},
 		} {
 			evidenceDir := evidence.dir
-			if _, err := os.Stat(evidenceDir); err != nil {
+			if err := ensureRealDirectoryPath(evidenceDir); err != nil {
 				tracker.record(evidenceDir, evidencePreparationOutcome{
 					analysis: evidenceStageNotRun,
 					quality:  evidenceStageNotRun,
@@ -475,6 +510,7 @@ func resolveCases(
 				opts,
 				evidenceDir,
 				evidence.provenance,
+				evidence.digest,
 				prepared,
 				tracker,
 			); err != nil {
@@ -560,8 +596,7 @@ func resolveCases(
 				result.Error += "; "
 			}
 			result.Error += "current metrics: " + metricErr.Error()
-		} else if testCase.Outcome == "rejected" &&
-			resolution.QualityProvenance == "strict-current" {
+		} else if testCase.Outcome == "rejected" {
 			result.Checks = append(
 				result.Checks,
 				prefixChecks(
@@ -583,10 +618,45 @@ func prepareEvidence(
 	opts options,
 	runDir string,
 	qualityProvenance string,
-	prepared map[string]evidencePreparationOutcome,
+	qualityDigest string,
+	prepared map[evidencePreparationKey]evidencePreparationOutcome,
 	tracker *evidencePreparationTracker,
 ) error {
-	if outcome, done := prepared[runDir]; done {
+	switch qualityProvenance {
+	case "strict-current", "legacy-unisolated-attested", "non-strict":
+	default:
+		return fmt.Errorf("unsupported quality provenance %q", qualityProvenance)
+	}
+	if err := ensureRealDirectoryPath(runDir); err != nil {
+		return fmt.Errorf("unsafe evidence directory: %w", err)
+	}
+	verifiedConfig, err := experimentsuite.ReadQualityReplayConfig(
+		runDir,
+		qualityDigest,
+		qualityProvenance,
+	)
+	if err != nil {
+		return fmt.Errorf("verify tracked quality aggregate before preparation: %w", err)
+	}
+	strictConfig := strictQualityReplayConfig{
+		qualityDigest:  verifiedConfig.AggregateSHA256,
+		judgeRepeats:   verifiedConfig.JudgeRepeats,
+		judgeModelMode: verifiedConfig.JudgeModelMode,
+		judgeModel:     verifiedConfig.JudgeModel,
+		enforce:        verifiedConfig.Enforce,
+	}
+	preparationKey := evidencePreparationKey{
+		runDir:            runDir,
+		qualityProvenance: qualityProvenance,
+		qualityDigest:     strictConfig.qualityDigest,
+		skipAnalyze:       opts.skipAnalyze,
+		skipQuality:       opts.skipQuality,
+		judgeRepeats:      strictConfig.judgeRepeats,
+		judgeModelMode:    strictConfig.judgeModelMode,
+		judgeModel:        strictConfig.judgeModel,
+		enforce:           strictConfig.enforce,
+	}
+	if outcome, done := prepared[preparationKey]; done {
 		return outcome.err
 	}
 	outcome := evidencePreparationOutcome{
@@ -594,6 +664,11 @@ func prepareEvidence(
 		quality:  evidenceStageNotRun,
 	}
 	if !opts.skipAnalyze {
+		if err := ensureRealDirectoryPath(runDir); err != nil {
+			outcome.err = fmt.Errorf("unsafe evidence directory before analysis: %w", err)
+		}
+	}
+	if outcome.err == nil && !opts.skipAnalyze {
 		outcome.analysis = evidenceStageExecuted
 		outcome.err = runCommand(
 			ctx,
@@ -601,25 +676,33 @@ func prepareEvidence(
 			filepath.Join(opts.repoRoot, "experiments/lsp-replacement/analyze.sh"),
 			runDir,
 		)
-	} else if _, err := os.Stat(filepath.Join(runDir, "metrics.json")); err != nil {
-		outcome.err = fmt.Errorf("reuse evidence analysis: %w", err)
-	} else {
-		outcome.analysis = evidenceStageReused
+	} else if outcome.err == nil && opts.skipAnalyze {
+		if _, err := os.Stat(filepath.Join(runDir, "metrics.json")); err != nil {
+			outcome.err = fmt.Errorf("reuse evidence analysis: %w", err)
+		} else {
+			outcome.analysis = evidenceStageReused
+		}
 	}
 	if outcome.err == nil && !opts.skipQuality {
+		if err := ensureRealDirectoryPath(runDir); err != nil {
+			outcome.err = fmt.Errorf("unsafe evidence directory before quality aggregation: %w", err)
+		}
 		qualityArgs := []string{runDir}
-		switch qualityProvenance {
-		case "strict-current":
-			judgeRepeats, err := recordedStrictJudgeRepeats(runDir)
-			if err != nil {
-				outcome.err = err
-			} else {
-				qualityArgs = append(
-					qualityArgs,
-					"--judge-repeats", strconv.Itoa(judgeRepeats),
-				)
+		var qualityEnvironment []string
+		if outcome.err == nil && qualityProvenance == "strict-current" {
+			qualityArgs = append(
+				qualityArgs,
+				"--judge-repeats", strconv.Itoa(strictConfig.judgeRepeats),
+				"--model-mode", strictConfig.judgeModelMode,
+			)
+			if strictConfig.judgeRepeats > 0 {
+				qualityArgs = append(qualityArgs, "--reuse-judges-only")
 			}
-		case "legacy-unisolated-attested":
+			if strictConfig.enforce {
+				qualityArgs = append(qualityArgs, "--enforce")
+			}
+			qualityEnvironment = strictQualityReplayEnvironment(strictConfig)
+		} else if outcome.err == nil && qualityProvenance == "legacy-unisolated-attested" {
 			qualityArgs = append(qualityArgs, "--bind-legacy-judges")
 		}
 		if opts.skipAnalyze {
@@ -627,10 +710,11 @@ func prepareEvidence(
 		}
 		if outcome.err == nil {
 			outcome.quality = evidenceStageExecuted
-			outcome.err = runCommandWithStdout(
+			outcome.err = runCommandWithStdoutEnvironment(
 				ctx,
 				opts.repoRoot,
 				io.Discard,
+				qualityEnvironment,
 				filepath.Join(opts.repoRoot, "experiments/lsp-replacement/quality-check.sh"),
 				qualityArgs...,
 			)
@@ -644,29 +728,24 @@ func prepareEvidence(
 			outcome.quality = evidenceStageReused
 		}
 	}
-	prepared[runDir] = outcome
+	prepared[preparationKey] = outcome
 	tracker.record(runDir, outcome)
 	return outcome.err
 }
 
-func recordedStrictJudgeRepeats(runDir string) (int, error) {
-	content, err := os.ReadFile(filepath.Join(runDir, "quality", "quality.json"))
-	if err != nil {
-		return 0, fmt.Errorf("read strict quality judge count: %w", err)
+func strictQualityReplayEnvironment(config strictQualityReplayConfig) []string {
+	environment := make([]string, 0, len(os.Environ())+1)
+	for _, entry := range os.Environ() {
+		name, _, _ := strings.Cut(entry, "=")
+		if name == "LSP_JUDGE_MODEL" || name == "LSP_JUDGE_MODEL_MODE" {
+			continue
+		}
+		environment = append(environment, entry)
 	}
-	var quality struct {
-		RequiredJudgeCount int `json:"required_judge_count"`
+	if config.judgeModelMode == "pinned" {
+		environment = append(environment, "LSP_JUDGE_MODEL="+config.judgeModel)
 	}
-	if err := json.Unmarshal(content, &quality); err != nil {
-		return 0, fmt.Errorf("decode strict quality judge count: %w", err)
-	}
-	if quality.RequiredJudgeCount < 1 {
-		return 0, fmt.Errorf(
-			"strict quality evidence records invalid required judge count: %d",
-			quality.RequiredJudgeCount,
-		)
-	}
-	return quality.RequiredJudgeCount, nil
+	return environment
 }
 
 func prefixChecks(
@@ -1045,6 +1124,12 @@ func live(ctx context.Context, opts options, cases []experimentsuite.Case) []cas
 		}
 		runID := "suite-" + testCase.ID + "-" + time.Now().UTC().Format("20060102T150405Z")
 		runsRoot := filepath.Join(opts.evidenceRoot, "runs")
+		if err := ensureDirectory(runsRoot, 0o755); err != nil {
+			result.Error = "prepare live evidence root: " + err.Error()
+			results = append(results, result)
+			printCaseResult(result)
+			continue
+		}
 		runDir := filepath.Join(runsRoot, runID)
 		result.Evidence = runDir
 		sourceRepo := filepath.Join(
@@ -1064,8 +1149,12 @@ func live(ctx context.Context, opts options, cases []experimentsuite.Case) []cas
 			"--evidence-root", runsRoot,
 			"--run-id", runID,
 		}
+		if testCase.Live.ModelMode == "pinned" {
+			runArgs = append(runArgs, "--model", testCase.Live.Model)
+		}
+		baselineFrom := ""
 		if testCase.Live.BaselineFrom != "" {
-			baselineFrom := filepath.Join(
+			baselineFrom = filepath.Join(
 				opts.evidenceRoot,
 				filepath.FromSlash(testCase.Live.BaselineFrom),
 			)
@@ -1079,6 +1168,12 @@ func live(ctx context.Context, opts options, cases []experimentsuite.Case) []cas
 			runArgs...,
 		); err != nil {
 			result.Error = err.Error()
+			results = append(results, result)
+			printCaseResult(result)
+			continue
+		}
+		if err := ensureRealDirectoryPath(runDir); err != nil {
+			result.Error = "unsafe generated evidence directory: " + err.Error()
 			results = append(results, result)
 			printCaseResult(result)
 			continue
@@ -1107,12 +1202,16 @@ func live(ctx context.Context, opts options, cases []experimentsuite.Case) []cas
 			continue
 		}
 		result.Checks = experimentsuite.ValidateEvidence(runDir, testCase.Assertions)
+		identityPaths := []string{sourceRepo}
+		if baselineFrom != "" {
+			identityPaths = append(identityPaths, baselineFrom)
+		}
 		result.Checks = append(
 			result.Checks,
 			experimentsuite.ValidateLiveIdentity(
 				runDir,
 				*testCase.Live,
-				sourceRepo,
+				identityPaths...,
 			),
 		)
 		result.Passed = experimentsuite.Passed(result.Checks)
@@ -1153,10 +1252,18 @@ func repairCases(
 			continue
 		}
 
+		sourceRepo := filepath.Join(
+			opts.repoRoot,
+			filepath.FromSlash(resolution.Repair.Source),
+		)
+		baselineFrom := ""
 		runDir := opts.repairAttempt
 		if runDir == "" {
 			runID := time.Now().UTC().Format("20060102T150405Z")
 			repairsRoot := filepath.Join(opts.evidenceRoot, "repairs", testCase.ID)
+			if err := ensureDirectory(repairsRoot, 0o755); err != nil {
+				result.Error = "prepare repair evidence root: " + err.Error()
+			}
 			runDir = filepath.Join(repairsRoot, runID)
 			sourceRepo := filepath.Join(
 				opts.repoRoot,
@@ -1175,28 +1282,57 @@ func repairCases(
 				"--evidence-root", repairsRoot,
 				"--run-id", runID,
 			}
+			if resolution.Repair.ModelMode == "pinned" {
+				runArgs = append(runArgs, "--model", resolution.Repair.Model)
+			}
 			if resolution.Repair.BaselineFrom != "" {
-				baselineFrom := filepath.Join(
+				baselineFrom = filepath.Join(
 					opts.evidenceRoot,
 					filepath.FromSlash(resolution.Repair.BaselineFrom),
 				)
 				runArgs[3] = "optimized"
 				runArgs = append(runArgs, "--baseline-from", baselineFrom)
 			}
-			if err := runCommand(
-				ctx,
-				opts.repoRoot,
-				filepath.Join(opts.repoRoot, "experiments/lsp-replacement/run.sh"),
-				runArgs...,
-			); err != nil {
-				result.Error = err.Error()
+			if result.Error == "" {
+				if err := runCommand(
+					ctx,
+					opts.repoRoot,
+					filepath.Join(opts.repoRoot, "experiments/lsp-replacement/run.sh"),
+					runArgs...,
+				); err != nil {
+					result.Error = err.Error()
+				}
 			}
-		} else if info, err := os.Stat(runDir); err != nil {
+		} else if err := ensureRealDirectoryPath(runDir); err != nil {
 			result.Error = "repair attempt: " + err.Error()
-		} else if !info.IsDir() {
-			result.Error = "repair attempt is not a directory"
 		}
 		result.Evidence = runDir
+		if result.Error == "" {
+			if err := ensureRealDirectoryPath(runDir); err != nil {
+				result.Error = "unsafe repair evidence directory: " + err.Error()
+			}
+		}
+		identityPaths := []string{sourceRepo}
+		if resolution.Repair.BaselineFrom != "" {
+			if baselineFrom == "" {
+				baselineFrom = filepath.Join(
+					opts.evidenceRoot,
+					filepath.FromSlash(resolution.Repair.BaselineFrom),
+				)
+			}
+			identityPaths = append(identityPaths, baselineFrom)
+		}
+		if result.Error == "" {
+			identityCheck := experimentsuite.ValidateLiveIdentity(
+				runDir,
+				*resolution.Repair,
+				identityPaths...,
+			)
+			result.Checks = append(result.Checks, identityCheck)
+			if !identityCheck.Passed {
+				result.Error = "repair identity: " + identityCheck.Error
+			}
+		}
 		if result.Error == "" {
 			if err := runCommand(
 				ctx,
@@ -1223,7 +1359,9 @@ func repairCases(
 			}
 		}
 		if result.Error == "" {
-			if err := runCommand(
+			if err := ensureRealDirectoryPath(runDir); err != nil {
+				result.Error = "unsafe repair evidence directory before judge quality gate: " + err.Error()
+			} else if err := runCommand(
 				ctx,
 				opts.repoRoot,
 				filepath.Join(opts.repoRoot, "experiments/lsp-replacement/quality-check.sh"),
@@ -1237,9 +1375,12 @@ func repairCases(
 			}
 		}
 
-		result.Checks = experimentsuite.ValidateEvidence(
-			runDir,
-			resolution.Assertions,
+		result.Checks = append(
+			result.Checks,
+			experimentsuite.ValidateEvidence(
+				runDir,
+				resolution.Assertions,
+			)...,
 		)
 		result.Checks = append(
 			result.Checks,
@@ -1289,10 +1430,31 @@ func runCommandWithStdout(
 	name string,
 	args ...string,
 ) error {
+	return runCommandWithStdoutEnvironment(
+		ctx,
+		workDir,
+		stdout,
+		nil,
+		name,
+		args...,
+	)
+}
+
+func runCommandWithStdoutEnvironment(
+	ctx context.Context,
+	workDir string,
+	stdout io.Writer,
+	environment []string,
+	name string,
+	args ...string,
+) error {
 	command := exec.CommandContext(ctx, name, args...)
 	command.Dir = workDir
 	command.Stdout = stdout
 	command.Stderr = os.Stderr
+	if environment != nil {
+		command.Env = environment
+	}
 	if err := command.Run(); err != nil {
 		return fmt.Errorf("%s failed: %w", filepath.Base(name), err)
 	}
@@ -1322,6 +1484,33 @@ func prepareOutputDir(path string) error {
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return fmt.Errorf("output path is not a private directory: %s", path)
+	}
+	return nil
+}
+
+func ensureRealDirectoryPath(path string) error {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return fmt.Errorf("directory must be a clean absolute path: %s", path)
+	}
+	return inspectRealDirectoryPath(path)
+}
+
+func inspectRealDirectoryPath(path string) error {
+	parent := filepath.Dir(path)
+	if parent != path {
+		if err := inspectRealDirectoryPath(parent); err != nil {
+			return err
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("directory path traverses symlink: %s", path)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("directory path contains non-directory component: %s", path)
 	}
 	return nil
 }
@@ -2065,15 +2254,6 @@ func passLabel(passed bool) string {
 		return "PASS"
 	}
 	return "FAIL"
-}
-
-func fileSHA256(path string) string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
 }
 
 func usage() {
