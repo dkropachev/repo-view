@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"os"
@@ -511,8 +512,8 @@ func TestCodexWrapperRejectsInvalidNavigationConfigurationBeforeBuild(t *testing
 			command := exec.Command(bash, script, "exec")
 			command.Env = append(append([]string{}, baseEnvironment...), test.environment...)
 			output, commandErr := command.CombinedOutput()
-			exitError, ok := commandErr.(*exec.ExitError)
-			if !ok || exitError.ExitCode() != 2 ||
+			var exitError *exec.ExitError
+			if !errors.As(commandErr, &exitError) || exitError.ExitCode() != 2 ||
 				!strings.Contains(string(output), test.want) {
 				t.Fatalf("error = %v, output = %q, want exit 2 containing %q",
 					commandErr, output, test.want)

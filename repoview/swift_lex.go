@@ -870,7 +870,7 @@ func (walker *swiftLexicalWalker) scanNumber() {
 	walker.offset = swiftNumberLiteralEnd(walker.source, start)
 	if walker.offset < len(walker.source) {
 		value, size := utf8.DecodeRuneInString(walker.source[walker.offset:])
-		if size > 0 && !(value == utf8.RuneError && size == 1) &&
+		if size > 0 && (value != utf8.RuneError || size != 1) &&
 			swiftIdentifierContinueRune(value) {
 			// Keep malformed adjacent suffixes opaque without consuming a range or
 			// member-access dot after an otherwise complete numeric literal.

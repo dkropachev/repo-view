@@ -257,7 +257,7 @@ func swiftIsWhitespace(character int32) bool {
 func swiftIsIdentifierContinuation(character int32) bool {
 	return character >= 0 && setContains(
 		aux_sym_simple_identifier_token1_character_set_2,
-		rune(character),
+		character,
 	)
 }
 

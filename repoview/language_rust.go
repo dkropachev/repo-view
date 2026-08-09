@@ -167,7 +167,7 @@ func (r rustLanguage) prepareFindScopeResolver(
 	}
 	scopes := make([]cLineScope, 0, len(analysis.scopes))
 	for _, scope := range analysis.scopes {
-		scopes = append(scopes, cLineScope{start: scope.start, end: scope.end})
+		scopes = append(scopes, cLineScope(scope))
 	}
 	return newCPreparedFindScopeResolver(analysis.definitions, scopes, len(lines))
 }
