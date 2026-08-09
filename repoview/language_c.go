@@ -181,10 +181,17 @@ func cCombinedDefinitions(
 			if candidate.ownsScope && !current.ownsScope {
 				current.scopeStart = candidate.scopeStart
 				current.scopeEnd = candidate.scopeEnd
+				current.ownedEndColumn = candidate.ownedEndColumn
 				current.ownsScope = true
 			} else if candidate.ownsScope == current.ownsScope {
 				current.scopeStart = min(current.scopeStart, candidate.scopeStart)
-				current.scopeEnd = max(current.scopeEnd, candidate.scopeEnd)
+				if candidate.scopeEnd > current.scopeEnd {
+					current.scopeEnd = candidate.scopeEnd
+					current.ownedEndColumn = candidate.ownedEndColumn
+				} else if candidate.scopeEnd == current.scopeEnd &&
+					current.ownedEndColumn == 0 {
+					current.ownedEndColumn = candidate.ownedEndColumn
+				}
 			}
 			return
 		}
@@ -521,10 +528,28 @@ func (cLanguage) countSymbolOccurrences(line, symbol string) int {
 	return cCountValidSymbolOccurrences(line, symbol)
 }
 
+func (cLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || !cSourceIdentifier(symbol) {
+		return nil
+	}
+	var columns []int
+	cWalkValidSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
 // cCountValidSymbolOccurrences counts a symbol that the caller has already
 // validated. Streaming reconciliation uses this helper for each physical
 // fragment without repeatedly rescanning a potentially long symbol.
 func cCountValidSymbolOccurrences(line, symbol string) int {
+	return cWalkValidSymbolOccurrences(line, symbol, nil)
+}
+
+func cWalkValidSymbolOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	for offset := 0; offset < len(line); {
 		if cPreprocessingNumberStart(line, offset) {
@@ -551,6 +576,9 @@ func cCountValidSymbolOccurrences(line, symbol string) int {
 		}
 		if line[start:offset] == symbol {
 			count++
+			if visit != nil {
+				visit(start)
+			}
 		}
 	}
 	return count

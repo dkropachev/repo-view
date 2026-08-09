@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dkropachev/repo-view/internal/runstats"
 	"github.com/dkropachev/repo-view/repoview"
@@ -86,25 +88,25 @@ func runFind(args []string) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "unexpected argument:", flags.Arg(0))
+		fmt.Fprintln(os.Stderr, "unexpected argument:", safeOutputText(flags.Arg(0)))
 		return 2
 	}
 	if err := validateInclude("find", repoview.Include(*include), repoview.IncludeDefs, repoview.IncludeRefs, repoview.IncludeBoth); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	view, err := repoview.New(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	options, err := common.buildOptions(repoview.Include(*include))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if err := common.enforceNavigationSemantics("find", options); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if options.Limit > 0 && options.Limit < len(symbols) {
@@ -119,12 +121,12 @@ func runFind(args []string) int {
 	}
 	budget, err := consumeNavigationBudgetFor("find")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	responses, err := view.FindMany(symbols, options)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	for index := range responses {
@@ -173,26 +175,26 @@ func runInspect(args []string) int {
 		repoview.IncludeImports,
 		repoview.IncludeAll,
 	); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	view, err := repoview.New(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	absoluteRoot, err := filepath.Abs(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	options, err := common.buildOptions(repoview.Include(*include))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if err := common.enforceNavigationSemantics("inspect", options); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if options.Limit > 0 && options.Limit < len(locations) {
@@ -207,7 +209,7 @@ func runInspect(args []string) int {
 	}
 	budget, err := consumeNavigationBudgetFor("inspect")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	remaining := options.Limit
@@ -222,7 +224,7 @@ func runInspect(args []string) int {
 		response, err := view.Inspect(location, locationOptions)
 		if err != nil {
 			if len(locations) == 1 {
-				fmt.Fprintln(os.Stderr, err)
+				printCLIError(err)
 				return 1
 			}
 			responses = append(responses, repoview.InspectResponse{
@@ -255,7 +257,12 @@ func runInspect(args []string) int {
 	}
 	for _, response := range responses {
 		if response.Error != "" {
-			fmt.Fprintf(os.Stderr, "%s: %s\n", response.Location, response.Error)
+			fmt.Fprintf(
+				os.Stderr,
+				"%s: %s\n",
+				safeOutputText(response.Location),
+				safeOutputText(response.Error),
+			)
 			continue
 		}
 		printResults(response.Results, options.Return)
@@ -286,21 +293,21 @@ func runOutline(args []string) int {
 	}
 	view, err := repoview.New(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	absoluteRoot, err := filepath.Abs(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	options, err := common.buildOptions(repoview.IncludeDefs)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if err := common.enforceNavigationSemantics("outline", options); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if options.Limit > 0 && options.Limit < len(paths) {
@@ -315,7 +322,7 @@ func runOutline(args []string) int {
 	}
 	budget, err := consumeNavigationBudgetFor("outline")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	remaining := options.Limit
@@ -330,7 +337,7 @@ func runOutline(args []string) int {
 		response, err := view.Outline(path, pathOptions)
 		if err != nil {
 			if len(paths) == 1 {
-				fmt.Fprintln(os.Stderr, err)
+				printCLIError(err)
 				return 1
 			}
 			responses = append(responses, repoview.OutlineResponse{
@@ -363,7 +370,12 @@ func runOutline(args []string) int {
 	}
 	for _, response := range responses {
 		if response.Error != "" {
-			fmt.Fprintf(os.Stderr, "%s: %s\n", response.Path, response.Error)
+			fmt.Fprintf(
+				os.Stderr,
+				"%s: %s\n",
+				safeOutputText(response.Path),
+				safeOutputText(response.Error),
+			)
 			continue
 		}
 		printResults(response.Results, options.Return)
@@ -388,35 +400,35 @@ func runChanged(args []string) int {
 		return 2
 	}
 	if flags.NArg() != 0 {
-		fmt.Fprintln(os.Stderr, "unexpected argument:", flags.Arg(0))
+		fmt.Fprintln(os.Stderr, "unexpected argument:", safeOutputText(flags.Arg(0)))
 		return 2
 	}
 	view, err := repoview.New(*common.root)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	opts, err := common.buildOptions(repoview.IncludeAll)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	if err := common.enforceNavigationSemantics("changed", opts); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	budget, err := consumeNavigationBudgetFor("changed")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 2
 	}
 	response, err := view.Changed(opts)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	if enabled, configErr := enforcedNavigationSemanticsEnabled(); configErr != nil {
-		fmt.Fprintln(os.Stderr, configErr)
+		printCLIError(configErr)
 		return 2
 	} else if enabled && response.BaseCommit != enforcedNavigationBaseCommit {
 		fmt.Fprintf(
@@ -503,6 +515,7 @@ func (c commonFlags) buildOptions(include repoview.Include) (repoview.Options, e
 		Include:        include,
 		Return:         returnMode,
 		Context:        *c.context,
+		ContextSet:     true,
 		Limit:          *c.limit,
 		PathGlobs:      append([]string(nil), (*c.pathGlobs)...),
 		ExcludeGlobs:   append([]string(nil), (*c.excludeGlobs)...),
@@ -764,8 +777,6 @@ func enforceOptionCap(option string, value int, environment string) error {
 		switch option {
 		case "--limit":
 			return fmt.Errorf("%s 0 disables the result limit while %s is set", option, environment)
-		case "--context":
-			value = 5
 		case "--max-code-lines":
 			return fmt.Errorf("%s must be positive; use --return locations to omit code", option)
 		case "--max-patch-lines":
@@ -1260,7 +1271,7 @@ func printJSON(value any, pretty bool) int {
 		encoder.SetIndent("", "  ")
 	}
 	if err := encoder.Encode(value); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		printCLIError(err)
 		return 1
 	}
 	return 0
@@ -1268,23 +1279,24 @@ func printJSON(value any, pretty bool) int {
 
 func printChangedResponse(response repoview.ChangedResponse, returnMode repoview.Return) {
 	if response.HeadCommit != "" {
-		fmt.Printf("# head %s", response.HeadCommit)
+		fmt.Printf("# head %s", safeOutputText(response.HeadCommit))
 		if response.HeadSubject != "" {
-			fmt.Printf(" %s", response.HeadSubject)
+			fmt.Printf(" %s", safeOutputText(response.HeadSubject))
 		}
 		fmt.Println()
 	}
 	if response.Base != "" {
-		fmt.Printf("# base %s", response.Base)
+		fmt.Printf("# base %s", safeOutputText(response.Base))
 		if response.BaseCommit != "" {
-			fmt.Printf(" %s", response.BaseCommit)
+			fmt.Printf(" %s", safeOutputText(response.BaseCommit))
 		}
 		fmt.Println()
 	}
 	if response.Patch != "" {
-		fmt.Println("```diff")
+		fence := markdownCodeFence(response.Patch)
+		fmt.Printf("%sdiff\n", fence)
 		fmt.Println(response.Patch)
-		fmt.Println("```")
+		fmt.Println(fence)
 	}
 	if response.PatchTruncated {
 		fmt.Println("# patch truncated")
@@ -1295,34 +1307,65 @@ func printChangedResponse(response repoview.ChangedResponse, returnMode repoview
 func printResults(results []repoview.Result, returnMode repoview.Return) {
 	for _, result := range results {
 		if returnMode == repoview.ReturnLocations {
+			path := safeOutputText(result.Path)
 			switch {
 			case result.Line > 0:
-				fmt.Printf("%s:%d\n", result.Path, result.Line)
+				fmt.Printf("%s:%d\n", path, result.Line)
 			case result.StartLine > 0 && result.EndLine > 0:
-				fmt.Printf("%s:%d\n", result.Path, result.StartLine)
+				fmt.Printf("%s:%d\n", path, result.StartLine)
 			default:
-				fmt.Println(result.Path)
+				fmt.Println(path)
 			}
 			continue
 		}
-		location := result.Path
+		location := safeOutputText(result.Path)
 		if result.StartLine > 0 && result.EndLine > 0 {
-			location = fmt.Sprintf("%s:%d-%d", result.Path, result.StartLine, result.EndLine)
+			location = fmt.Sprintf("%s:%d-%d", location, result.StartLine, result.EndLine)
 		} else if result.Line > 0 {
-			location = fmt.Sprintf("%s:%d", result.Path, result.Line)
+			location = fmt.Sprintf("%s:%d", location, result.Line)
 		}
 		fmt.Printf("# %s", location)
 		if result.Kind != "" {
 			fmt.Printf(" %s", result.Kind)
 		}
 		if result.Symbol != "" {
-			fmt.Printf(" %s", result.Symbol)
+			fmt.Printf(" %s", safeOutputText(result.Symbol))
 		}
 		fmt.Println()
-		fmt.Printf("```%s\n", fenceLanguage(result.Path))
+		fence := markdownCodeFence(result.Code)
+		fmt.Printf("%s%s\n", fence, fenceLanguage(result.Path))
 		fmt.Println(result.Code)
-		fmt.Println("```")
+		fmt.Println(fence)
 	}
+}
+
+func safeOutputText(value string) string {
+	if !utf8.ValidString(value) || strings.IndexFunc(value, func(character rune) bool {
+		return !unicode.IsPrint(character)
+	}) >= 0 {
+		return strconv.QuoteToGraphic(value)
+	}
+	return value
+}
+
+func printCLIError(err error) {
+	if err != nil {
+		fmt.Fprintln(os.Stderr, safeOutputText(err.Error()))
+	}
+}
+
+func markdownCodeFence(source string) string {
+	longest := 0
+	current := 0
+	for _, character := range source {
+		if character == '`' {
+			current++
+			longest = max(longest, current)
+			continue
+		}
+		current = 0
+	}
+	return strings.Repeat("`", max(3, longest+1))
 }
 
 func fenceLanguage(path string) string {
@@ -1343,8 +1386,15 @@ func fenceLanguage(path string) string {
 		return "tsx"
 	case ".c", ".h":
 		return "c"
-	case ".cc", ".cpp", ".hpp":
+	case ".C", ".CC", ".CPP", ".CXX",
+		".cc", ".cpp", ".cxx", ".c++", ".ii",
+		".H", ".HH", ".HPP", ".HXX",
+		".hpp", ".hh", ".hxx", ".h++",
+		".ipp", ".tpp", ".tcc", ".inl",
+		".ixx", ".cppm", ".mpp", ".ccm", ".cxxm", ".txx":
 		return "cpp"
+	case ".cs", ".csx":
+		return "csharp"
 	case ".java":
 		return "java"
 	case ".kt", ".kts":

@@ -479,7 +479,7 @@ func TestKotlinCompletionMarkerPreservesHeaderCap(t *testing.T) {
 	}})
 	parser.flushHeader()
 	for len(parser.frames) > 1 {
-		parser.closeFrame(lineCount)
+		parser.closeFrame(lineCount, 0)
 	}
 	if maximumHeader > kotlinMaximumHeaderTokens {
 		t.Fatalf("restored Kotlin header grew to %d tokens, cap %d",

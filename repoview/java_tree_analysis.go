@@ -101,18 +101,24 @@ func javaTreeDefinitions(
 
 		line, column := positions.lineColumn(nameStart)
 		scopeStart, scopeEnd := line, line
+		ownedEndLine, ownedEndColumn := 0, 0
 		if ownsScope {
 			scopeNode := tree.nodes[scopeIndex]
 			startOffset := javaSyntaxAttachedStart(tree, scopeIndex, attached)
 			scopeStart, scopeEnd = positions.lineSpan(startOffset, scopeNode.endByte)
+			ownedEndLine, ownedEndColumn = positions.lineColumn(scopeNode.endByte)
+		}
+		if !ownsScope || ownedEndLine != scopeEnd {
+			ownedEndColumn = 0
 		}
 		definition := normalizeJavaTreeDefinition(sourceDefinition{
-			symbol:     symbol,
-			line:       line,
-			column:     column,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			ownsScope:  ownsScope,
+			symbol:         symbol,
+			line:           line,
+			column:         column,
+			scopeStart:     scopeStart,
+			scopeEnd:       scopeEnd,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      ownsScope,
 		}, lineCount)
 		if definition.symbol != "" {
 			definitions = append(definitions, definition)

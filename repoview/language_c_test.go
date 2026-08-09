@@ -37,6 +37,7 @@ func TestCBackendContractAndRepoViewIntegration(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: cHighLevelImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: cHighLevelImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: cHighLevelImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: cHighLevelImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: cHighLevelImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -280,7 +281,7 @@ int (*factory(void))(double)
 		{symbol: "factory", line: 18, column: 7, scopeStart: 18, scopeEnd: 21, ownsScope: true},
 	} {
 		definition := cHighLevelDefinitionNamed(t, definitions, test.symbol)
-		got := cHighLevelDefinitionSummary(definition)
+		got := cHighLevelDefinitionSummaryOf(definition)
 		want := cHighLevelDefinitionSummary(test)
 		if got != want {
 			t.Errorf("definition %q = %#v, want %#v", test.symbol, got, want)
@@ -666,9 +667,19 @@ func cHighLevelTestLines(source string) []string {
 func cHighLevelDefinitionSummaries(definitions []sourceDefinition) []cHighLevelDefinitionSummary {
 	result := make([]cHighLevelDefinitionSummary, 0, len(definitions))
 	for _, definition := range definitions {
-		result = append(result, cHighLevelDefinitionSummary(definition))
+		result = append(result, cHighLevelDefinitionSummaryOf(definition))
 	}
 	return result
+}
+
+func cHighLevelDefinitionSummaryOf(
+	definition sourceDefinition,
+) cHighLevelDefinitionSummary {
+	return cHighLevelDefinitionSummary{
+		symbol: definition.symbol, line: definition.line, column: definition.column,
+		scopeStart: definition.scopeStart, scopeEnd: definition.scopeEnd,
+		ownsScope: definition.ownsScope,
+	}
 }
 
 func cHighLevelDefinitionSymbols(definitions []sourceDefinition) []string {

@@ -370,6 +370,46 @@ func TestCSharpInvalidUTF8AndIncompleteInputsNeverPanic(t *testing.T) {
 	}
 }
 
+func TestCSharpNumericLiteralMemberAndRangeIdentifiersRemainSearchable(t *testing.T) {
+	t.Parallel()
+
+	const source = `class NumericNavigation
+{
+    int end;
+
+    void Run(int[] values)
+    {
+        _ = 1.ToString();
+        _ = 0xFF.ToString();
+        _ = .5.ToString();
+        _ = values[1..end];
+    }
+}`
+
+	root := t.TempDir()
+	writeFile(t, root, "NumericNavigation.cs", source)
+	view := mustView(t, root)
+	tests := []struct {
+		symbol string
+		want   int
+	}{
+		{symbol: "ToString", want: 3},
+		{symbol: "end", want: 1},
+	}
+	for _, test := range tests {
+		response, err := view.Find(test.symbol, Options{
+			Include: IncludeRefs,
+			Return:  ReturnLocations,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Results) != test.want {
+			t.Errorf("Find(%q) references = %#v, want %d", test.symbol, response.Results, test.want)
+		}
+	}
+}
+
 func csharpLineContaining(t *testing.T, lines []string, marker string) int {
 	t.Helper()
 	for index, line := range lines {

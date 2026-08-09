@@ -134,7 +134,13 @@ func modulaCombinedDefinitions(
 				*current = definition
 			} else if definition.ownsScope == current.ownsScope {
 				current.scopeStart = min(current.scopeStart, definition.scopeStart)
-				current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+				if definition.scopeEnd > current.scopeEnd {
+					current.scopeEnd = definition.scopeEnd
+					current.ownedEndColumn = definition.ownedEndColumn
+				} else if definition.scopeEnd == current.scopeEnd &&
+					current.ownedEndColumn == 0 {
+					current.ownedEndColumn = definition.ownedEndColumn
+				}
 			}
 			return
 		}
@@ -533,11 +539,32 @@ func (modula modulaLanguage) countSymbolOccurrences(line, symbol string) int {
 	return modulaCountValidSymbolOccurrences(line, symbol)
 }
 
+func (modula modulaLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || symbol == "" {
+		return nil
+	}
+	if !modula.compilationUnit() || !modulaIdentifierTextValid(symbol) {
+		return independentSymbolColumns(line, symbol)
+	}
+	var columns []int
+	modulaWalkValidSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
 // modulaCountValidSymbolOccurrences scans the line after search options have
 // masked comments and/or strings. It deliberately does not lex those regions
 // again: when callers leave them visible, identifiers inside them are part of
 // the requested search surface, including middle lines of nested comments.
 func modulaCountValidSymbolOccurrences(line, symbol string) int {
+	return modulaWalkValidSymbolOccurrences(line, symbol, nil)
+}
+
+func modulaWalkValidSymbolOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	for offset := 0; offset < len(line); {
 		r, size := utf8.DecodeRuneInString(line[offset:])
@@ -556,6 +583,9 @@ func modulaCountValidSymbolOccurrences(line, symbol string) int {
 			}
 			if line[start:offset] == symbol {
 				count++
+				if visit != nil {
+					visit(start)
+				}
 			}
 			continue
 		}
@@ -585,7 +615,30 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 	symbol string,
 	visit func(lineNo, additionalCount int) bool,
 ) bool {
-	if visit == nil {
+	return modula.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, visit, nil)
+}
+
+func (modula modulaLanguage) walkAdditionalSymbolOccurrencesAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	return modula.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, nil, visit)
+}
+
+func (modula modulaLanguage) walkAdditionalSymbolOccurrencesWithVisitor(
+	lines []string,
+	symbol string,
+	visit func(lineNo, additionalCount int) bool,
+	visitAt func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	if visit == nil && visitAt == nil {
 		return false
 	}
 	pattern, ok := modulaQualifiedOccurrencePattern(symbol)
@@ -599,7 +652,6 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 	if !analysis.gated {
 		return false
 	}
-
 	prefix := make([]int, len(pattern))
 	for index, matched := 1, 0; index < len(pattern); index++ {
 		for matched > 0 && pattern[index] != pattern[matched] {
@@ -618,6 +670,7 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 	matched := 0
 	nextLine := 1
 	pendingAdjustment := 0
+	var pendingAddedColumns []int
 	visitorStopped := false
 	matchLines := modulaOccurrenceLineCursor{starts: analysis.lineStarts}
 	frontierLines := modulaOccurrenceLineCursor{starts: analysis.lineStarts}
@@ -625,16 +678,28 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 	emitThrough := func(lastLine int) bool {
 		lastLine = min(lastLine, len(lines))
 		for nextLine <= lastLine {
-			if !visit(nextLine, pendingAdjustment) {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(
+					nextLine, pendingAdjustment, pendingAddedColumns, nil,
+				)
+			} else {
+				keepGoing = visit(nextLine, pendingAdjustment)
+			}
+			if !keepGoing {
 				visitorStopped = true
 				return false
 			}
 			nextLine++
 			pendingAdjustment = 0
+			pendingAddedColumns = pendingAddedColumns[:0]
 		}
 		return true
 	}
-	record := func(lineNo int) bool {
+	record := func(lineNo, start int, additional bool) bool {
+		if !additional {
+			return true
+		}
 		if lineNo < nextLine {
 			return true
 		}
@@ -643,6 +708,13 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 		}
 		if pendingAdjustment < int(^uint(0)>>1) {
 			pendingAdjustment++
+		}
+		if visitAt != nil &&
+			lineNo >= 1 && lineNo <= len(analysis.lineStarts) {
+			pendingAddedColumns = append(
+				pendingAddedColumns,
+				start-analysis.lineStarts[lineNo-1]+1,
+			)
 		}
 		return true
 	}
@@ -683,9 +755,10 @@ func (modula modulaLanguage) walkAdditionalSymbolOccurrences(
 			}
 			if matched == len(pattern) {
 				start := starts[(tokenCount-len(pattern))%len(starts)]
-				if !modulaRawQualifiedOccurrenceCounted(
+				additional := !modulaRawQualifiedOccurrenceCounted(
 					analysis.source, symbol, start, token.end,
-				) && !record(matchLines.lineAt(start)) {
+				)
+				if !record(matchLines.lineAt(start), start, additional) {
 					return false
 				}
 				matched = prefix[matched-1]

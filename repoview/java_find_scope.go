@@ -10,15 +10,19 @@ import (
 // hit without revalidating line snapshots, cloning definitions, or scanning
 // all definitions and scopes again.
 type javaPreparedFindScopeResolver struct {
-	sourceDefinitions    []sourceDefinition
-	definitionCounts     map[javaFindDefinitionKey]int
-	ownerByLine          []int
-	enclosingByLine      []javaLineScope
-	commentOnlyByLine    []bool
-	ownerAtDefinition    map[int]int
-	ownerDefinitionLines []int
-	substantiveLines     []int
-	lineCount            int
+	sourceDefinitions      []sourceDefinition
+	definitionColumnsByKey map[javaFindDefinitionKey][]int
+	definitionCounts       map[javaFindDefinitionKey]int
+	positionOwners         sourceLineDefinitionOwners
+	positionBoundaries     sourceDefinitionPositionBoundaries
+	positionFallbackByLine []int
+	ownerByLine            []int
+	enclosingByLine        []javaLineScope
+	commentOnlyByLine      []bool
+	ownerAtDefinition      map[int]int
+	ownerDefinitionLines   []int
+	substantiveLines       []int
+	lineCount              int
 }
 
 type javaFindDefinitionKey struct {
@@ -53,26 +57,64 @@ func newJavaPreparedFindScopeResolver(
 ) *javaPreparedFindScopeResolver {
 	lineCount := len(lines)
 	resolver := &javaPreparedFindScopeResolver{
-		sourceDefinitions:    definitions,
-		definitionCounts:     make(map[javaFindDefinitionKey]int, len(definitions)),
-		ownerByLine:          make([]int, lineCount+1),
-		enclosingByLine:      make([]javaLineScope, lineCount+1),
-		commentOnlyByLine:    make([]bool, lineCount+1),
-		ownerAtDefinition:    make(map[int]int, len(definitions)),
-		ownerDefinitionLines: make([]int, 0),
-		substantiveLines:     make([]int, 0, lineCount),
-		lineCount:            lineCount,
+		sourceDefinitions:      definitions,
+		definitionColumnsByKey: make(map[javaFindDefinitionKey][]int, len(definitions)),
+		definitionCounts:       make(map[javaFindDefinitionKey]int, len(definitions)),
+		positionOwners:         newSourceLineDefinitionOwners(definitions),
+		positionBoundaries:     newSourceDefinitionPositionBoundaries(definitions),
+		positionFallbackByLine: make([]int, lineCount+1),
+		ownerByLine:            make([]int, lineCount+1),
+		enclosingByLine:        make([]javaLineScope, lineCount+1),
+		commentOnlyByLine:      make([]bool, lineCount+1),
+		ownerAtDefinition:      make(map[int]int, len(definitions)),
+		ownerDefinitionLines:   make([]int, 0),
+		substantiveLines:       make([]int, 0, lineCount),
+		lineCount:              lineCount,
 	}
 	for _, definition := range definitions {
-		resolver.definitionCounts[javaFindDefinitionKey{
+		key := javaFindDefinitionKey{
 			symbol: definition.symbol,
 			line:   definition.line,
-		}]++
+		}
+		resolver.definitionCounts[key]++
+		if definition.column > 0 {
+			resolver.definitionColumnsByKey[key] = append(
+				resolver.definitionColumnsByKey[key], definition.column,
+			)
+		}
 	}
 	resolver.indexNamedScopes()
+	resolver.indexPositionFallbacks()
 	resolver.indexEnclosingScopes(scopes)
 	resolver.indexFallbackLines(lines)
 	return resolver
+}
+
+func (r *javaPreparedFindScopeResolver) navigationScopeAt(
+	lineNo, column int,
+	structuralLine string,
+) (int, int) {
+	if r != nil && (len(r.positionOwners[lineNo]) > 0 ||
+		r.positionBoundaries.hasLine(lineNo)) {
+		owner := 0
+		if len(r.positionOwners[lineNo]) > 0 {
+			owner = r.positionOwners.ownerAt(
+				r.sourceDefinitions, lineNo, column, structuralLine,
+			)
+		}
+		if owner == 0 && lineNo >= 1 && lineNo < len(r.positionFallbackByLine) {
+			owner = r.positionFallbackByLine[lineNo]
+		}
+		owner = r.positionBoundaries.ownerAtColumn(
+			r.sourceDefinitions, owner, lineNo, column,
+		)
+		if owner > 0 {
+			definition := r.sourceDefinitions[owner-1]
+			return definition.scopeStart, definition.scopeEnd
+		}
+		return lineNo, lineNo
+	}
+	return r.navigationScope(lineNo)
 }
 
 func (r *javaPreparedFindScopeResolver) definitionCount(
@@ -83,6 +125,18 @@ func (r *javaPreparedFindScopeResolver) definitionCount(
 		return 0
 	}
 	return r.definitionCounts[javaFindDefinitionKey{symbol: symbol, line: lineNo}]
+}
+
+func (r *javaPreparedFindScopeResolver) definitionColumns(
+	lineNo int,
+	symbol string,
+) []int {
+	if r == nil {
+		return nil
+	}
+	return r.definitionColumnsByKey[javaFindDefinitionKey{
+		line: lineNo, symbol: symbol,
+	}]
 }
 
 func (r *javaPreparedFindScopeResolver) navigationScope(lineNo int) (int, int) {
@@ -135,6 +189,32 @@ func (r *javaPreparedFindScopeResolver) scopeName(lineNo int) string {
 	return ""
 }
 
+func (r *javaPreparedFindScopeResolver) scopeNameAt(
+	lineNo, column int,
+	structuralLine string,
+) string {
+	if r != nil && (len(r.positionOwners[lineNo]) > 0 ||
+		r.positionBoundaries.hasLine(lineNo)) {
+		owner := 0
+		if len(r.positionOwners[lineNo]) > 0 {
+			owner = r.positionOwners.ownerAt(
+				r.sourceDefinitions, lineNo, column, structuralLine,
+			)
+		}
+		if owner == 0 && lineNo >= 1 && lineNo < len(r.positionFallbackByLine) {
+			owner = r.positionFallbackByLine[lineNo]
+		}
+		owner = r.positionBoundaries.ownerAtColumn(
+			r.sourceDefinitions, owner, lineNo, column,
+		)
+		if owner > 0 {
+			return r.sourceDefinitions[owner-1].symbol
+		}
+		return ""
+	}
+	return r.scopeName(lineNo)
+}
+
 func (r *javaPreparedFindScopeResolver) indexNamedScopes() {
 	before := make([]javaFindScopeCandidate, 0, len(r.sourceDefinitions))
 	after := make([]javaFindScopeCandidate, 0, len(r.sourceDefinitions))
@@ -180,6 +260,43 @@ func (r *javaPreparedFindScopeResolver) indexNamedScopes() {
 	next := javaFindScopeUnassignedLines(r.lineCount)
 	paintJavaFindScopeCandidates(r.ownerByLine, before, next)
 	paintJavaFindScopeCandidates(r.ownerByLine, after, next)
+}
+
+func (r *javaPreparedFindScopeResolver) indexPositionFallbacks() {
+	before := make([]javaFindScopeCandidate, 0, len(r.sourceDefinitions))
+	after := make([]javaFindScopeCandidate, 0, len(r.sourceDefinitions))
+	for index, definition := range r.sourceDefinitions {
+		if !definition.ownsScope || definition.scopeStart > definition.scopeEnd {
+			continue
+		}
+		start := max(1, definition.scopeStart)
+		end := min(r.lineCount, definition.scopeEnd)
+		if start > end {
+			continue
+		}
+		size := end - start
+		if beforeStart := max(start, definition.line+1); beforeStart <= end {
+			before = append(before, javaFindScopeCandidate{
+				start: beforeStart, end: end, definitionIndex: index,
+				size: size, declarationLine: definition.line,
+			})
+		}
+		if afterEnd := min(end, definition.line-1); start <= afterEnd {
+			after = append(after, javaFindScopeCandidate{
+				start: start, end: afterEnd, definitionIndex: index,
+				size: size, declarationLine: definition.line,
+			})
+		}
+	}
+	sort.Slice(before, func(first, second int) bool {
+		return javaFindScopeCandidateLess(before[first], before[second], true)
+	})
+	sort.Slice(after, func(first, second int) bool {
+		return javaFindScopeCandidateLess(after[first], after[second], false)
+	})
+	next := javaFindScopeUnassignedLines(r.lineCount)
+	paintJavaFindScopeCandidates(r.positionFallbackByLine, before, next)
+	paintJavaFindScopeCandidates(r.positionFallbackByLine, after, next)
 }
 
 func (r *javaPreparedFindScopeResolver) indexEnclosingScopes(

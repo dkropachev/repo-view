@@ -77,6 +77,8 @@ func registerJavaScriptLanguages(registry map[string]languageBackend) {
 	registerLanguage(registry, newJavaScriptLanguage("jsx"), ".jsx")
 }
 
+func (javascriptLanguage) authoritativeSymbolOnLine() {}
+
 func (j javascriptLanguage) prepareSource(lines []string) languageBackend {
 	if len(lines) == 0 {
 		j.analysis = nil

@@ -77,7 +77,7 @@ func analyzeKotlinLexically(source string, lineCount int) kotlinLexicalAnalysis 
 	})
 	parser.flushHeader()
 	for len(parser.frames) > 1 {
-		parser.closeFrame(lineCount)
+		parser.closeFrame(lineCount, 0)
 	}
 	return kotlinLexicalAnalysis{
 		definitions: kotlinSortUniqueDefinitions(parser.definitions, lineCount),
@@ -161,7 +161,9 @@ func (parser *kotlinRecoveryParser) accept(token kotlinToken) bool {
 			kind: kind, start: start, definitionIndexes: definitions,
 		})
 	case "}":
-		parser.flushHeader()
+		parser.flushHeaderAtBoundary(
+			line, parser.exactBoundaryColumn(line, token.start),
+		)
 		parser.header = parser.header[:0]
 		if parser.frameOverflow > 0 {
 			parser.frameOverflow--
@@ -171,10 +173,14 @@ func (parser *kotlinRecoveryParser) accept(token kotlinToken) bool {
 			frame.kind == kotlinRecoveryInterpolation {
 			break
 		}
-		parser.closeFrame(line)
+		parser.closeFrame(
+			line, parser.exactBoundaryColumn(line, token.end),
+		)
 		parser.restoreSuspendedHeader(line)
 	case ";":
-		parser.flushHeader()
+		parser.flushHeaderAtBoundary(
+			line, parser.exactBoundaryColumn(line, token.end),
+		)
 		parser.header = parser.header[:0]
 		if frame := parser.currentFrame(); frame != nil && frame.kind == kotlinRecoveryEnum {
 			frame.enumEntriesDone = true
@@ -228,7 +234,7 @@ func (parser *kotlinRecoveryParser) acceptInterpolationBoundary(
 		if frame != nil && frame.kind == kotlinRecoveryInterpolation {
 			break
 		}
-		parser.closeFrame(line)
+		parser.closeFrame(line, 0)
 		parser.restoreSuspendedHeader(line)
 		parser.flushHeader()
 		parser.header = parser.header[:0]
@@ -584,6 +590,12 @@ func kotlinDeclarationKeywordToken(token kotlinToken) bool {
 }
 
 func (parser *kotlinRecoveryParser) flushHeader() {
+	parser.flushHeaderAtBoundary(0, 0)
+}
+
+func (parser *kotlinRecoveryParser) flushHeaderAtBoundary(
+	boundaryLine, ownedEndColumn int,
+) {
 	if len(parser.header) == 0 {
 		return
 	}
@@ -591,7 +603,19 @@ func (parser *kotlinRecoveryParser) flushHeader() {
 	if endLine < 1 {
 		endLine = kotlinTokenLine(parser.lineStarts, parser.header[len(parser.header)-1].end)
 	}
-	parser.analyzeHeader(parser.header, false, max(endLine, 1))
+	_, definitions := parser.analyzeHeader(parser.header, false, max(endLine, 1))
+	if boundaryLine < 1 || ownedEndColumn < 1 {
+		return
+	}
+	for _, definitionIndex := range definitions {
+		if definitionIndex < 0 || definitionIndex >= len(parser.definitions) {
+			continue
+		}
+		definition := &parser.definitions[definitionIndex]
+		if definition.ownsScope && definition.scopeEnd == boundaryLine {
+			definition.ownedEndColumn = ownedEndColumn
+		}
+	}
 }
 
 func (parser *kotlinRecoveryParser) analyzeHeader(
@@ -1016,7 +1040,14 @@ func (parser *kotlinRecoveryParser) appendDefinition(
 		if definition.ownsScope && !current.ownsScope {
 			*current = definition
 		} else if definition.ownsScope == current.ownsScope {
-			current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+			current.scopeStart = min(current.scopeStart, definition.scopeStart)
+			if definition.scopeEnd > current.scopeEnd {
+				current.scopeEnd = definition.scopeEnd
+				current.ownedEndColumn = definition.ownedEndColumn
+			} else if definition.scopeEnd == current.scopeEnd &&
+				current.ownedEndColumn == 0 {
+				current.ownedEndColumn = definition.ownedEndColumn
+			}
 		}
 		return existing
 	}
@@ -1109,7 +1140,25 @@ func kotlinValidDefinitionIndexes(index int) []int {
 	return []int{index}
 }
 
-func (parser *kotlinRecoveryParser) closeFrame(endLine int) {
+func (parser *kotlinRecoveryParser) exactBoundaryColumn(line, offset int) int {
+	if line < 1 || line > len(parser.lineStarts) || offset < 0 ||
+		offset > len(parser.source) {
+		return 0
+	}
+	lineStart := parser.lineStarts[line-1]
+	lineEnd := len(parser.source)
+	if line < len(parser.lineStarts) {
+		lineEnd = parser.lineStarts[line]
+	}
+	if offset < lineStart || offset > lineEnd {
+		return 0
+	}
+	return offset - lineStart + 1
+}
+
+func (parser *kotlinRecoveryParser) closeFrame(
+	endLine, ownedEndColumn int,
+) {
 	if len(parser.frames) <= 1 {
 		return
 	}
@@ -1128,7 +1177,10 @@ func (parser *kotlinRecoveryParser) closeFrame(endLine int) {
 		definition := &parser.definitions[definitionIndex]
 		definition.ownsScope = true
 		definition.scopeStart = min(definition.scopeStart, frame.start)
-		definition.scopeEnd = max(definition.scopeEnd, endLine)
+		if endLine >= definition.scopeEnd {
+			definition.scopeEnd = endLine
+			definition.ownedEndColumn = ownedEndColumn
+		}
 	}
 }
 
@@ -1257,8 +1309,15 @@ func kotlinSortUniqueDefinitions(
 				previous.column == definition.column {
 				if definition.ownsScope && !previous.ownsScope {
 					*previous = definition
-				} else {
-					previous.scopeEnd = max(previous.scopeEnd, definition.scopeEnd)
+				} else if definition.ownsScope == previous.ownsScope {
+					previous.scopeStart = min(previous.scopeStart, definition.scopeStart)
+					if definition.scopeEnd > previous.scopeEnd {
+						previous.scopeEnd = definition.scopeEnd
+						previous.ownedEndColumn = definition.ownedEndColumn
+					} else if definition.scopeEnd == previous.scopeEnd &&
+						previous.ownedEndColumn == 0 {
+						previous.ownedEndColumn = definition.ownedEndColumn
+					}
 				}
 				continue
 			}

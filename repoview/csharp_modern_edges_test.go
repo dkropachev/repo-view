@@ -265,6 +265,164 @@ func TestCSharpRawVerbatimAndInterpolatedStringsPreserveOnlyExpressionCode(t *te
 	}
 }
 
+func TestCSharpUTF8StringSuffixesRemainPartOfEveryLiteralForm(t *testing.T) {
+	t.Parallel()
+
+	const source = `class Encodings
+{
+    ReadOnlySpan<byte> regularLower = "regular lower"u8;
+    ReadOnlySpan<byte> regularUpper = "regular upper"U8;
+    ReadOnlySpan<byte> verbatimLower = @"verbatim lower"u8;
+    ReadOnlySpan<byte> verbatimUpper = @"verbatim upper"U8;
+    ReadOnlySpan<byte> rawLower = """raw lower"""u8;
+    ReadOnlySpan<byte> rawUpper = """raw upper"""U8;
+}`
+
+	root := t.TempDir()
+	writeFile(t, root, "Encodings.cs", source)
+	view := mustView(t, root)
+	for _, suffix := range []string{"u8", "U8"} {
+		response, err := view.Find(suffix, Options{
+			Include:   IncludeRefs,
+			Return:    ReturnLocations,
+			NoStrings: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Results) != 0 {
+			t.Errorf("UTF-8 suffix %q remained searchable: %#v", suffix, response.Results)
+		}
+	}
+}
+
+func TestCSharpCompositeSymbolsRoundTripAcrossTriviaAndPhysicalLines(t *testing.T) {
+	t.Parallel()
+
+	const source = `namespace Alpha
+    .
+    Beta;
+
+public class Number
+{
+    public static Number operator
+        +
+        (Number left, Number right) => left;
+
+    public void Use()
+    {
+        Alpha
+            /* qualified-name trivia */ .
+            Beta
+            . Target();
+    }
+}`
+
+	lines := csharpTestLines(source)
+	definitions := newCSharpLanguage().sourceDefinitions(lines)
+	for _, symbol := range []string{"Alpha.Beta", "operator+"} {
+		if !slices.Contains(csharpDefinitionSymbols(definitions), symbol) {
+			t.Fatalf("fixture did not emit canonical definition %q: %#v", symbol, definitions)
+		}
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "Composite.cs", source)
+	view := mustView(t, root)
+	for _, symbol := range []string{"Alpha.Beta", "operator+"} {
+		response, err := view.Find(symbol, Options{
+			Include: IncludeDefs,
+			Return:  ReturnLocations,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(response.Results) != 1 || response.Results[0].Kind != "def" {
+			t.Errorf("Find(%q) definitions = %#v, want one canonical definition",
+				symbol, response.Results)
+		}
+	}
+
+	response, err := view.Find("Alpha.Beta.Target", Options{
+		Include: IncludeRefs,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Kind != "ref" ||
+		response.Results[0].Line != 13 {
+		t.Fatalf("multiline qualified reference = %#v, want one reference on line 13",
+			response.Results)
+	}
+}
+
+func TestCSharpCompositePositionCorrectionsCoverOverlappingMatches(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{"a.a.a"}
+	backend := prepareLanguageBackend(newCSharpLanguage(), lines).(csharpLanguage)
+	adjustment := 0
+	var added, removed []int
+	handled := backend.walkAdditionalSymbolOccurrencesAt(
+		lines, "a.a",
+		func(_ int, count int, addedColumns, removedColumns []int) bool {
+			adjustment = count
+			added = append([]int(nil), addedColumns...)
+			removed = append([]int(nil), removedColumns...)
+			return true
+		},
+	)
+	if !handled || adjustment != 1 || !slices.Equal(added, []int{3}) || len(removed) != 0 {
+		t.Fatalf("overlap corrections = handled %v, count %d, added %#v, removed %#v",
+			handled, adjustment, added, removed)
+	}
+}
+
+func TestCSharpDestructorFindRejectsUnaryComplementSequences(t *testing.T) {
+	t.Parallel()
+
+	const source = `class C
+{
+    ~ C() {}
+
+    void Use()
+    {
+        int C = 1;
+        _ = ~ C;
+        _ = ~C;
+    }
+}`
+	root := t.TempDir()
+	writeFile(t, root, "Destructor.cs", source)
+	view := mustView(t, root)
+
+	definitions, err := view.Find("~C", Options{
+		Include: IncludeDefs,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(definitions.Results) != 1 || definitions.Results[0].Kind != "def" ||
+		definitions.Results[0].Line != 3 {
+		t.Fatalf("spaced destructor definitions = %#v, want one definition on line 3",
+			definitions.Results)
+	}
+
+	references, err := view.Find("~C", Options{
+		Include: IncludeRefs,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(references.Results) != 0 {
+		t.Fatalf("unary complement sequences became destructor references: %#v",
+			references.Results)
+	}
+}
+
 func TestCSharpIdentifiersUseRawSourceIdentityAndExactByteCoordinates(t *testing.T) {
 	t.Parallel()
 

@@ -1268,7 +1268,10 @@ class C {
 	if !reflect.DeepEqual(escaped.scopes, plain.scopes) {
 		t.Fatalf("tree scopes=%#v\nlexical scopes=%#v", plain.scopes, escaped.scopes)
 	}
-	if !reflect.DeepEqual(escaped.definitions, plain.definitions) {
+	if !reflect.DeepEqual(
+		javaDefinitionSummaries(escaped.definitions),
+		javaDefinitionSummaries(plain.definitions),
+	) {
 		t.Fatalf("tree definitions=%#v\nlexical definitions=%#v",
 			plain.definitions, escaped.definitions)
 	}
@@ -1401,7 +1404,10 @@ func TestJavaAuthoritativeRecoveryMatchesCorpusDefinitionEdges(t *testing.T) {
 			if got := javaDefinitionSymbols(escaped.definitions); !reflect.DeepEqual(got, test.want) {
 				t.Fatalf("lexical definitions = %#v, want %#v", got, test.want)
 			}
-			if !reflect.DeepEqual(escaped.definitions, plain.definitions) {
+			if !reflect.DeepEqual(
+				javaDefinitionSummaries(escaped.definitions),
+				javaDefinitionSummaries(plain.definitions),
+			) {
 				t.Fatalf("tree definitions=%#v\nlexical definitions=%#v",
 					plain.definitions, escaped.definitions)
 			}

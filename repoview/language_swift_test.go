@@ -25,6 +25,7 @@ func TestSwiftBackendContractRegistrationAndPublicIntegration(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: swiftTestImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: swiftTestImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: swiftTestImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: swiftTestImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: swiftTestImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -96,6 +97,34 @@ final class Service {
 		inspected.Results[0].Scope != "run" || inspected.Results[0].StartLine != 6 ||
 		inspected.Results[0].EndLine != 8 {
 		t.Fatalf("Inspect Target = %#v, want Target in run at 6-8", inspected)
+	}
+}
+
+func TestSwiftLexicalDefinitionsRecordOnlyPhysicalClosingBoundaries(t *testing.T) {
+	t.Parallel()
+
+	const closed = `class C {
+  func first() {
+  }; let field = 0
+}
+`
+	closedDefinitions := analyzeSwiftLexically(
+		strings.TrimSuffix(closed, "\n"), len(swiftTestLines(closed)),
+	).definitions
+	first := swiftTestFirstDefinition(t, closedDefinitions, "first")
+	if first.scopeEnd != 3 || first.ownedEndColumn != 4 {
+		t.Fatalf("physically closed function = %#v, want line 3 boundary column 4", first)
+	}
+
+	const unfinished = `class C {
+  func unfinished() {
+`
+	unfinishedDefinitions := analyzeSwiftLexically(
+		strings.TrimSuffix(unfinished, "\n"), len(swiftTestLines(unfinished)),
+	).definitions
+	definition := swiftTestFirstDefinition(t, unfinishedDefinitions, "unfinished")
+	if definition.ownedEndColumn != 0 {
+		t.Fatalf("EOF-recovered function claimed exact closing boundary: %#v", definition)
 	}
 }
 
@@ -326,6 +355,47 @@ func TestSwiftSmallestScopesAndNamedNavigationScopes(t *testing.T) {
 	if got := scopeName(lines, 15, backend); got != "run" {
 		t.Fatalf("closure/switch scope name = %q, want run", got)
 	}
+}
+
+func TestSwiftQualifiedFindClassifiesDefinitionsReferencesAndTrivia(t *testing.T) {
+	t.Parallel()
+
+	const source = `extension Outer /* definition trivia */ . Inner {
+    func member() {}
+}
+func use() {
+    Outer.Inner()
+    Outer /* same-line trivia */ . Inner()
+    Outer
+        /* cross-line trivia */
+        .Inner()
+    let opaque = "Outer.Inner"
+    // Outer.Inner
+}
+`
+	lines := swiftTestLines(source)
+	analysis := analyzeSwiftSource(strings.TrimSuffix(source, "\n"), len(lines))
+	if analysis.tree == nil || len(analysis.recoverySpans) != 0 {
+		t.Fatalf("qualified Swift fixture is not concrete-valid: tree=%v recovery=%#v",
+			analysis.tree != nil, analysis.recoverySpans)
+	}
+	root := t.TempDir()
+	writeFile(t, root, "Qualified.swift", source)
+	view := mustView(t, root)
+
+	found, err := view.Find("Outer.Inner", Options{
+		Include: IncludeBoth,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	swiftTestAssertResultShape(
+		t,
+		found.Results,
+		[]int{1, 5, 6, 7},
+		[]string{"def", "ref", "ref", "ref"},
+	)
 }
 
 func swiftTestLines(source string) []string {

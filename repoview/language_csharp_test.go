@@ -34,6 +34,7 @@ func TestCSharpBackendContractAndRegistration(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: csharpImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: csharpImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: csharpImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: csharpImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: csharpImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -387,7 +388,11 @@ func csharpExpectedDefinition(
 func csharpDefinitionSummaries(definitions []sourceDefinition) []csharpDefinitionSummary {
 	result := make([]csharpDefinitionSummary, 0, len(definitions))
 	for _, definition := range definitions {
-		result = append(result, csharpDefinitionSummary(definition))
+		result = append(result, csharpDefinitionSummary{
+			symbol: definition.symbol, line: definition.line, column: definition.column,
+			scopeStart: definition.scopeStart, scopeEnd: definition.scopeEnd,
+			ownsScope: definition.ownsScope,
+		})
 	}
 	return result
 }

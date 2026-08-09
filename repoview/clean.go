@@ -1,7 +1,6 @@
 package repoview
 
 import (
-	"regexp"
 	"strings"
 )
 
@@ -40,12 +39,86 @@ func dropPythonDocstrings(source string) string {
 }
 
 func dropCLikeComments(source string) string {
-	block := regexp.MustCompile(`(?s)/\*.*?\*/`).ReplaceAllString(source, "")
-	lines := strings.Split(block, "\n")
-	for i, line := range lines {
-		lines[i] = stripSlashComment(line)
+	const (
+		cLikeCode = iota
+		cLikeSingleQuoted
+		cLikeDoubleQuoted
+		cLikeBacktickQuoted
+		cLikeLineComment
+		cLikeBlockComment
+	)
+	state := cLikeCode
+	var cleaned strings.Builder
+	cleaned.Grow(len(source))
+	for index := 0; index < len(source); {
+		current := source[index]
+		next := byte(0)
+		if index+1 < len(source) {
+			next = source[index+1]
+		}
+		switch state {
+		case cLikeCode:
+			switch {
+			case current == '/' && next == '/':
+				state = cLikeLineComment
+				index += 2
+			case current == '/' && next == '*':
+				cleaned.WriteByte(' ')
+				state = cLikeBlockComment
+				index += 2
+			case current == '\'':
+				state = cLikeSingleQuoted
+				cleaned.WriteByte(current)
+				index++
+			case current == '"':
+				state = cLikeDoubleQuoted
+				cleaned.WriteByte(current)
+				index++
+			case current == '`':
+				state = cLikeBacktickQuoted
+				cleaned.WriteByte(current)
+				index++
+			default:
+				cleaned.WriteByte(current)
+				index++
+			}
+		case cLikeSingleQuoted, cLikeDoubleQuoted, cLikeBacktickQuoted:
+			cleaned.WriteByte(current)
+			index++
+			if current == '\n' && state != cLikeBacktickQuoted {
+				state = cLikeCode
+				continue
+			}
+			if current == '\\' && index < len(source) {
+				cleaned.WriteByte(source[index])
+				index++
+				continue
+			}
+			if state == cLikeSingleQuoted && current == '\'' ||
+				state == cLikeDoubleQuoted && current == '"' ||
+				state == cLikeBacktickQuoted && current == '`' {
+				state = cLikeCode
+			}
+		case cLikeLineComment:
+			if current == '\n' {
+				cleaned.WriteByte(current)
+				state = cLikeCode
+			}
+			index++
+		case cLikeBlockComment:
+			switch {
+			case current == '*' && next == '/':
+				state = cLikeCode
+				index += 2
+			case current == '\n':
+				cleaned.WriteByte(current)
+				index++
+			default:
+				index++
+			}
+		}
 	}
-	return strings.Join(lines, "\n")
+	return cleaned.String()
 }
 
 func stripHashComment(line string) string {
