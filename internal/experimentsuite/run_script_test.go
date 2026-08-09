@@ -170,7 +170,7 @@ func TestSharedReviewPromptRequiresBoundedCompatibilityEvidence(t *testing.T) {
 func TestRunScriptBuildsSourceGroundedSimplePrompt(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -256,6 +256,7 @@ func TestRunScriptBuildsSourceGroundedSimplePrompt(t *testing.T) {
 	coreInspectCommand := simpleCoreInspectCommand()
 	consumerInspectCommand := simpleConsumerInspectCommand()
 	for _, required := range []string{
+		"Do not run an arbitrary shell command",
 		"Use exactly three repo-view commands for this simple task",
 		changedCommand,
 		coreInspectCommand,
@@ -352,7 +353,7 @@ func TestRunScriptBuildsSourceGroundedSimplePrompt(t *testing.T) {
 func TestRunScriptBuildsSourceGroundedSimpleReviewPrompt(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -486,7 +487,7 @@ func TestRunScriptRejectsMissingValues(t *testing.T) {
 func TestRunScriptDefaultDoesNotConfigureModel(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "mktemp", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -765,7 +766,7 @@ func TestRunScriptDocumentsAndPreflightsPortableLocking(t *testing.T) {
 func TestRunScriptRejectsUnexpectedCodexVersion(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
 	tempRoot := t.TempDir()
@@ -805,7 +806,7 @@ func TestRunScriptRejectsUnexpectedCodexVersion(t *testing.T) {
 func TestRunScriptClaimsRunDirectoryWithoutOverwriting(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	tempRoot := t.TempDir()
 	evidenceRoot := filepath.Join(tempRoot, "evidence")
@@ -1207,7 +1208,7 @@ func TestRunScriptDoesNotRemoveReplacedPrivateStage(t *testing.T) {
 func TestRunScriptFetchesImmutableTargetFromRequestedSource(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceA, target := initializeRunScriptGitTargetWithContent(t, "source-a\n")
 	sourceB, _ := initializeRunScriptGitTargetWithContent(t, "source-b\n")
@@ -1279,7 +1280,7 @@ func TestRunScriptSupportsSHA256TargetRepository(t *testing.T) {
 func TestRunScriptIsolatesGitForReusedWorktreeCheckout(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, first := initializeRunScriptGitTargetWithContent(t, "first\n")
 	target := appendRunScriptGitCommit(t, sourceRepo, "second\n")
@@ -1369,7 +1370,7 @@ func TestRunScriptIsolatesGitForReusedWorktreeCheckout(t *testing.T) {
 func TestRunScriptRejectsReusedWorktreeFilters(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, target := initializeRunScriptGitTarget(t)
 	tempRoot := t.TempDir()
@@ -1419,7 +1420,7 @@ func TestRunScriptRejectsReusedWorktreeFilters(t *testing.T) {
 func TestRunScriptRejectsHiddenReusedWorktreeState(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, _ := initializeRunScriptGitTarget(t)
 	writeRunScriptFile(
@@ -1531,7 +1532,7 @@ func TestRunScriptRejectsHiddenReusedWorktreeState(t *testing.T) {
 func TestRunScriptRejectsTargetSubmodules(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	submoduleRepo, _ := initializeRunScriptGitTargetWithContent(t, "nested\n")
 	sourceRepo, _ := initializeRunScriptGitTarget(t)
@@ -1611,7 +1612,7 @@ func TestRunScriptRejectsTargetSubmodules(t *testing.T) {
 func TestRunScriptRequiresIgnoredWorktreeLockPath(t *testing.T) {
 	bashPath, _ := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRoot, runScript := initializeRunScriptSourceFixture(t)
 	writeRunScriptFile(
@@ -1650,7 +1651,7 @@ func TestRunScriptRequiresIgnoredWorktreeLockPath(t *testing.T) {
 func TestRunScriptRejectsUnsafeRepoViewSourceGitConfig(t *testing.T) {
 	bashPath, _ := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRoot, runScript := initializeRunScriptSourceFixture(t)
 	filterMarker := filepath.Join(t.TempDir(), "source-filter-ran")
@@ -1692,7 +1693,7 @@ func TestRunScriptRejectsUnsafeRepoViewSourceGitConfig(t *testing.T) {
 func TestRunScriptRequiresAncestorCommitBase(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, first := initializeRunScriptGitTargetWithContent(t, "first\n")
 	second := appendRunScriptGitCommit(t, sourceRepo, "second\n")
@@ -1745,7 +1746,7 @@ func TestRunScriptRequiresAncestorCommitBase(t *testing.T) {
 func TestRunScriptResolvesNamedBaseFromRequestedSource(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceA, _ := initializeRunScriptGitTargetWithContent(t, "source-a\n")
 	sourceB := filepath.Join(t.TempDir(), "source-b")
@@ -1818,7 +1819,7 @@ func TestRunScriptResolvesNamedBaseFromRequestedSource(t *testing.T) {
 func TestRunScriptRejectsUnignoredEvidenceRootInsideSource(t *testing.T) {
 	bashPath, _ := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	fixtureRoot, runScript := initializeRunScriptSourceFixture(t)
 	sourceRepo, target := initializeRunScriptGitTarget(t)
@@ -1850,7 +1851,7 @@ func TestRunScriptRejectsUnignoredEvidenceRootInsideSource(t *testing.T) {
 func TestRunScriptRejectsConcurrentRepoViewSourceChange(t *testing.T) {
 	bashPath, _ := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	fixtureRoot, runScript := initializeRunScriptSourceFixture(t)
 	sourceRepo, target := initializeRunScriptGitTarget(t)
@@ -2094,7 +2095,7 @@ func TestRunScriptRejectsRepoViewSourceHardlink(t *testing.T) {
 func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 	bashPath, _ := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	_, runScript := initializeRunScriptSourceFixture(t)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -2626,7 +2627,7 @@ func TestRunScriptValidatesBaselineBeforeImport(t *testing.T) {
 func TestRunScriptImportsFromPrivateValidatedSnapshot(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 		"sleep",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -2761,7 +2762,7 @@ func TestRunScriptImportsFromPrivateValidatedSnapshot(t *testing.T) {
 func TestRunScriptCleansPrivateStageOnSetupFailure(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "jq", "tar", "sha256sum", "flock", "realpath", "awk",
+		"bash", "git", "jq", "tar", "sha256sum", "realpath", "awk",
 	)
 	sourceRepo, target := initializeRunScriptGitTarget(t)
 	tempRoot := t.TempDir()
@@ -2788,7 +2789,7 @@ func TestRunScriptCleansPrivateStageOnSetupFailure(t *testing.T) {
 func TestRunScriptPublishesOnlyValidatedCodexTranscripts(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "mktemp", "uname",
 	)
 	sourceRepo, target := initializeRunScriptGitTarget(t)
@@ -2873,7 +2874,7 @@ func TestRunScriptPublishesOnlyValidatedCodexTranscripts(t *testing.T) {
 func TestRunScriptIsolatesAndPinsCodexGeneration(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "mktemp", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -3142,7 +3143,7 @@ func TestRunScriptIsolatesAndPinsCodexGeneration(t *testing.T) {
 func TestRunScriptRejectsTargetMutationDuringCodexRun(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -3174,7 +3175,7 @@ func TestRunScriptRejectsTargetMutationDuringCodexRun(t *testing.T) {
 func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
 	)
 	sourceRepo, head := initializeRunScriptDeepGitTarget(t)
@@ -3456,7 +3457,7 @@ func TestRunScriptUsesExternalCacheForOptimizedSnapshot(t *testing.T) {
 func TestRunScriptRejectsDependencySnapshotMutationDuringCodexRun(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
 	)
 	sourceRepo, head := initializeRunScriptDeepGitTarget(t)
@@ -3502,7 +3503,7 @@ func TestRunScriptRejectsDependencySnapshotMutationDuringCodexRun(t *testing.T) 
 func TestRunScriptRejectsVerifiedDeepTargetWithoutDependencyChecksums(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "find", "mktemp", "sort", "uname", "unzip",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -3541,7 +3542,7 @@ func TestRunScriptRejectsVerifiedDeepTargetWithoutDependencyChecksums(t *testing
 func TestRunScriptImportsBaselineOnlyIntoOptimizedRun(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "mktemp", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)
@@ -3689,7 +3690,7 @@ func TestRunScriptImportsBaselineOnlyIntoOptimizedRun(t *testing.T) {
 func TestRunScriptRejectsBaselineSharedGenerationConfigMismatch(t *testing.T) {
 	bashPath, runScript := requireRunScriptTestTools(
 		t,
-		"bash", "git", "go", "jq", "tar", "sha256sum", "flock", "realpath",
+		"bash", "git", "go", "jq", "tar", "sha256sum", "realpath",
 		"awk", "date", "mktemp", "uname",
 	)
 	sourceRepo, head := initializeRunScriptGitTarget(t)

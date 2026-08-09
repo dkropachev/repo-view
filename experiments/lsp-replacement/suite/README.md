@@ -1,7 +1,7 @@
 # LSP-Replacement Regression Suite
 
 `cases.json` is the tracked source of truth for the parked experiment suite. It
-orders cases from a one-call explanation through the accepted multi-stage
+orders cases from a bounded three-call explanation through the accepted multi-stage
 navigation workload and includes every rejected deep fixture.
 
 ## Commands

@@ -2101,9 +2101,12 @@ func (parser *modulaConcreteParser) findDeclarationSemicolonBoundary(
 			continue
 		}
 		token := parser.tokens[index]
+		procedureTypeContinuation := typeBlocks &&
+			modulaProcedureTypeContinuation(parser.tokens, index)
 		if token.lineStart && modulaDeclarationSectionStarter(token.text) &&
-			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0) &&
-			!modulaProcedureTypeContinuation(parser.tokens, index) {
+			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0 ||
+				token.text == "PROCEDURE" && len(blocks) == 0) &&
+			!procedureTypeContinuation {
 			return -1, index
 		}
 		if unmatchedDirective {
@@ -2162,10 +2165,13 @@ func (parser *modulaConcreteParser) findDeclarationBoundary(
 			unmatchedDirective = true
 			continue
 		}
+		procedureTypeContinuation := typeBlocks &&
+			modulaProcedureTypeContinuation(parser.tokens, index)
 		if index >= start && token.lineStart &&
-			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0) &&
+			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0 ||
+				token.text == "PROCEDURE" && len(blocks) == 0) &&
 			modulaDeclarationSectionStarter(token.text) &&
-			!modulaProcedureTypeContinuation(parser.tokens, index) {
+			!procedureTypeContinuation {
 			return -1, index
 		}
 		if unmatchedDirective {

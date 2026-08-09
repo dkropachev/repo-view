@@ -66,8 +66,10 @@ suites/SUITE_ID/
 `current/` contains the accepted evidence used by the suite. `runs/` contains
 fresh experiments understood by `../analyze.sh` and `../quality-check.sh`.
 `fixtures/` contains the exact rejected evidence required by regression cases.
-Tracked conclusions are in `../optimization-results.md` and
-`../deep-navigation-results.md`.
+The current tracked conclusion is in `../../lsp-replacement.md`; the accepted
+case mapping is in `../suite/latest-resolution.md`. The older
+`../optimization-results.md` and `../deep-navigation-results.md` files are
+historical pinned measurement snapshots.
 
 Fresh runs are prepared in private ignored sibling directories and renamed to
 `runs/RUN_ID` only after reaching a terminal state. `run-complete.json`

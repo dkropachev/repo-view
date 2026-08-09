@@ -578,6 +578,29 @@ func javaRecoverMemberInitializerPrefix(
 		definitions[last].ownsScope = true
 		definitions[last].scopeStart = scopeStart
 		definitions[last].scopeEnd = scopeEnd
+		definitions[last].ownedEndColumn = 0
+		// A following declaration-shaped token makes this closing brace a
+		// recovered sibling boundary. Expression continuations such as
+		// `}.method()` still belong to the field through its semicolon.
+		next := closeBrace + 1
+		siblingBoundary := next < len(lexed.tokens) &&
+			javaMemberSuffixMayStart(lexed.tokens[next])
+		if next < len(lexed.tokens) && lexed.tokens[next].value == "{" &&
+			brace < len(delimiters.braceOwner) &&
+			next < len(delimiters.braceOwner) &&
+			delimiters.braceOwner[next] == delimiters.braceOwner[brace] {
+			siblingBoundary = true
+		}
+		if siblingBoundary {
+			definitions[last].ownedEndColumn = javaExactOwnedEndColumn(
+				positions,
+				scopeEnd,
+				lexed.tokens[closeBrace].end,
+				javaTokenIsExactPunctuation(
+					lexed.input, lexed.tokens[closeBrace], '}',
+				),
+			)
+		}
 		definitions[last] = normalizeJavaTreeDefinition(definitions[last], lineCount)
 	}
 	return definitions

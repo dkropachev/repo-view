@@ -641,6 +641,215 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 			`python3 -c 'open("README")'`,
 		},
 		{
+			"optimized-investigative-complete-medium-explain",
+			validCommand,
+			"",
+			`reader=cat; "$reader" repository/file.go`,
+		},
+		{
+			"optimized-investigative-complete-medium-review",
+			validCommand,
+			"",
+			`$(printf cat) repository/file.go`,
+		},
+		{
+			"optimized-investigative-complete-medium-deep-explain",
+			validCommand,
+			"",
+			"`printf cat` repository/file.go",
+		},
+		{
+			"optimized-investigative-complete-medium-deep-review",
+			validCommand,
+			"",
+			`$'cat' repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-high-explain",
+			validCommand,
+			"",
+			`d=/usr/bin; "$d"/cat repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-high-review",
+			validCommand,
+			"",
+			`c""at repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-high-deep-explain",
+			validCommand,
+			"",
+			`c\at repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-high-deep-review",
+			validCommand,
+			"",
+			`reader=cat; command -p "$reader" repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-medium-explain",
+			validCommand,
+			"",
+			`reader=cat; X=1 command "$reader" repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-medium-review",
+			validCommand,
+			"",
+			`$(
+printf cat
+) repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-medium-deep-explain",
+			validCommand,
+			"",
+			`/usr/bin/c?t repository/file.go`,
+		},
+		{
+			"optimized-investigative-enforced-medium-deep-review",
+			validCommand,
+			"",
+			`c\
+at repository/file.go`,
+		},
+		{
+			"optimized-investigative-path-complete-high-explain",
+			validCommand,
+			"",
+			`case x in x) c""at repository/file.go;; esac`,
+		},
+		{
+			"optimized-investigative-path-complete-high-review",
+			validCommand,
+			"",
+			`f(){ c""at repository/file.go; }; f`,
+		},
+		{
+			"optimized-investigative-path-complete-high-deep-explain",
+			validCommand,
+			"",
+			`printf '%s' "$(c""at repository/file.go)"`,
+		},
+		{
+			"optimized-investigative-path-complete-high-deep-review",
+			validCommand,
+			"",
+			`pyt""hon3 -c 'print(open("repository/file.go").read())'`,
+		},
+		{
+			"optimized-investigative-path-complete-medium-explain",
+			validCommand,
+			"",
+			`a\wk '{print}' repository/file.go`,
+		},
+		{
+			"optimized-investigative-path-complete-medium-review",
+			validCommand,
+			"",
+			`printf '%s' <(c""at repository/file.go)`,
+		},
+		{
+			"optimized-investigative-path-complete-medium-deep-explain",
+			validCommand,
+			"",
+			`/bin/c\
+\
+at repository/file.go`,
+		},
+		{
+			"optimized-investigative-path-complete-medium-deep-review",
+			validCommand,
+			"",
+			`</dev/null cat repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-high-explain",
+			validCommand,
+			"",
+			`/bin/c{a..a}t repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-high-review",
+			validCommand,
+			"",
+			`coproc cat repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-high-deep-explain",
+			validCommand,
+			"",
+			`timeout 2 cat repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-high-deep-review",
+			validCommand,
+			"",
+			`trap 'cat repository/file.go' EXIT`,
+		},
+		{
+			"optimized-investigative-transcript-medium-explain",
+			validCommand,
+			"",
+			`hash -p /bin/cat reader; reader repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-medium-review",
+			validCommand,
+			"",
+			`reader(){ c""at "$@"; }; reader repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-medium-deep-explain",
+			validCommand,
+			"",
+			`tac repository/file.go`,
+		},
+		{
+			"optimized-investigative-transcript-medium-deep-review",
+			validCommand,
+			"",
+			`base64 repository/file.go`,
+		},
+		{
+			"optimized-investigative-verified-medium-explain",
+			validCommand,
+			"",
+			`od -c repository/file.go`,
+		},
+		{
+			"optimized-investigative-verified-medium-review",
+			validCommand,
+			"",
+			`awk 'BEGIN{system("cat repository/file.go")}'`,
+		},
+		{
+			"optimized-investigative-verified-medium-deep-explain",
+			validCommand,
+			"",
+			`python3 -c 'print(__import__("pathlib").Path("repository/file.go").read_text())'`,
+		},
+		{
+			"optimized-investigative-verified-medium-deep-review",
+			validCommand,
+			"",
+			`perl -e 'print qx(cat repository/file.go)'`,
+		},
+		{
+			"optimized-investigative-verified-high-review",
+			validCommand,
+			"",
+			`source /tmp/reader repository/file.go`,
+		},
+		{
+			"optimized-investigative-verified-high-deep-review",
+			validCommand,
+			"",
+			`d=repos; d+=itory; f=file.go; tac "$d/$f"`,
+		},
+		{
 			"optimized-patch-only-deep-review",
 			locationCommand,
 			"",
@@ -811,7 +1020,7 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 		} `json:"cases"`
 	}
 	readAnalyzeJSON(t, filepath.Join(runDir, "metrics.json"), &metrics)
-	if len(metrics.Cases) != 80 {
+	if len(metrics.Cases) != 114 {
 		t.Fatalf("case count = %d", len(metrics.Cases))
 	}
 	if metrics.AnalysisProvenance.ProfilesSource != "run-snapshot" ||
@@ -825,15 +1034,7 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 		}
 		switch current.Name {
 		case "optimized-guarded-high-explain",
-			"optimized-patch-only-deep-explain",
-			"optimized-balanced-medium-deep-review",
-			"optimized-patch-medium-deep-review",
-			"optimized-patch-high-deep-review",
-			"optimized-patch-only-review",
-			"optimized-balanced-high-explain",
-			"optimized-balanced-high-review",
-			"optimized-balanced-deep-review",
-			"optimized-balanced-high-deep-explain":
+			"optimized-patch-only-deep-explain":
 			if !current.FirstChanged || !current.Semantics ||
 				!current.BudgetValid ||
 				current.BoundFailures != 0 || current.BypassCount != 0 ||
@@ -867,6 +1068,11 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 			"optimized-balanced-medium-explain",
 			"optimized-balanced-medium-review",
 			"optimized-balanced-medium-deep-explain",
+			"optimized-balanced-medium-deep-review",
+			"optimized-balanced-high-explain",
+			"optimized-balanced-high-review",
+			"optimized-balanced-high-deep-explain",
+			"optimized-balanced-deep-review",
 			"optimized-context2-explain",
 			"optimized-context2-review",
 			"optimized-context2-deep-explain",
@@ -877,7 +1083,10 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 			"optimized-guarded-medium-deep-review",
 			"optimized-patch-medium-review",
 			"optimized-patch-medium-deep-explain",
+			"optimized-patch-medium-deep-review",
 			"optimized-patch-high-review",
+			"optimized-patch-high-deep-review",
+			"optimized-patch-only-review",
 			"optimized-context2-medium-explain",
 			"optimized-context2-medium-review",
 			"optimized-context2-medium-deep-explain",
@@ -924,6 +1133,40 @@ func TestAnalyzeScriptValidatesNavigationSemanticsAndProvenance(t *testing.T) {
 			"optimized-investigative-complete-high-review",
 			"optimized-investigative-complete-high-deep-explain",
 			"optimized-investigative-complete-high-deep-review",
+			"optimized-investigative-complete-medium-explain",
+			"optimized-investigative-complete-medium-review",
+			"optimized-investigative-complete-medium-deep-explain",
+			"optimized-investigative-complete-medium-deep-review",
+			"optimized-investigative-enforced-high-explain",
+			"optimized-investigative-enforced-high-review",
+			"optimized-investigative-enforced-high-deep-explain",
+			"optimized-investigative-enforced-high-deep-review",
+			"optimized-investigative-enforced-medium-explain",
+			"optimized-investigative-enforced-medium-review",
+			"optimized-investigative-enforced-medium-deep-explain",
+			"optimized-investigative-enforced-medium-deep-review",
+			"optimized-investigative-path-complete-high-explain",
+			"optimized-investigative-path-complete-high-review",
+			"optimized-investigative-path-complete-high-deep-explain",
+			"optimized-investigative-path-complete-high-deep-review",
+			"optimized-investigative-path-complete-medium-explain",
+			"optimized-investigative-path-complete-medium-review",
+			"optimized-investigative-path-complete-medium-deep-explain",
+			"optimized-investigative-path-complete-medium-deep-review",
+			"optimized-investigative-transcript-high-explain",
+			"optimized-investigative-transcript-high-review",
+			"optimized-investigative-transcript-high-deep-explain",
+			"optimized-investigative-transcript-high-deep-review",
+			"optimized-investigative-transcript-medium-explain",
+			"optimized-investigative-transcript-medium-review",
+			"optimized-investigative-transcript-medium-deep-explain",
+			"optimized-investigative-transcript-medium-deep-review",
+			"optimized-investigative-verified-medium-explain",
+			"optimized-investigative-verified-medium-review",
+			"optimized-investigative-verified-medium-deep-explain",
+			"optimized-investigative-verified-medium-deep-review",
+			"optimized-investigative-verified-high-review",
+			"optimized-investigative-verified-high-deep-review",
 			"optimized-patch-only-deep-review",
 			"optimized-guarded-high-deep-explain",
 			"optimized-balanced-explain",

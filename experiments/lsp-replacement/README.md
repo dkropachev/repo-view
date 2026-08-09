@@ -34,7 +34,7 @@ and publishes current token, per-tool, and call-graph statistics for all cases.
 `repair` stages deterministic and source-judge gates, retains failed attempts,
 and rejects any candidate with non-positive token savings or worse quality.
 
-The default suite is ordered from the one-call explanation through every
+The default suite is ordered from the bounded three-call explanation through every
 rejected deep fixture and the accepted verified deep workload. A rejected
 case passes replay when its fixture rejection signature is reproduced; it is
 not reclassified as an accepted result.
@@ -348,7 +348,8 @@ experiments/lsp-replacement/analyze.sh \
 ```
 
 The current measurement summary is in
-[`../lsp-replacement.md`](../lsp-replacement.md). Short-workload details are in
-[`optimization-results.md`](optimization-results.md). Deep measurements,
-failed regression cases, and reproduction commands are in
-[`deep-navigation-results.md`](deep-navigation-results.md).
+[`../lsp-replacement.md`](../lsp-replacement.md). Historical pinned
+short-workload and deep-workload snapshots are in
+[`optimization-results.md`](optimization-results.md) and
+[`deep-navigation-results.md`](deep-navigation-results.md); their old call
+counts do not define the current accepted protocols.

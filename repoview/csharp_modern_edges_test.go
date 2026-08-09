@@ -523,6 +523,52 @@ class ThirdBranch { }
 	}
 }
 
+func TestCSharpDefineWithTrailingWhitespaceRemainsFindable(t *testing.T) {
+	t.Parallel()
+
+	const source = "#define FEATURE   \nclass Enabled {}\n"
+	root := t.TempDir()
+	writeFile(t, root, "Feature.cs", source)
+
+	response, err := mustView(t, root).Find("FEATURE", Options{
+		Include: IncludeDefs,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Kind != "def" ||
+		response.Results[0].Language != "cs" || response.Results[0].Line != 1 {
+		t.Fatalf("Find FEATURE = %#v, want exact C# definition on line 1", response.Results)
+	}
+}
+
+func TestCSharpEscapedBraceBeforeInterpolationRemainsFindable(t *testing.T) {
+	t.Parallel()
+
+	const source = `class Example
+{
+    object value;
+    string Render() => $"{{{value}}}";
+}
+`
+	root := t.TempDir()
+	writeFile(t, root, "Interpolation.cs", source)
+
+	response, err := mustView(t, root).Find("value", Options{
+		Include: IncludeRefs,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Kind != "ref" ||
+		response.Results[0].Language != "cs" || response.Results[0].Line != 4 {
+		t.Fatalf("Find interpolated value = %#v, want C# reference on line 4",
+			response.Results)
+	}
+}
+
 func TestCSharpImportsCoverAliasesGlobalUsingAndFileAppDependencies(t *testing.T) {
 	t.Parallel()
 

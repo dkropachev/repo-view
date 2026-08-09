@@ -1,6 +1,12 @@
-# Short LSP-Replacement Results
+# Historical Short LSP-Replacement Results
 
-## Decision
+> Historical snapshot: the figures below describe the earlier pinned
+> `17a4e282...` workload and its one-call candidate. The current accepted short
+> protocol uses one `changed` call plus two bounded `inspect` calls. See
+> [`suite/latest-resolution.md`](suite/latest-resolution.md) and
+> [`../lsp-replacement.md`](../lsp-replacement.md).
+
+## Historical Decision
 
 Use `guarded-high` for the pinned short explain/review workload:
 
@@ -18,7 +24,7 @@ residual risk.
 This result applies to the pinned task. It does not establish a universal
 profile for other repositories or prompts.
 
-## Metrics
+## Historical Metrics
 
 All runs use target `17a4e282574ee9392732f6886a331d561e13c008`,
 base `f472ef766bae61664675a3a66c36f9a06a939996`, Codex `0.144.0`, read-only
@@ -37,7 +43,7 @@ Reasoning is included in output. Calls are `total/repo-view/other`.
 | Review | Baseline | 16/0/16 | 130,269 | 866,560 | 10,641 | 227,566.0 | n/a |
 | Review | Guarded-high | 1/1/0 | 21,758 | 17,152 | 2,160 | 25,633.2 | **88.74%** |
 
-## Quality
+## Historical Quality
 
 Static quality is deterministic weighted task-rubric coverage. Source judges
 separately score correctness, completeness, grounding, and task adherence.
@@ -62,7 +68,7 @@ Judge cost is verification overhead and is not part of candidate inference:
 | Review | 2 | 144,089 | 1,690,880 | 16,474 | 9,179 | 1,851,443 | 329,651.0 |
 | Total | 4 | 297,321 | 2,771,456 | 28,245 | 15,084 | 3,097,022 | 602,711.6 |
 
-## Reproduce
+## Current Harness Commands
 
 Rerun both accepted short cases with fresh model and judge sessions:
 
@@ -79,5 +85,5 @@ experiments/lsp-replacement/suite.sh replay \
   --case 01-simple-explain-accepted,02-simple-review-accepted
 ```
 
-The tracked resolution report contains call graphs and per-tool operation
-counts: [`suite/latest-resolution.md`](suite/latest-resolution.md).
+The tracked resolution report identifies the current accepted evidence and
+records its active gates: [`suite/latest-resolution.md`](suite/latest-resolution.md).

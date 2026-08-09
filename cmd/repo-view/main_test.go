@@ -414,6 +414,191 @@ func TestCompiledOptionCapSurvivesUnsetEnvironment(t *testing.T) {
 	}
 }
 
+func TestCodexWrapperRejectsInvalidNavigationConfigurationBeforeBuild(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required to test the Bash wrapper")
+	}
+	script := filepath.Join("..", "..", "scripts", "codex-with-repo-view")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatal(err)
+	}
+
+	mechanical := []string{
+		"REPO_VIEW_NAVIGATION_COMMAND_CAP=1",
+		"REPO_VIEW_REQUIRE_NAVIGATION_SEMANTICS=1",
+		"REPO_VIEW_REQUIRED_ROOT=/tmp",
+		"REPO_VIEW_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	tests := []struct {
+		name        string
+		environment []string
+		want        string
+	}{
+		{
+			name:        "zero result limit",
+			environment: []string{"REPO_VIEW_CHANGED_LIMIT=0"},
+			want:        "changed_limit must be a positive integer",
+		},
+		{
+			name:        "zero code line cap",
+			environment: []string{"REPO_VIEW_CHANGED_MAX_CODE_LINES=0"},
+			want:        "changed_max_code_lines must be a positive integer",
+		},
+		{
+			name:        "zero patch line cap",
+			environment: []string{"REPO_VIEW_CHANGED_MAX_PATCH_LINES=0"},
+			want:        "changed_max_patch_lines must be a positive integer",
+		},
+		{
+			name: "changed context above cap",
+			environment: []string{
+				"REPO_VIEW_CHANGED_CONTEXT=21",
+				"REPO_VIEW_NAVIGATION_CONTEXT_CAP=20",
+			},
+			want: "changed_context 21 exceeds navigation_context_cap 20",
+		},
+		{
+			name: "zero batched context cap",
+			environment: []string{
+				"REPO_VIEW_CHANGED_CONTEXT=0",
+				"REPO_VIEW_NAVIGATION_CONTEXT_CAP=0",
+				"REPO_VIEW_NAVIGATION_POLICY=batched",
+				"REPO_VIEW_NAVIGATION_COMMAND_CAP=1",
+			},
+			want: "REPO_VIEW_NAVIGATION_CONTEXT_CAP must be positive",
+		},
+		{
+			name: "mechanical return mismatch",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=4",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=locations",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=4",
+			),
+			want: "REPO_VIEW_REQUIRED_CHANGED_RETURN must match REPO_VIEW_CHANGED_RETURN",
+		},
+		{
+			name: "mechanical context mismatch",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=4",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=context",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=5",
+			),
+			want: "REPO_VIEW_REQUIRED_CHANGED_CONTEXT must match REPO_VIEW_CHANGED_CONTEXT",
+		},
+		{
+			name: "zero mechanical context with code return",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=0",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=context",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=0",
+			),
+			want: "mechanically enforced changed context must be positive unless return is locations",
+		},
+	}
+
+	baseEnvironment := make([]string, 0, len(os.Environ()))
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "REPO_VIEW_") {
+			baseEnvironment = append(baseEnvironment, variable)
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(bash, script, "exec")
+			command.Env = append(append([]string{}, baseEnvironment...), test.environment...)
+			output, commandErr := command.CombinedOutput()
+			exitError, ok := commandErr.(*exec.ExitError)
+			if !ok || exitError.ExitCode() != 2 ||
+				!strings.Contains(string(output), test.want) {
+				t.Fatalf("error = %v, output = %q, want exit 2 containing %q",
+					commandErr, output, test.want)
+			}
+		})
+	}
+}
+
+func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
+	root := filepath.Join("..", "..")
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	manifest := read("go.mod")
+	notices := read("THIRD_PARTY_NOTICES.md")
+	workflow := read(filepath.Join(".github", "workflows", "release.yml"))
+
+	for _, module := range []string{
+		"github.com/dcosson/treesitter-go",
+		"golang.org/x/text",
+	} {
+		fields := strings.Fields(manifest)
+		version := ""
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] == module {
+				version = fields[index+1]
+				break
+			}
+		}
+		if version == "" {
+			t.Fatalf("direct module %s is absent from go.mod", module)
+		}
+		if !strings.Contains(notices, module) ||
+			!strings.Contains(notices, "version `"+version+"`") {
+			t.Errorf("notices do not identify %s %s", module, version)
+		}
+	}
+	for _, marker := range []string{
+		"Copyright (c) 2014-2023 Max Brunsfeld, Damien Guard, Amaan Qureshi",
+		"Copyright (c) 2019 fwcd",
+		"Copyright (c) 2021 alex-pinkus",
+		"Copyright (c) 2026 Danny Cosson",
+		"tree-sitter `v0.26.6`",
+		"`tree-sitter-c`",
+		"`v0.24.1`",
+		"`tree-sitter-cpp`",
+		"`v0.23.4`",
+		"`tree-sitter-java`",
+		"`v0.23.5`",
+		"`tree-sitter-javascript`",
+		"`v0.25.0`",
+		"`tree-sitter-typescript`",
+		"`v0.23.2`, including its TypeScript and TSX grammars",
+		"`tree-sitter-python`",
+		"`v0.23.6`",
+		"`tree-sitter-rust`",
+		"`v0.24.0`",
+		"Copyright (c) 2018 Max Brunsfeld (tree-sitter runtime)",
+		"Copyright (c) 2017 Ayman Nadeem (Java grammar)",
+		"Copyright (c) 2016 Max Brunsfeld (Python grammar)",
+		"Copyright (c) 2017 Maxim Sokolov (Rust grammar)",
+		"Copyright 2009 The Go Authors.",
+		"Redistribution and use in source and binary forms",
+		"Additional IP Rights Grant (Patents)",
+		"Copyright © 1991-2026 Unicode, Inc.",
+		"unicode-ident 1.0.24",
+		"repoview/javascript_unicode.go",
+		"repoview/python_xid.go",
+		"Permission is hereby granted, free of charge",
+	} {
+		if !strings.Contains(notices, marker) {
+			t.Errorf("third-party notices lack %q", marker)
+		}
+	}
+	if !strings.Contains(workflow, "cp THIRD_PARTY_NOTICES.md build/") ||
+		strings.Count(workflow, `"$binary" THIRD_PARTY_NOTICES.md`) != 2 ||
+		!strings.Contains(workflow, "release archive lacks THIRD_PARTY_NOTICES.md") {
+		t.Fatal("release workflow does not package and verify notices in both archive formats")
+	}
+}
+
 func TestCommonFlagsPreserveRepeatablePathFilters(t *testing.T) {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	common := addCommonFlags(flags, repoview.ReturnScope)

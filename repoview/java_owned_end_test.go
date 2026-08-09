@@ -146,3 +146,88 @@ func TestFindJavaReferenceAfterExactMultilineClosingBoundary(t *testing.T) {
 		})
 	}
 }
+
+func TestFindJavaReferenceAfterRecoveredInitializerClosingBoundary(t *testing.T) {
+	root := t.TempDir()
+	const source = `cl\u0061ss Owner {
+Object value = switch (mode) { default -> null; } Object later = target;
+void anchor() {}
+`
+	writeFile(t, root, "C.java", source)
+	analysis := analyzeJavaSource(
+		source, strings.Count(source, "\n")+1,
+	)
+	value := javaFirstDefinition(t, analysis.definitions, "value")
+	wantEndColumn := strings.Index(strings.Split(source, "\n")[1], "}") + 2
+	if value.ownedEndColumn != wantEndColumn {
+		t.Fatalf("recovered value definition = %#v, want end column %d",
+			value, wantEndColumn)
+	}
+
+	response, err := mustView(t, root).Find("target", Options{
+		Include: IncludeRefs,
+		Return:  ReturnScope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Scope != "Owner" ||
+		response.Results[0].StartLine != 1 || response.Results[0].EndLine != 3 {
+		t.Fatalf("results = %#v, want one reference in Owner scope",
+			response.Results)
+	}
+}
+
+func TestFindJavaReferenceInRecoveredSiblingInitializer(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "C.java", `cl\u0061ss Owner {
+Object value = switch (mode) { default -> null; } { target(); }
+void anchor() {}
+`)
+
+	response, err := mustView(t, root).Find("target", Options{
+		Include: IncludeRefs,
+		Return:  ReturnScope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Scope != "Owner" {
+		t.Fatalf("results = %#v, want one reference in Owner scope",
+			response.Results)
+	}
+}
+
+func TestFindJavaReferenceInRecoveredInitializerContinuation(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		initializer string
+	}{
+		{
+			name:        "anonymous class",
+			initializer: "new Object() { void run() {} }.use(target)",
+		},
+		{
+			name:        "switch expression",
+			initializer: "switch (mode) { default -> null; }.use(target)",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			root := t.TempDir()
+			source := "cl\\u0061ss Owner {\nObject value = " +
+				testCase.initializer + ";\nvoid anchor() {}\n"
+			writeFile(t, root, "C.java", source)
+			response, err := mustView(t, root).Find("target", Options{
+				Include: IncludeRefs,
+				Return:  ReturnScope,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Results) != 1 || response.Results[0].Scope != "value" {
+				t.Fatalf("results = %#v, want one reference in value scope",
+					response.Results)
+			}
+		})
+	}
+}

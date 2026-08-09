@@ -500,15 +500,20 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 		relatedLimit := opts.Limit
 		if relatedLimit > 0 {
 			relatedLimit -= len(results)
-		}
-		if relatedLimit <= 0 && opts.Limit > 0 {
-			return InspectResponse{
-				Location:         location,
-				Root:             r.root,
-				Symbol:           symbol,
-				Results:          results[:opts.Limit],
-				ResultsTruncated: true,
-			}, nil
+			if relatedLimit < 0 {
+				return InspectResponse{
+					Location:         location,
+					Root:             r.root,
+					Symbol:           symbol,
+					Results:          results[:opts.Limit],
+					ResultsTruncated: true,
+				}, nil
+			}
+			if relatedLimit == 0 {
+				// The initial results exactly fill the limit. Probe for one
+				// related result so truncation reflects an actual omission.
+				relatedLimit = 1
+			}
 		}
 		related, err := r.Find(symbol, Options{
 			Include:        relatedInclude,

@@ -1,6 +1,13 @@
-# Deep LSP-Replacement Navigation Results
+# Historical Deep LSP-Replacement Navigation Results
 
-## Decision
+> Historical snapshot: the 22- and 24-invocation figures below describe the
+> earlier pinned `17a4e282...` workload. The current accepted deep evidence uses
+> eight ordered `repo-view` calls plus one bounded dependency-source read, with
+> 21.50% explain and 28.73% review effective-token savings. See
+> [`suite/latest-resolution.md`](suite/latest-resolution.md) and
+> [`../lsp-replacement.md`](../lsp-replacement.md).
+
+## Historical Decision
 
 Use `investigative-verified-high` for this pinned deep-navigation workload:
 
@@ -19,9 +26,9 @@ Promotion requires both deep explain and deep review to:
 - receive two complete, source-grounded, not-worse judgments; and
 - report commands and test execution consistently with the raw transcript.
 
-Current general evidence is `evidence/current/deep`.
-It resolves cases 03-13 and supplies accepted control case 16. Cases 14 and 15
-use `evidence/current/semantic-call-chain` and `evidence/current/review-path`.
+At the time of this snapshot, general evidence was stored under
+`evidence/current/deep`; specialized cases used
+`evidence/current/semantic-call-chain` and `evidence/current/review-path`.
 
 ## Scope And Metrics
 
@@ -48,7 +55,7 @@ call can contain more than one invocation. Static quality is deterministic
 weighted rubric coverage: `passed weight / total weight`. Judges separately
 score correctness, completeness, grounding, and task adherence.
 
-## Current Measurements
+## Historical Measurements
 
 | Task | Variant | Regular | Cached | Output | Reasoning | Raw total | Effective | Calls | repo-view invocations |
 | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -123,9 +130,8 @@ Judge cost is promotion overhead and is not added to candidate inference:
 
 Every failed run remains under `evidence/fixtures/`; every failed repair attempt
 remains under `evidence/repairs/`. The tracked
-[`suite/latest-resolution.md`](suite/latest-resolution.md) contains exact
-per-case calls, token splits, quality signals, per-tool counts, and call
-graphs.
+[`suite/latest-resolution.md`](suite/latest-resolution.md) identifies the
+current accepted replacement and the active per-case gates.
 
 | Case | Fixture failure |
 | --- | --- |
@@ -147,7 +153,7 @@ Token regressions occurred in cases 04 and 05. Quality regressions occurred in
 04 explain, 05 review, 06 explain, 10 explain/review, 14 explain, and 15
 review. These cases are intentionally retained.
 
-## Current Guarantees
+## Guarantees Exercised By This Snapshot
 
 The suite verifies:
 
@@ -170,7 +176,7 @@ The evidence rejects four assumptions: more calls imply better quality; prose
 or mutable environment budgets enforce limits; static keyword coverage proves
 correctness; any cached dependency version is acceptable evidence.
 
-## Reproduce
+## Current Harness Commands
 
 Replay accepted and rejected evidence without new model calls:
 

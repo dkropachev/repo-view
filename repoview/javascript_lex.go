@@ -4176,7 +4176,7 @@ func javascriptLexImports(
 		source, tokens, delimiters, objectBraces, boundaries.forcedStarts,
 	)
 	functionBodies := javascriptLexicalFunctionBodies(
-		source, tokens, delimiters, boundaries, objectBraces,
+		source, tokens, delimiters, boundaries, objectBraces, statementStarts,
 	)
 	jsxOwners := javascriptLexicalJSXOwners(tokens, boundaries, jsxValues, statementStarts)
 	executionOwners := javascriptLexicalExecutionOwners(
@@ -4957,6 +4957,7 @@ func javascriptLexicalFunctionBodies(
 	delimiters javascriptDelimiterPairs,
 	boundaries javascriptLexBoundaries,
 	objectBraces []javascriptByteSpan,
+	statementStarts []int,
 ) []javascriptTokenRange {
 	ranges := make([]javascriptTokenRange, 0)
 	contexts, _ := javascriptLexicalBraceContexts(source, tokens, delimiters, objectBraces)
@@ -5026,7 +5027,9 @@ func javascriptLexicalFunctionBodies(
 	for index, token := range tokens {
 		if token.text != "=" || index >= len(contexts) ||
 			contexts[index] != javascriptLexicalBraceClass || index+1 >= len(tokens) ||
-			javascriptLexStaticFieldInitializer(tokens, index, delimiters) {
+			javascriptLexStaticFieldInitializer(
+				tokens, index, delimiters, statementStarts,
+			) {
 			continue
 		}
 		end := boundaries.statementEnd(index)
@@ -5177,26 +5180,50 @@ func javascriptLexStaticFieldInitializer(
 	tokens []javascriptToken,
 	equalIndex int,
 	delimiters javascriptDelimiterPairs,
+	statementStarts []int,
 ) bool {
 	if equalIndex <= 0 || equalIndex >= len(tokens) || tokens[equalIndex].text != "=" {
 		return false
 	}
-	fieldStart := equalIndex - 1
-	if tokens[fieldStart].text == "]" {
-		if open, paired := delimiters.get(fieldStart); !paired || open < 0 {
-			return false
-		} else {
-			fieldStart = open
-		}
+	memberStart := equalIndex - 1
+	if equalIndex < len(statementStarts) && statementStarts[equalIndex] >= 0 &&
+		statementStarts[equalIndex] < equalIndex {
+		memberStart = statementStarts[equalIndex]
 	}
-	if tokens[fieldStart].startsLine() {
+	cursor := memberStart
+	for cursor < equalIndex && tokens[cursor].text == "@" {
+		end := javascriptLexDecoratorExpressionEnd(tokens, cursor, equalIndex, delimiters)
+		if end <= cursor {
+			return false
+		}
+		cursor = end
+	}
+	static := false
+	for cursor < equalIndex && javascriptLexClassFieldModifier(tokens[cursor].text) {
+		next := cursor + 1
+		if next >= equalIndex || tokens[next].startsLine() {
+			break
+		}
+		switch tokens[next].text {
+		case ":", "?", "!", "=", ";", "}":
+			return static
+		}
+		if tokens[cursor].text == "static" {
+			static = true
+		}
+		cursor = next
+	}
+	return static
+}
+
+func javascriptLexClassFieldModifier(token string) bool {
+	switch token {
+	case "abstract", "accessor", "declare", "override", "private", "protected",
+		"public", "readonly", "static":
+		return true
+	default:
 		return false
 	}
-	prefix := fieldStart - 1
-	if prefix >= 0 && tokens[prefix].text == "accessor" {
-		prefix--
-	}
-	return prefix >= 0 && tokens[prefix].text == "static"
 }
 
 func javascriptLexicalExpressionEnds(
