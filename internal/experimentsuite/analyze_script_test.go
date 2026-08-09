@@ -20,7 +20,7 @@ func analyzeSimpleInspectOutput(
 ) string {
 	t.Helper()
 	entries := make([]any, 0, expectedLocations)
-	for index := 0; index < expectedLocations; index++ {
+	for index := range expectedLocations {
 		entries = append(entries, map[string]any{
 			"navigation_budget": map[string]any{
 				"used":      used,
