@@ -2,8 +2,10 @@ package experimentsuite
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -291,6 +293,217 @@ func matchesCriterion(criterion qualityCriterion, answer string) bool {
 	return true
 }
 
+func TestSimpleExplainThroughputRubricRequiresEveryMeasurement(t *testing.T) {
+	criterion := loadRubricCriterion(t, "explain", "throughput_numbers")
+	complete := "Activity improved 3.49%; write-admission improved 19.45%; read/drain improved 4.49%."
+	if !matchesCriterion(criterion, complete) {
+		t.Fatal("throughput rubric rejected all three measurements")
+	}
+	for _, omitted := range []string{"3.49%", "19.45%", "4.49%"} {
+		incomplete := strings.ReplaceAll(complete, omitted, "an unreported amount")
+		if matchesCriterion(criterion, incomplete) {
+			t.Errorf("throughput rubric accepted answer without %s", omitted)
+		}
+	}
+}
+
+func TestSimpleExplainAllocationRubricAcceptsBothOrders(t *testing.T) {
+	criterion := loadRubricCriterion(t, "explain", "allocation_numbers")
+	for name, complete := range map[string]string{
+		"count first": "The benchmark changed from 88 B/op and 2 allocations to 64 B/op and 1 allocation.",
+		"label first": "Memory changed from 88 B/op to 64 B/op. Allocations: 2 to 1.",
+	} {
+		if !matchesCriterion(criterion, complete) {
+			t.Errorf("allocation rubric rejected %s wording", name)
+		}
+	}
+	for name, incomplete := range map[string]string{
+		"old count": "Memory changed from 88 B/op to 64 B/op. Allocations fell to 1.",
+		"new count": "Memory changed from 88 B/op to 64 B/op. Allocations started at 2.",
+	} {
+		if matchesCriterion(criterion, incomplete) {
+			t.Errorf("allocation rubric accepted wording without %s", name)
+		}
+	}
+}
+
+func TestSimpleExplainWrapperAndConstructionRubric(t *testing.T) {
+	wrapper := loadRubricCriterion(t, "explain", "wrapper_no_argument_semantics")
+	construction := loadRubricCriterion(t, "explain", "concrete_construction_paths")
+	semantics := `
+The wrapper's no-argument Delay and Cancel methods previously consulted the
+injected TimeSource, whereas the native underlying methods obtain time through
+their own behavior. That semantic difference creates a compatibility risk.
+`
+	paths := `
+Inspected construction paths include
+common/persistence/client/health_request_rate_limiter.go,
+service/matching/ratelimit_manager.go,
+service/history/replication/stream_sender_flow_controller.go, and
+service/worker/scheduler/fx.go.
+`
+	complete := semantics + paths
+	if !matchesCriterion(wrapper, complete) {
+		t.Fatal("wrapper rubric rejected injected-TimeSource versus native compatibility risk")
+	}
+	if !matchesCriterion(construction, complete) {
+		t.Fatal("construction rubric rejected persistence health, matching, and replication paths")
+	}
+	labelOnlyPaths := `
+Inspected construction paths include persistence health checks, matching,
+replication flow control, and worker scheduling.
+`
+	if matchesCriterion(construction, semantics+labelOnlyPaths) {
+		t.Fatal("construction rubric accepted category labels without concrete source paths")
+	}
+
+	if matchesCriterion(wrapper, paths) {
+		t.Fatal("wrapper rubric accepted an answer that omitted wrapper clock semantics")
+	}
+	for name, omitted := range map[string]string{
+		"persistence health": "common/persistence/client/health_request_rate_limiter.go",
+		"matching":           "service/matching/ratelimit_manager.go",
+		"replication":        "service/history/replication/stream_sender_flow_controller.go",
+		"worker scheduling":  "service/worker/scheduler/fx.go",
+	} {
+		withoutCategory := strings.ReplaceAll(complete, omitted, "another subsystem")
+		if matchesCriterion(construction, withoutCategory) {
+			t.Errorf("construction rubric accepted an answer without %s", name)
+		}
+	}
+
+	blanketEquivalence := complete + `
+Delay and Cancel are always equivalent to the prior behavior.
+`
+	if !matchesAllPatterns(wrapper.AllOf, blanketEquivalence) {
+		t.Fatal("blanket-equivalence fixture does not satisfy wrapper all_of patterns")
+	}
+	if matchesCriterion(wrapper, blanketEquivalence) {
+		t.Fatal("wrapper rubric accepted a blanket Delay/Cancel equivalence claim")
+	}
+}
+
+func TestSimpleReviewRubricRequiresScopedWrapperRisk(t *testing.T) {
+	correctness := loadRubricCriterion(t, "review", "correctness_conclusion")
+	wrapper := loadRubricCriterion(t, "review", "wrapper_clock_risk")
+	construction := loadRubricCriterion(t, "review", "concrete_construction_paths")
+	complete := `
+Within the bounded, inspected production evidence, no demonstrated correctness
+regression was found. A compatibility risk remains because the wrapper's Delay
+and Cancel methods consulted the injected TimeSource while the native underlying
+behavior obtains its own time. Concrete construction paths include
+common/persistence/client/health_request_rate_limiter.go,
+service/matching/ratelimit_manager.go,
+service/history/replication/stream_sender_flow_controller.go, and
+service/worker/scheduler/fx.go.
+`
+	for name, criterion := range map[string]qualityCriterion{
+		"scoped correctness": correctness,
+		"wrapper clock risk": wrapper,
+		"construction paths": construction,
+	} {
+		if !matchesCriterion(criterion, complete) {
+			t.Errorf("review rubric rejected complete %s evidence", name)
+		}
+	}
+
+	oldBlanket := `
+There is universally no correctness regression in production. Delay and Cancel
+use the injected TimeSource, and their native underlying behavior is always equivalent,
+so there is no compatibility risk. Construction paths include
+persistence health checks, matching, replication flow control, and worker scheduling.
+`
+	if !matchesAllPatterns(wrapper.AllOf, oldBlanket) {
+		t.Fatal("old blanket review fixture does not satisfy wrapper all_of patterns")
+	}
+	if matchesCriterion(wrapper, oldBlanket) {
+		t.Fatal("review rubric accepted the old blanket universal equivalence conclusion")
+	}
+}
+
+func TestSimpleRubricsRejectFalseCommandFreeClaim(t *testing.T) {
+	explain := loadRubricCriterion(t, "explain", "affected_artifacts")
+	explainAnswer := `
+The RateLimiterImpl implementation, unit test, benchmark, and performance
+documentation were inspected.
+`
+	if !matchesCriterion(explain, explainAnswer) {
+		t.Fatal("explain rubric rejected a truthful artifact summary")
+	}
+	if !matchesCriterion(explain, explainAnswer+"\nNo tests were run.\n") {
+		t.Fatal("explain rubric rejected a truthful tests-only disclaimer")
+	}
+	if !matchesCriterion(explain, strings.Replace(
+		explainAnswer,
+		"documentation were inspected",
+		"documented results were inspected",
+		1,
+	)) {
+		t.Fatal("explain rubric rejected documented-result adjective wording")
+	}
+	if matchesCriterion(explain, explainAnswer+"\nNo commands or tests were run.\n") {
+		t.Fatal("explain rubric accepted a false command-free claim")
+	}
+
+	review := loadRubricCriterion(t, "review", "correctness_conclusion")
+	reviewAnswer := `
+Within the bounded inspected production evidence, a compatibility risk remains;
+no demonstrated correctness regression was found.
+`
+	if !matchesCriterion(review, reviewAnswer) {
+		t.Fatal("review rubric rejected a scoped correctness conclusion")
+	}
+	if !matchesCriterion(review, reviewAnswer+"\nNo tests were run.\n") {
+		t.Fatal("review rubric rejected a truthful tests-only disclaimer")
+	}
+	if matchesCriterion(review, reviewAnswer+"\nNo commands were run.\n") {
+		t.Fatal("review rubric accepted a false command-free claim")
+	}
+}
+
+func TestSimpleRubricsRequireBoundedInterfacesOperationsAndConsumers(t *testing.T) {
+	complete := `
+The upstream native dependency source was not inspected, so the evidence
+boundary cannot prove its exact clock calls. The public RateLimiter and
+Reservation interface method sets and the NewRateLimiter and
+NewDynamicRateLimiter constructor signatures remain unchanged. Allow and
+AllowN, Wait and WaitN, recycling, rate and burst configuration, and TokensAt
+token inspection remain unchanged. Proven consuming paths include scheduler
+and per-namespace Reserve calls plus request adapter and persistence health
+delegation to ReserveN.
+`
+	criteria := []string{
+		"native_source_boundary",
+		"interface_constructor_scope",
+		"unchanged_operations",
+		"concrete_consuming_paths",
+	}
+	for _, task := range []string{"explain", "review"} {
+		for _, criterionID := range criteria {
+			criterion := loadRubricCriterion(t, task, criterionID)
+			if !matchesCriterion(criterion, complete) {
+				t.Errorf("%s %s rubric rejected complete bounded evidence", task, criterionID)
+			}
+		}
+	}
+
+	omissions := map[string]string{
+		"native_source_boundary":      "The upstream native dependency source was not inspected, so the evidence\nboundary cannot prove its exact clock calls.",
+		"interface_constructor_scope": "The public RateLimiter and\nReservation interface method sets and the NewRateLimiter and\nNewDynamicRateLimiter constructor signatures remain unchanged.",
+		"unchanged_operations":        "Allow and\nAllowN, Wait and WaitN, recycling, rate and burst configuration, and TokensAt\ntoken inspection remain unchanged.",
+		"concrete_consuming_paths":    "Proven consuming paths include scheduler\nand per-namespace Reserve calls plus request adapter and persistence health\ndelegation to ReserveN.",
+	}
+	for criterionID, sentence := range omissions {
+		withoutCategory := strings.ReplaceAll(complete, sentence, "")
+		for _, task := range []string{"explain", "review"} {
+			criterion := loadRubricCriterion(t, task, criterionID)
+			if matchesCriterion(criterion, withoutCategory) {
+				t.Errorf("%s %s rubric accepted omitted evidence", task, criterionID)
+			}
+		}
+	}
+}
+
 func TestDeepExplainProductionPathsRubricAcceptsDirectPath(t *testing.T) {
 	criterion := loadRubricCriterion(t, "deep-explain", "production_paths")
 	complete := `
@@ -358,6 +571,11 @@ remains wall-clock based.
 The time source is RealTimeSource.Now, which calls time.Now().UTC().
 Explicit time remains under DelayFrom and CancelAt. UTC strips monotonic data.
 The dependency pinned by go.mod is golang.org/x/time v0.14.0.
+RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
+`, `
+The time source is RealTimeSource.Now, which calls time.Now().UTC().
+Explicit time remains under DelayFrom and CancelAt. UTC strips monotonic data.
+Upstream ` + "`golang.org/x/time`" + ` is pinned to **v0.14.0** in go.mod.
 RateLimiterImpl.Reserve anchors through UTC, so later comparisons use wall time.
 `, `
 The time source is RealTimeSource.Now, which calls time.Now().UTC().
@@ -660,9 +878,10 @@ func TestQualityCheckUsesCurrentJudgeFormat(t *testing.T) {
 		"Read each baseline and candidate answer through EOF before scoring",
 		"search the candidate answer directly for each supposedly missing concept",
 		"A correct candidate correction of a baseline error is a candidate_material_addition, never a material_contradiction",
-		"without equally strong substitute coverage",
+		"never against the baseline's length or exploratory breadth",
+		"unless the shared task prompt or rubric expressly requires a proven consuming chain",
 		"schema_version: 4",
-		"judge_cache_schema=6",
+		"judge_cache_schema=8",
 		"result.sha256",
 		"aggregate-manifest.json",
 		"export LC_ALL=C",
@@ -1285,6 +1504,7 @@ func TestValidatePromotion(t *testing.T) {
 			Name:                          "candidate",
 			Task:                          "deep-review",
 			Variant:                       "optimized",
+			Profile:                       "investigative-verified-high",
 			Completed:                     true,
 			HasComparison:                 true,
 			EffectiveReductionPercent:     25,
@@ -1293,8 +1513,14 @@ func TestValidatePromotion(t *testing.T) {
 			JudgeCount:                    2,
 			JudgeNotWorse:                 true,
 			JudgeCoreConclusionMatch:      true,
-			RepoViewInvocations:           20,
+			RepoViewInvocations:           8,
 			RepoViewChangedInvocations:    1,
+			RepoViewFindInvocations:       2,
+			RepoViewInspectInvocations:    4,
+			RepoViewOutlineInvocations:    1,
+			OtherToolCalls:                1,
+			RepoViewDeepSequenceExact:     true,
+			RepoViewDeepDependencyExact:   true,
 			RepoViewFirstChanged:          true,
 			RepoViewNavigationValid:       true,
 			MechanicalNavigationEnforced:  true,
@@ -1313,6 +1539,11 @@ func TestValidatePromotion(t *testing.T) {
 	if checks := ValidatePromotion(metrics, 2); !Passed(checks) {
 		t.Fatalf("correct baseline conclusion fix failed promotion: %+v", checks)
 	}
+	metrics[1].RepoViewDeepDependencyExact = false
+	if checks := ValidatePromotion(metrics, 2); Passed(checks) {
+		t.Fatal("inexact deep dependency command passed promotion")
+	}
+	metrics[1].RepoViewDeepDependencyExact = true
 
 	metrics[1].EffectiveReductionPercent = -1
 	metrics[1].JudgeNotWorse = false
@@ -1320,6 +1551,144 @@ func TestValidatePromotion(t *testing.T) {
 	checks := ValidatePromotion(metrics, 2)
 	if Passed(checks) {
 		t.Fatal("expected token and judge regressions to fail promotion")
+	}
+}
+
+func TestNormalizeQualityFixtureBindsEveryCasePrompt(t *testing.T) {
+	runDir := t.TempDir()
+	manifestPath := filepath.Join(runDir, "manifest.json")
+	writeJSON(t, manifestPath, map[string]any{
+		"schema_version":    1,
+		"worktree":          runDir,
+		"target_commit":     strings.Repeat("a", 40),
+		"base_commit":       strings.Repeat("b", 40),
+		"task_selection":    "all",
+		"variant_selection": "all",
+		"profiles":          []any{"default", "guarded-high"},
+		"baseline_from":     nil,
+	})
+
+	type promptBindings struct {
+		Files   map[string]string `json:"case_prompt_files"`
+		Digests map[string]string `json:"case_prompt_digests"`
+	}
+	readBindings := func(path string) promptBindings {
+		t.Helper()
+		content, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var bindings promptBindings
+		if err := json.Unmarshal(content, &bindings); err != nil {
+			t.Fatal(err)
+		}
+		return bindings
+	}
+	manifestBindings := readBindings(manifestPath)
+	generationConfigPath := filepath.Join(runDir, "generation-config.json")
+	generationBindings := readBindings(generationConfigPath)
+	expected := []string{
+		"baseline-explain",
+		"optimized-explain",
+		"optimized-guarded-high-explain",
+		"baseline-review",
+		"optimized-review",
+		"optimized-guarded-high-review",
+	}
+	if len(manifestBindings.Files) != len(expected) ||
+		len(manifestBindings.Digests) != len(expected) ||
+		len(generationBindings.Files) != len(expected) ||
+		len(generationBindings.Digests) != len(expected) {
+		t.Fatalf(
+			"case prompt binding sizes = manifest %d/%d, generation %d/%d, want %d",
+			len(manifestBindings.Files),
+			len(manifestBindings.Digests),
+			len(generationBindings.Files),
+			len(generationBindings.Digests),
+			len(expected),
+		)
+	}
+	for _, name := range expected {
+		relative := name + ".user-prompt.txt"
+		digest := manifestBindings.Digests[name]
+		if manifestBindings.Files[name] != relative ||
+			generationBindings.Files[name] != relative ||
+			generationBindings.Digests[name] != digest ||
+			!validSHA256Digest(digest) {
+			t.Errorf(
+				"case prompt %s binding = manifest %q/%q, generation %q/%q",
+				name,
+				manifestBindings.Files[name],
+				digest,
+				generationBindings.Files[name],
+				generationBindings.Digests[name],
+			)
+			continue
+		}
+		content, err := os.ReadFile(filepath.Join(runDir, relative))
+		if err != nil {
+			t.Error(err)
+			continue
+		}
+		if sha256Bytes(content) != digest {
+			t.Errorf("case prompt %s content does not match its digest", name)
+		}
+	}
+	configContent, err := os.ReadFile(generationConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var configFields map[string]json.RawMessage
+	if err := json.Unmarshal(configContent, &configFields); err != nil {
+		t.Fatal(err)
+	}
+	if len(configFields) != 15 {
+		t.Fatalf("generation config field count = %d, want 15", len(configFields))
+	}
+}
+
+func TestSharedQualityGenerationConfigIgnoresOnlyVariantBindings(t *testing.T) {
+	baseline := qualityGenerationConfig{
+		PromptFiles: map[string]string{
+			"explain": "prompts/explain.txt",
+		},
+		PromptDigests: map[string]string{
+			"explain": strings.Repeat("a", 64),
+		},
+		CasePromptFiles: map[string]string{
+			"baseline-explain": "baseline-explain.user-prompt.txt",
+		},
+		CasePromptDigests: map[string]string{
+			"baseline-explain": strings.Repeat("b", 64),
+		},
+		GenerationIsolation:          qualityGenerationIsolation,
+		ProfilesSnapshotPath:         "profiles-snapshot.tsv",
+		ProfilesSnapshotSHA256:       strings.Repeat("c", 64),
+		AuthSourcePermission:         "deny-if-present",
+		MechanicalNavigationEnforced: false,
+	}
+	candidate := baseline
+	candidate.CasePromptFiles = map[string]string{
+		"baseline-explain":  "baseline-explain.user-prompt.txt",
+		"optimized-explain": "optimized-explain.user-prompt.txt",
+	}
+	candidate.CasePromptDigests = map[string]string{
+		"baseline-explain":  strings.Repeat("b", 64),
+		"optimized-explain": strings.Repeat("d", 64),
+	}
+	candidate.MechanicalNavigationEnforced = true
+	if !reflect.DeepEqual(
+		sharedQualityGenerationConfig(baseline),
+		sharedQualityGenerationConfig(candidate),
+	) {
+		t.Fatal("variant-specific prompt bindings changed shared projection")
+	}
+	candidate.AuthSourcePermission = "different-policy"
+	if reflect.DeepEqual(
+		sharedQualityGenerationConfig(baseline),
+		sharedQualityGenerationConfig(candidate),
+	) {
+		t.Fatal("shared policy change disappeared from projection")
 	}
 }
 
@@ -1415,6 +1784,50 @@ func normalizeQualityFixture(t *testing.T, filePath string, root map[string]any)
 		if _, ok := root["prompt_digests"]; !ok {
 			root["prompt_digests"] = promptDigests
 		}
+		profiles := make([]string, 0)
+		switch rawProfiles := root["profiles"].(type) {
+		case []any:
+			for _, rawProfile := range rawProfiles {
+				profile, _ := rawProfile.(string)
+				profiles = append(profiles, profile)
+			}
+		case []string:
+			profiles = append(profiles, rawProfiles...)
+		}
+		casePromptFiles := make(map[string]any)
+		casePromptDigests := make(map[string]any)
+		writeCasePrompt := func(name string) {
+			relative := name + ".user-prompt.txt"
+			content := []byte("fixture rendered user prompt for " + name)
+			if err := os.WriteFile(
+				filepath.Join(runDir, filepath.FromSlash(relative)),
+				content,
+				0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+			casePromptFiles[name] = relative
+			casePromptDigests[name] = sha256Bytes(content)
+		}
+		for _, task := range selectedTasks {
+			writeCasePrompt("baseline-" + task)
+			variantSelection, _ := root["variant_selection"].(string)
+			if variantSelection != "baseline" {
+				for _, profile := range profiles {
+					name := "optimized-" + profile + "-" + task
+					if profile == "default" {
+						name = "optimized-" + task
+					}
+					writeCasePrompt(name)
+				}
+			}
+		}
+		if _, ok := root["case_prompt_files"]; !ok {
+			root["case_prompt_files"] = casePromptFiles
+		}
+		if _, ok := root["case_prompt_digests"]; !ok {
+			root["case_prompt_digests"] = casePromptDigests
+		}
 		generationConfig, err := json.Marshal(map[string]any{
 			"generation_isolation":            qualityGenerationIsolation,
 			"baseline_developer_instructions": "Do not call collaboration, subagent, spawn-agent, or agent-wait tools. Do not read or invoke Codex skills, plugins, hooks, or marketplace resources; they are outside this benchmark.",
@@ -1451,6 +1864,8 @@ func normalizeQualityFixture(t *testing.T, filePath string, root map[string]any)
 			"profiles_snapshot_sha256":                 profilesDigest,
 			"prompt_files":                             root["prompt_files"],
 			"prompt_digests":                           root["prompt_digests"],
+			"case_prompt_files":                        root["case_prompt_files"],
+			"case_prompt_digests":                      root["case_prompt_digests"],
 			"mechanical_navigation_semantics_enforced": true,
 			"mechanical_navigation_contract": map[string]any{
 				"required_root":                "<worktree>",
@@ -1591,19 +2006,29 @@ func qualityFixtureComparisons(rawCases []any) []any {
 			}
 			baselineEffective, _ := number(baseline["effective_tokens"])
 			optimizedEffective, _ := number(optimized["effective_tokens"])
+			baselineRaw, _ := number(baseline["raw_total_tokens"])
+			optimizedRaw, _ := number(optimized["raw_total_tokens"])
 			baselineRegular, _ := number(baseline["regular_input_tokens"])
 			optimizedRegular, _ := number(optimized["regular_input_tokens"])
+			baselineCachedPercent, _ := number(baseline["cached_input_percent"])
+			optimizedCachedPercent, _ := number(optimized["cached_input_percent"])
 			comparisons = append(comparisons, map[string]any{
 				"task":                                        optimized["task"],
 				"profile":                                     optimized["profile"],
 				"baseline_effective_tokens":                   baseline["effective_tokens"],
 				"optimized_effective_tokens":                  optimized["effective_tokens"],
 				"effective_reduction_percent":                 (1 - optimizedEffective/baselineEffective) * 100,
+				"baseline_raw_total_tokens":                   baseline["raw_total_tokens"],
+				"optimized_raw_total_tokens":                  optimized["raw_total_tokens"],
+				"raw_reduction_percent":                       (1 - optimizedRaw/baselineRaw) * 100,
 				"baseline_regular_input_tokens":               baseline["regular_input_tokens"],
 				"optimized_regular_input_tokens":              optimized["regular_input_tokens"],
 				"regular_input_reduction_percent":             (1 - optimizedRegular/baselineRegular) * 100,
 				"baseline_cached_input_tokens":                baseline["cached_input_tokens"],
 				"optimized_cached_input_tokens":               optimized["cached_input_tokens"],
+				"baseline_cached_input_percent":               baseline["cached_input_percent"],
+				"optimized_cached_input_percent":              optimized["cached_input_percent"],
+				"cached_input_percent_delta":                  optimizedCachedPercent - baselineCachedPercent,
 				"baseline_output_tokens":                      baseline["output_tokens"],
 				"optimized_output_tokens":                     optimized["output_tokens"],
 				"baseline_tool_calls":                         baseline["tool_call_count"],
@@ -1679,7 +2104,8 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 			"profiles-snapshot.tsv",
 		}
 		var manifest struct {
-			PromptFiles map[string]string `json:"prompt_files"`
+			PromptFiles     map[string]string `json:"prompt_files"`
+			CasePromptFiles map[string]string `json:"case_prompt_files"`
 		}
 		manifestContent, err := os.ReadFile(manifestPath)
 		if err != nil {
@@ -1689,6 +2115,9 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 			t.Fatal(err)
 		}
 		for _, relative := range manifest.PromptFiles {
+			inputPaths = append(inputPaths, relative)
+		}
+		for _, relative := range manifest.CasePromptFiles {
 			inputPaths = append(inputPaths, relative)
 		}
 		for _, current := range metrics.Cases {
@@ -1760,7 +2189,7 @@ func writeQualityAggregateManifest(t *testing.T, runDir string) {
 			"metrics_formula":          qualityMetricsFormula,
 			"generation_isolation":     qualityGenerationIsolation,
 			"generation_config_sha256": generationConfigDigest,
-			"judge_cache_schema":       6,
+			"judge_cache_schema":       8,
 		},
 		"inputs":     inputDigests,
 		"snapshots":  snapshotDigests,
@@ -1976,6 +2405,66 @@ func TestValidateSourceChecksumsRejectsUnexpectedArtifactNames(t *testing.T) {
 				t.Fatalf("unexpected checksum artifact check = %+v", check)
 			}
 		})
+	}
+}
+
+func TestValidateSourceChecksumsBindsAuthenticatedDependencySnapshot(t *testing.T) {
+	runDir := t.TempDir()
+	writeSourceChecksumFixture(t, runDir, "")
+	writeJSON(t, filepath.Join(runDir, "manifest.json"), map[string]any{
+		"dependency_source": map[string]any{
+			"manifest_path": "dependency-source/manifest.json",
+		},
+	})
+	missingCheck := validateSourceChecksums(runDir)
+	if missingCheck.Passed ||
+		!strings.Contains(
+			missingCheck.Error,
+			"missing checksum entry for dependency-source/manifest.json",
+		) {
+		t.Fatalf("missing dependency source check = %+v", missingCheck)
+	}
+	checksumPath := filepath.Join(runDir, "source-SHA256SUMS")
+	checksum, err := os.OpenFile(checksumPath, os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range dependencySourceChecksumArtifacts {
+		path := filepath.Join(runDir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			checksum.Close()
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("contents of "+name), 0o644); err != nil {
+			checksum.Close()
+			t.Fatal(err)
+		}
+		digest, err := sha256File(path)
+		if err != nil {
+			checksum.Close()
+			t.Fatal(err)
+		}
+		if _, err := fmt.Fprintf(checksum, "%s  %s\n", digest, name); err != nil {
+			checksum.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := checksum.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if check := validateSourceChecksums(runDir); !check.Passed {
+		t.Fatalf("dependency source checksum validation failed: %+v", check)
+	}
+	if err := os.WriteFile(
+		filepath.Join(runDir, "dependency-source", "target-go.sum"),
+		[]byte("tampered"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	check := validateSourceChecksums(runDir)
+	if check.Passed || !strings.Contains(check.Error, "target-go.sum: checksum mismatch") {
+		t.Fatalf("tampered dependency source check = %+v", check)
 	}
 }
 

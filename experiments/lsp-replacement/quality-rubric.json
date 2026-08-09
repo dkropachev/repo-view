@@ -23,6 +23,84 @@
           ]
         },
         {
+          "id": "wrapper_no_argument_semantics",
+          "weight": 3,
+          "required": true,
+          "all_of": [
+            "\\bDelay\\b",
+            "\\bCancel\\b",
+            "timeSource|time source|injected",
+            "native|underlying",
+            "compatib|risk|behavior|semantic|equival"
+          ],
+          "none_of": [
+            "(?:Delay|Cancel).{0,160}(?:is|are|remains?) (?:fully |universally |always )?equivalent"
+          ]
+        },
+      {
+        "id": "concrete_construction_paths",
+        "weight": 2,
+        "required": true,
+        "all_of": [
+          "construct|NewRateLimiter|NewDynamicRateLimiter",
+          "common/persistence/client/health_request_rate_limiter\\.go",
+          "service/matching/(?:ratelimit_manager|task_queue_partition_manager)\\.go",
+          "service/history/replication/stream_sender_flow_controller\\.go",
+          "service/worker/(?:scheduler|migration)/"
+        ]
+      },
+        {
+          "id": "native_source_boundary",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "dependency|upstream|native",
+            "inspect|evidence|source",
+            "cannot|not.{0,40}(?:inspect|establish|prove|claim)|boundary|beyond"
+          ]
+        },
+        {
+          "id": "interface_constructor_scope",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "\\bRateLimiter\\b",
+            "\\bReservation\\b",
+            "interface|method set",
+            "NewRateLimiter",
+            "NewDynamicRateLimiter",
+            "unchanged|retain|preserv"
+          ]
+        },
+        {
+          "id": "unchanged_operations",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "\\bAllow\\b",
+            "AllowN",
+            "\\bWait\\b",
+            "WaitN",
+            "recycl",
+            "rate|burst|configur",
+            "TokensAt|token inspection"
+          ]
+        },
+        {
+          "id": "concrete_consuming_paths",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "scheduler",
+            "per.?namespace",
+            "request.{0,40}adapter|request_rate_limiter_adapter",
+            "persistence.{0,40}health|health.{0,40}persistence",
+            "\\bReserve\\b",
+            "ReserveN",
+            "consum|call|delegat"
+          ]
+        },
+        {
           "id": "unit_test_behavior",
           "weight": 2,
           "required": true,
@@ -47,8 +125,8 @@
           "all_of": [
             "88",
             "64",
-            "2.{0,20}allocation",
-            "1.{0,20}allocation"
+            "(?:\\b2\\b.{0,20}allocat|allocat.{0,20}\\b2\\b)",
+            "(?:\\b1\\b.{0,20}allocat|allocat.{0,20}\\b1\\b)"
           ]
         },
         {
@@ -78,7 +156,10 @@
             "implementation|RateLimiterImpl",
             "unit test|test",
             "benchmark",
-            "documentation|performance notes|docs"
+            "document|performance notes|docs"
+          ],
+          "none_of": [
+            "\\bno commands(?: or tests)? (?:were )?run\\b"
           ]
         }
       ]
@@ -90,7 +171,90 @@
           "weight": 3,
           "required": true,
           "all_of": [
-            "no.{0,30}correctness regression"
+            "correctness|compatib",
+            "regression|risk|behavior",
+            "production|bounded|inspected|evidence"
+          ],
+          "none_of": [
+            "\\bno commands(?: or tests)? (?:were )?run\\b"
+          ]
+        },
+        {
+          "id": "wrapper_clock_risk",
+          "weight": 3,
+          "required": true,
+          "all_of": [
+            "\\bDelay\\b",
+            "\\bCancel\\b",
+            "timeSource|time source|injected",
+            "native|underlying",
+            "compatib|risk|observable|behavior"
+          ],
+          "none_of": [
+            "(?:Delay|Cancel).{0,160}(?:is|are|remains?) (?:fully |universally |always )?equivalent"
+          ]
+        },
+      {
+        "id": "concrete_construction_paths",
+        "weight": 2,
+        "required": true,
+        "all_of": [
+          "construct|NewRateLimiter|NewDynamicRateLimiter",
+          "common/persistence/client/health_request_rate_limiter\\.go",
+          "service/matching/(?:ratelimit_manager|task_queue_partition_manager)\\.go",
+          "service/history/replication/stream_sender_flow_controller\\.go",
+          "service/worker/(?:scheduler|migration)/"
+        ]
+      },
+        {
+          "id": "native_source_boundary",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "dependency|upstream|native",
+            "inspect|evidence|source",
+            "cannot|not.{0,40}(?:inspect|establish|prove|claim)|boundary|beyond"
+          ]
+        },
+        {
+          "id": "interface_constructor_scope",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "\\bRateLimiter\\b",
+            "\\bReservation\\b",
+            "interface|method set",
+            "NewRateLimiter",
+            "NewDynamicRateLimiter",
+            "unchanged|retain|preserv"
+          ]
+        },
+        {
+          "id": "unchanged_operations",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "\\bAllow\\b",
+            "AllowN",
+            "\\bWait\\b",
+            "WaitN",
+            "recycl",
+            "rate|burst|configur",
+            "TokensAt|token inspection"
+          ]
+        },
+        {
+          "id": "concrete_consuming_paths",
+          "weight": 2,
+          "required": true,
+          "all_of": [
+            "scheduler",
+            "per.?namespace",
+            "request.{0,40}adapter|request_rate_limiter_adapter",
+            "persistence.{0,40}health|health.{0,40}persistence",
+            "\\bReserve\\b",
+            "ReserveN",
+            "consum|call|delegat"
           ]
         },
         {
@@ -167,7 +331,7 @@
           "(?:Time\\.)?UTC(?:\\(\\))?",
           "(?:strips|stripping|removes|removing|discards|discarding|loses|losing).{0,40}monotonic|monotonic.{0,50}(?:is |are )?(?:stripped|removed|discarded|lost)|stripMono",
             "go\\.mod",
-            "(?:golang\\.org/)?x/time(?:@|\\s+)v0\\.14\\.0",
+            "(?:golang\\.org/)?x/time`?(?:@|\\s+(?:is\\s+)?(?:pinned\\s+to\\s+)?[*_]{0,2})v0\\.14\\.0",
             "\\bReserve\\(\\)|\\.Reserve\\b",
           "wall(?:[- ]clock|[- ]time|[- ]only)"
           ],
@@ -198,7 +362,7 @@
           "all_of": [
             "concrete.{0,30}(type|assert)|type assertion",
             "ClockedReservation",
-            "out-of-repository|external consumers?|outside (the )?repository|exported.{0,60}(risk|assert)"
+            "out-of-repository|repository[- ]external|external (?:callers?|consumers?)|outside (the )?repository|exported.{0,60}(risk|assert)"
           ]
         },
         {
@@ -220,7 +384,7 @@
           "timer advancement|event[- ]clock advancement|EventTimeSource\\.Advance|advances? the event clock",
           "recycl",
           "no[- ]recycle|not.{0,40}recycl|not.{0,80}(?:unblocked|released|satisfy).{0,80}recycl|recycl.{0,80}does not.{0,80}(?:unblock|release|satisfy)",
-            "(?:no|without|missing|lack(?:s|ing)?|does not).{0,120}(?:(?:test|coverage|assert).{0,80}(?:wall[- ]clock|monotonic)|(?:wall[- ]clock|monotonic).{0,80}(?:test|coverage|assert))"
+            "(?:no|without|missing|lack(?:s|ing)?|does not).{0,240}(?:(?:test|coverage|assert).{0,240}(?:wall[- ]clock|monotonic)|(?:wall[- ]clock|monotonic).{0,240}(?:test|coverage|assert))"
           ]
         },
         {
@@ -271,7 +435,7 @@
           "(?:Time\\.)?UTC(?:\\(\\))?",
           "(?:strips|stripping|removes|removing|discards|discarding|loses|losing).{0,40}monotonic|monotonic.{0,50}(?:is |are )?(?:stripped|removed|discarded|lost)|stripMono",
             "go\\.mod",
-            "(?:golang\\.org/)?x/time(?:@|\\s+)v0\\.14\\.0",
+            "(?:golang\\.org/)?x/time`?(?:@|\\s+(?:is\\s+)?(?:pinned\\s+to\\s+)?[*_]{0,2})v0\\.14\\.0",
             "\\bReserve\\(\\)|\\.Reserve\\b",
           "wall(?:[- ]clock|[- ]time|[- ]only)"
           ],

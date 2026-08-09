@@ -26,6 +26,13 @@ generation_model_mode="${LSP_MODEL_MODE}"
 expected_codex_version="${LSP_CODEX_VERSION}"
 expected_go_version="${LSP_GO_VERSION}"
 generation_isolation="root-deny-explicit-read-inherit-none-go-env-v3"
+deep_reference_find_command='repo-view find ClockedReservation --root . --include refs --return locations --context 6 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_contract_inspect_command='repo-view inspect common/quotas/reservation.go:11 common/quotas/rate_limiter.go:12 common/clock/time_source.go:35 common/quotas/rate_limiter_impl.go:22 common/quotas/rate_limiter_impl.go:49 common/quotas/clocked_rate_limiter.go:45 common/quotas/clocked_rate_limiter.go:50 common/quotas/clocked_rate_limiter.go:54 common/quotas/clocked_rate_limiter.go:58 common/quotas/clocked_rate_limiter.go:62 common/quotas/clocked_rate_limiter.go:66 common/quotas/clocked_rate_limiter.go:70 common/quotas/clocked_rate_limiter.go:74 common/quotas/multi_reservation_impl.go:30 common/quotas/multi_reservation_impl.go:42 common/quotas/multi_reservation_impl.go:54 common/quotas/multi_reservation_impl.go:61 go.mod:76 --root . --include scope --return context --context 6 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_path_find_command='repo-view find startWorkflowRateLimiter NewDefaultOutgoingRateLimiter newShardReaderRateLimiter ReaderImpl loadAndSubmitTasks MultiRequestRateLimiterImpl --root . --include both --return locations --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_path_outline_command='repo-view outline service/worker/scheduler/fx.go service/worker/scheduler/activities.go service/worker/pernamespaceworker.go common/quotas/dynamic_rate_limiter_impl.go common/quotas/rate_limiter_impl.go service/history/queues/reader_quotas.go service/history/queues/queue_base.go service/history/queues/reader.go common/quotas/multi_request_rate_limiter_impl.go common/quotas/priority_rate_limiter_impl.go common/quotas/request_rate_limiter_adapter_impl.go --root . --return locations --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_worker_inspect_command='repo-view inspect service/worker/scheduler/fx.go:120 service/worker/scheduler/fx.go:133 service/worker/scheduler/activities.go:89 service/worker/pernamespaceworker.go:123 service/worker/pernamespaceworker.go:430 common/quotas/dynamic_rate_limiter_impl.go:99 common/quotas/rate_limiter_impl.go:54 --root . --include scope --return context --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_reader_inspect_command='repo-view inspect service/history/queues/reader_quotas.go:14 service/history/queues/reader_quotas.go:39 service/history/queues/queue_base.go:136 service/history/queues/queue_base.go:150 service/history/queues/reader.go:58 service/history/queues/reader.go:426 common/quotas/multi_request_rate_limiter_impl.go:17 common/quotas/multi_request_rate_limiter_impl.go:56 common/quotas/multi_request_rate_limiter_impl.go:70 common/quotas/priority_rate_limiter_impl.go:77 common/quotas/request_rate_limiter_adapter_impl.go:31 common/quotas/request_rate_limiter_adapter_impl.go:35 common/quotas/dynamic_rate_limiter_impl.go:99 common/quotas/rate_limiter_impl.go:54 --root . --include scope --return context --context 8 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json'
+deep_test_inspect_command='repo-view inspect common/quotas/clocked_rate_limiter_test.go:77 common/quotas/clocked_rate_limiter_test.go:91 common/quotas/clocked_rate_limiter_test.go:108 common/quotas/clocked_rate_limiter_test.go:118 common/quotas/clocked_rate_limiter_test.go:133 common/quotas/clocked_rate_limiter_test.go:160 common/quotas/priority_reservation_impl_test.go:64 common/quotas/priority_reservation_impl_test.go:73 common/quotas/multi_reservation_impl_test.go:55 common/quotas/multi_reservation_impl_test.go:62 common/quotas/multi_reservation_impl_test.go:77 common/quotas/multi_reservation_impl_test.go:86 common/quotas/multi_rate_limiter_impl_test.go:68 common/quotas/multi_rate_limiter_impl_test.go:85 common/quotas/multi_rate_limiter_impl_test.go:133 common/quotas/rate_limiter_impl_test.go:23 common/quotas/bench_test.go:38 --root . --include scope --return context --context 4 --limit 20 --max-code-lines 40 --max-patch-lines 300 --json'
 
 cd "${repo_root}"
 
@@ -323,7 +330,7 @@ for selected_profile in "${selected_profiles[@]}"; do
   load_profile "${selected_profile}"
 done
 
-for required in awk cmp find git go codex gzip jq mktemp sort stat tar sha256sum realpath tee; do
+for required in awk cmp find git go codex gzip jq mktemp sort stat tar sha256sum realpath tee unzip; do
   if ! command -v "${required}" >/dev/null 2>&1; then
     printf 'missing required command: %s\n' "${required}" >&2
     exit 1
@@ -407,8 +414,13 @@ render_prompt() {
 
 declare -A rendered_prompts=()
 declare -A rendered_prompt_digests=()
+declare -A case_prompt_file_for_name=()
+declare -A case_prompt_digest_for_name=()
+case_prompt_names=()
 prompt_digests_json='{}'
 prompt_files_json='{}'
+case_prompt_digests_json='{}'
+case_prompt_files_json='{}'
 prepare_rendered_prompts() {
   local selected_task
   local rendered
@@ -447,10 +459,67 @@ prepare_rendered_prompts() {
   done
 }
 
+record_case_prompt() {
+  local case_name="$1"
+  local prompt="$2"
+  local prompt_relative="${case_name}.user-prompt.txt"
+  local digest_output
+  local digest
+
+  printf '%s' "${prompt}" > "${run_dir}/${prompt_relative}"
+  digest_output="$(sha256sum -- "${run_dir}/${prompt_relative}")"
+  digest="${digest_output%% *}"
+  case_prompt_names+=("${case_name}")
+  case_prompt_file_for_name["${case_name}"]="${prompt_relative}"
+  case_prompt_digest_for_name["${case_name}"]="${digest}"
+  case_prompt_digests_json="$(
+    jq -cn \
+      --argjson current "${case_prompt_digests_json}" \
+      --arg name "${case_name}" \
+      --arg digest "${digest}" \
+      '$current + {($name): $digest}'
+  )"
+  case_prompt_files_json="$(
+    jq -cn \
+      --argjson current "${case_prompt_files_json}" \
+      --arg name "${case_name}" \
+      --arg path "${prompt_relative}" \
+      '$current + {($name): $path}'
+  )"
+}
+
+verify_case_prompt_snapshot() {
+  local case_name="$1"
+  local prompt_relative="${case_prompt_file_for_name[${case_name}]:-}"
+  local expected_digest="${case_prompt_digest_for_name[${case_name}]:-}"
+  local prompt_path
+  local digest_output
+  local digest
+
+  if [[ -z "${prompt_relative}" || -z "${expected_digest}" ]]; then
+    printf 'case prompt provenance is missing: %s\n' "${case_name}" >&2
+    return 1
+  fi
+  prompt_path="${run_dir}/${prompt_relative}"
+  if [[ ! -f "${prompt_path}" || -L "${prompt_path}" ]]; then
+    printf 'case prompt snapshot is missing or unsafe: %s\n' \
+      "${case_name}" >&2
+    return 1
+  fi
+  digest_output="$(sha256sum -- "${prompt_path}")"
+  digest="${digest_output%% *}"
+  if [[ "${digest}" != "${expected_digest}" ]]; then
+    printf 'case prompt snapshot changed during run: %s\n' \
+      "${case_name}" >&2
+    return 1
+  fi
+}
+
 verify_generation_input_snapshots() {
   local digest_output
   local digest
   local selected_task
+  local case_name
   local prompt_path
 
   if [[ ! -f "${run_dir}/profiles-snapshot.tsv" ||
@@ -479,6 +548,9 @@ verify_generation_input_snapshots() {
         "${selected_task}" >&2
       return 1
     fi
+  done
+  for case_name in "${case_prompt_names[@]}"; do
+    verify_case_prompt_snapshot "${case_name}" || return 1
   done
 }
 
@@ -552,6 +624,98 @@ validate_baseline_prompt_snapshot() {
       "${imported_task}" "${baseline_dir}/${expected_relative}" >&2
     exit 1
   fi
+}
+
+validate_baseline_case_prompt_digest() {
+  local manifest="$1"
+  local imported_task="$2"
+  local case_name="baseline-${imported_task}"
+  local expected="${case_prompt_digest_for_name[${case_name}]}"
+  local actual
+
+  if ! actual="$(
+    jq -er -s --arg name "${case_name}" \
+      '.[0].case_prompt_digests[$name]
+        | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+      "${manifest}"
+  )"; then
+    printf 'baseline manifest is missing case prompt digest for %s: %s\n' \
+      "${case_name}" "${manifest}" >&2
+    exit 1
+  fi
+  if [[ "${actual}" != "${expected}" ]]; then
+    printf 'baseline manifest case prompt digest mismatch for %s: %s != %s\n' \
+      "${case_name}" "${actual}" "${expected}" >&2
+    exit 1
+  fi
+}
+
+validate_baseline_case_prompt_snapshot() {
+  local baseline_dir="$1"
+  local imported_task="$2"
+  local manifest="${baseline_dir}/manifest.json"
+  local case_name="baseline-${imported_task}"
+  local expected_relative="${case_name}.user-prompt.txt"
+  local actual_relative
+
+  if ! actual_relative="$(
+    jq -er -s --arg name "${case_name}" \
+      '.[0].case_prompt_files[$name] | select(type == "string")' \
+      "${manifest}"
+  )" ||
+    [[ "${actual_relative}" != "${expected_relative}" ]]; then
+    printf 'baseline manifest case prompt file mismatch for %s: %s\n' \
+      "${case_name}" "${manifest}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${baseline_dir}/${expected_relative}" ||
+        -L "${baseline_dir}/${expected_relative}" ]] ||
+    ! cmp -s -- \
+      "${baseline_dir}/${expected_relative}" \
+      "${run_dir}/${expected_relative}"; then
+    printf 'baseline exact case prompt bytes mismatch for %s: %s\n' \
+      "${case_name}" "${baseline_dir}/${expected_relative}" >&2
+    exit 1
+  fi
+}
+
+validate_baseline_generation_config_binding() {
+  local manifest="$1"
+  local generation_config="$2"
+
+  if ! jq -e \
+    --slurpfile source_manifest "${manifest}" \
+    '
+      type == "object"
+      and ($source_manifest | length) == 1
+      and ($source_manifest[0] | type) == "object"
+      and .generation_isolation
+        == $source_manifest[0].generation_isolation
+      and .profiles_snapshot_path
+        == $source_manifest[0].profiles_snapshot_path
+      and .profiles_snapshot_sha256
+        == $source_manifest[0].profiles_snapshot_sha256
+      and .prompt_files == $source_manifest[0].prompt_files
+      and .prompt_digests == $source_manifest[0].prompt_digests
+      and .case_prompt_files == $source_manifest[0].case_prompt_files
+      and .case_prompt_digests == $source_manifest[0].case_prompt_digests
+      and .mechanical_navigation_semantics_enforced
+        == $source_manifest[0].mechanical_navigation_semantics_enforced
+    ' "${generation_config}" >/dev/null 2>&1; then
+    printf 'baseline generation config disagrees with its source manifest: %s\n' \
+      "${generation_config}" >&2
+    exit 1
+  fi
+}
+
+generation_config_shared_projection() {
+  jq -cS '
+    del(
+      .case_prompt_files,
+      .case_prompt_digests,
+      .mechanical_navigation_semantics_enforced
+    )
+  ' "$1"
 }
 
 jsonl_lifecycle_matches_exit_code() {
@@ -688,6 +852,7 @@ validate_baseline_run() {
   local generation_config="${baseline_dir}/generation-config.json"
   local generation_config_digest_output
   local generation_config_digest
+  local source_generation_config_sha256
   local imported_task
 
   if [[ ! -f "${manifest}" ]]; then
@@ -712,8 +877,6 @@ validate_baseline_run() {
   validate_baseline_manifest_field \
     "${manifest}" go_version "${actual_go_version}"
   validate_baseline_manifest_field \
-    "${manifest}" generation_config_sha256 "${generation_config_sha256}"
-  validate_baseline_manifest_field \
     "${manifest}" profiles_snapshot_path "profiles-snapshot.tsv"
   validate_baseline_manifest_field \
     "${manifest}" profiles_snapshot_sha256 "${profiles_snapshot_sha256}"
@@ -722,19 +885,25 @@ validate_baseline_run() {
       "${generation_config}" >&2
     exit 1
   fi
+  if ! source_generation_config_sha256="$(
+    jq -er -s \
+      '.[0].generation_config_sha256
+        | select(type == "string" and test("^[0-9a-f]{64}$"))' \
+      "${manifest}"
+  )"; then
+    printf 'baseline manifest is missing generation config digest: %s\n' \
+      "${manifest}" >&2
+    exit 1
+  fi
   generation_config_digest_output="$(
     sha256sum -- "${generation_config}"
   )"
   generation_config_digest="${generation_config_digest_output%% *}"
-  if [[ "${generation_config_digest}" != "${generation_config_sha256}" ]]; then
+  if [[ "${generation_config_digest}" != \
+        "${source_generation_config_sha256}" ]]; then
     printf 'baseline generation config digest mismatch: %s != %s\n' \
-      "${generation_config_digest}" "${generation_config_sha256}" >&2
-    exit 1
-  fi
-  if ! cmp -s -- \
-    "${generation_config}" "${run_dir}/generation-config.json"; then
-    printf 'baseline generation config bytes mismatch: %s\n' \
-      "${generation_config}" >&2
+      "${generation_config_digest}" \
+      "${source_generation_config_sha256}" >&2
     exit 1
   fi
   if [[ ! -f "${baseline_dir}/profiles-snapshot.tsv" ||
@@ -750,8 +919,38 @@ validate_baseline_run() {
   for imported_task in "${selected_tasks[@]}"; do
     validate_baseline_prompt_digest "${manifest}" "${imported_task}"
     validate_baseline_prompt_snapshot "${baseline_dir}" "${imported_task}"
+    validate_baseline_case_prompt_digest "${manifest}" "${imported_task}"
+    validate_baseline_case_prompt_snapshot "${baseline_dir}" "${imported_task}"
     validate_baseline_case "${baseline_dir}" "${imported_task}"
   done
+  validate_baseline_generation_config_binding \
+    "${manifest}" "${generation_config}"
+  if ! jq -e -s \
+    --argjson current_case_prompt_files "${case_prompt_files_json}" \
+    --argjson current_case_prompt_digests "${case_prompt_digests_json}" \
+    '
+      length == 1
+      and .[0].case_prompt_files == (
+        $current_case_prompt_files
+        | with_entries(select(.key | startswith("baseline-")))
+      )
+      and .[0].case_prompt_digests == (
+        $current_case_prompt_digests
+        | with_entries(select(.key | startswith("baseline-")))
+      )
+    ' "${manifest}" >/dev/null; then
+    printf 'baseline case prompt set disagrees with selected tasks: %s\n' \
+      "${manifest}" >&2
+    exit 1
+  fi
+  if ! cmp -s -- \
+    <(generation_config_shared_projection "${generation_config}") \
+    <(generation_config_shared_projection \
+      "${run_dir}/generation-config.json"); then
+    printf 'baseline shared generation config mismatch: %s\n' \
+      "${generation_config}" >&2
+    exit 1
+  fi
 }
 
 baseline_snapshot_checksums() {
@@ -768,7 +967,7 @@ baseline_snapshot_checksums() {
   for imported_task in "${selected_tasks[@]}"; do
     files+=("prompts/${imported_task}.txt")
     stem="baseline-${imported_task}"
-    files+=("${stem}.jsonl" "${stem}.exit-code")
+    files+=("${stem}.user-prompt.txt" "${stem}.jsonl" "${stem}.exit-code")
     for suffix in stderr invocation started-at finished-at duration-seconds; do
       if [[ -f "${baseline_dir}/${stem}.${suffix}" ]]; then
         files+=("${stem}.${suffix}")
@@ -957,6 +1156,19 @@ prepare_baseline_import() {
     elif [[ "${snapshot_status}" -ne 0 ]]; then
       exit 1
     fi
+    snapshot_status=0
+    snapshot_baseline_file \
+      "${baseline_root_fd}" "${stem}.user-prompt.txt" \
+      "${stage_dir}/${stem}.user-prompt.txt" ||
+      snapshot_status=$?
+    if [[ "${snapshot_status}" -eq 2 ]]; then
+      printf 'baseline case prompt missing for %s: %s\n' \
+        "${imported_task}" \
+        "${baseline_from}/${stem}.user-prompt.txt" >&2
+      exit 1
+    elif [[ "${snapshot_status}" -ne 0 ]]; then
+      exit 1
+    fi
     for suffix in jsonl exit-code; do
       snapshot_status=0
       snapshot_baseline_file \
@@ -1006,6 +1218,8 @@ prepare_baseline_import() {
   rmdir -- "${stage_dir}/prompts"
   for imported_task in "${selected_tasks[@]}"; do
     stem="baseline-${imported_task}"
+    mv -- "${stage_dir}/${stem}.user-prompt.txt" \
+      "${run_dir}/baseline-source-${stem}.user-prompt.txt"
     for suffix in jsonl stderr exit-code invocation started-at finished-at duration-seconds; do
       if [[ -f "${stage_dir}/${stem}.${suffix}" ]]; then
         mv -- "${stage_dir}/${stem}.${suffix}" \
@@ -1636,6 +1850,7 @@ verify_target_checkout() {
     exit 1
   fi
   require_clean_worktree
+  verify_deep_dependency_snapshot
 }
 
 require_final_run_absent() {
@@ -1958,6 +2173,35 @@ generation_go_mod_cache="$(
   jq -er '.GOMODCACHE | select(type == "string" and length > 0)' \
     <<< "${generation_go_environment_json}"
 )"
+if [[ ! "${generation_go_mod_cache}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  printf 'unsafe Go module cache path for dependency command: %s\n' \
+    "${generation_go_mod_cache}" >&2
+  exit 1
+fi
+deep_dependency_module=golang.org/x/time
+deep_dependency_version=v0.14.0
+deep_dependency_id="${deep_dependency_module}@${deep_dependency_version}"
+deep_dependency_awk_command='awk -v OFS=: "((FILENAME == ARGV[1]) && FNR >= 120 && FNR <= 230) || ((FILENAME == ARGV[2]) && FNR >= 343 && FNR <= 420) { print FILENAME, FNR; print }" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate.go" "$HOME/dependencies/golang.org/x/time@v0.14.0/rate/rate_test.go"'
+deep_dependency_snapshot_required=false
+if [[ "${variant}" != "baseline" ]]; then
+  for selected_task in "${selected_tasks[@]}"; do
+    [[ "${selected_task}" == deep-* ]] || continue
+    for selected_profile in "${selected_profiles[@]}"; do
+      if [[ "${selected_profile}" == "investigative-verified-high" ]]; then
+        deep_dependency_snapshot_required=true
+      fi
+    done
+  done
+fi
+deep_dependency_snapshot_prepared=false
+deep_dependency_module_sum=""
+deep_dependency_go_mod_sum=""
+deep_dependency_source_manifest_relative=""
+deep_dependency_source_manifest_sha256=""
+deep_dependency_target_go_mod_sha256=""
+deep_dependency_target_go_sum_sha256=""
+deep_dependency_rate_go_sha256=""
+deep_dependency_rate_test_go_sha256=""
 generation_go_cache="$(
   jq -er '.GOCACHE | select(type == "string" and length > 0)' \
     <<< "${generation_go_environment_json}"
@@ -1983,6 +2227,257 @@ generation_repo_view_cache_fd_open=true
 generation_repo_view_cache_identity="$(
   stat -Lc '%d:%i' -- "/proc/self/fd/${generation_repo_view_cache_fd}"
 )"
+
+read_target_dependency_sum() {
+  local requested_version="$1"
+
+  LC_ALL=C awk \
+    -v module="${deep_dependency_module}" \
+    -v version="${requested_version}" '
+      $1 == module && $2 == version {
+        matches++
+        if (NF != 3 || $3 !~ /^h1:[A-Za-z0-9+\/=]+$/) {
+          invalid = 1
+        }
+        sum = $3
+      }
+      END {
+        if (matches != 1 || invalid) {
+          exit 1
+        }
+        print sum
+      }
+    ' "${worktree}/go.sum"
+}
+
+verify_deep_dependency_snapshot() {
+  local evidence_module_root
+  local generation_module_root
+  local digest_output
+  local actual_digest
+  local snapshot_spec
+  local snapshot_path
+  local expected_digest
+  local relative_path
+
+  "${deep_dependency_snapshot_prepared}" || return 0
+  evidence_module_root="${run_dir}/dependency-source/${deep_dependency_id}"
+  generation_module_root="${generation_shell_home}/dependencies/${deep_dependency_id}"
+
+  for snapshot_spec in \
+    "${run_dir}/dependency-source/target-go.mod:${deep_dependency_target_go_mod_sha256}" \
+    "${run_dir}/dependency-source/target-go.sum:${deep_dependency_target_go_sum_sha256}" \
+    "${evidence_module_root}/rate/rate.go:${deep_dependency_rate_go_sha256}" \
+    "${evidence_module_root}/rate/rate_test.go:${deep_dependency_rate_test_go_sha256}" \
+    "${run_dir}/${deep_dependency_source_manifest_relative}:${deep_dependency_source_manifest_sha256}"; do
+    snapshot_path="${snapshot_spec%:*}"
+    expected_digest="${snapshot_spec##*:}"
+    if [[ ! -f "${snapshot_path}" || -L "${snapshot_path}" ]]; then
+      printf 'dependency snapshot is missing or unsafe: %s\n' \
+        "${snapshot_path}" >&2
+      exit 1
+    fi
+    digest_output="$(sha256sum -- "${snapshot_path}")"
+    actual_digest="${digest_output%% *}"
+    if [[ "${actual_digest}" != "${expected_digest}" ]]; then
+      printf 'dependency snapshot changed: %s\n' "${snapshot_path}" >&2
+      exit 1
+    fi
+  done
+
+  for relative_path in rate/rate.go rate/rate_test.go; do
+    if [[ ! -f "${generation_module_root}/${relative_path}" ||
+      -L "${generation_module_root}/${relative_path}" ]] ||
+      ! cmp -s -- \
+        "${evidence_module_root}/${relative_path}" \
+        "${generation_module_root}/${relative_path}"; then
+      printf 'generation dependency snapshot changed: %s\n' \
+        "${generation_module_root}/${relative_path}" >&2
+      exit 1
+    fi
+  done
+}
+
+prepare_deep_dependency_snapshot() {
+  local dependency_cache
+  local dependency_download_json
+  local expected_zip
+  local canonical_zip
+  local dependency_evidence_root
+  local evidence_module_root
+  local generation_module_root
+  local digest_output
+
+  "${deep_dependency_snapshot_required}" || return 0
+  if [[ ! -f "${worktree}/go.mod" || -L "${worktree}/go.mod" ||
+    ! -f "${worktree}/go.sum" || -L "${worktree}/go.sum" ]]; then
+    printf 'verified dependency snapshot requires regular target go.mod and go.sum files\n' >&2
+    exit 1
+  fi
+  if ! LC_ALL=C awk \
+    -v module="${deep_dependency_module}" \
+    -v version="${deep_dependency_version}" '
+      $1 == module && $2 == version { matches++ }
+      END { exit(matches == 1 ? 0 : 1) }
+    ' "${worktree}/go.mod"; then
+    printf 'target go.mod does not pin exactly one %s %s requirement\n' \
+      "${deep_dependency_module}" "${deep_dependency_version}" >&2
+    exit 1
+  fi
+  if ! deep_dependency_module_sum="$(
+    read_target_dependency_sum "${deep_dependency_version}"
+  )" || ! deep_dependency_go_mod_sum="$(
+    read_target_dependency_sum "${deep_dependency_version}/go.mod"
+  )"; then
+    printf 'target go.sum lacks one exact checksum pair for %s\n' \
+      "${deep_dependency_id}" >&2
+    exit 1
+  fi
+
+  dependency_cache="${generation_repo_view_cache}/dependency-mod-cache"
+  if [[ -e "${dependency_cache}" || -L "${dependency_cache}" ]]; then
+    printf 'private dependency module cache already exists: %s\n' \
+      "${dependency_cache}" >&2
+    exit 1
+  fi
+  mkdir -m 700 -- "${dependency_cache}"
+  if ! dependency_download_json="$(
+    cd "${worktree}"
+    "${pinned_host_go_execution_environment[@]}" \
+      "GOMODCACHE=${dependency_cache}" \
+      'GOFLAGS=-mod=readonly -modcacherw -trimpath -buildvcs=false' \
+      go mod download -json "${deep_dependency_id}"
+  )"; then
+    printf 'authenticated dependency download failed for %s\n' \
+      "${deep_dependency_id}" >&2
+    exit 1
+  fi
+  expected_zip="${dependency_cache}/cache/download/golang.org/x/time/@v/${deep_dependency_version}.zip"
+  if ! jq -e -s \
+    --arg module "${deep_dependency_module}" \
+    --arg version "${deep_dependency_version}" \
+    --arg module_sum "${deep_dependency_module_sum}" \
+    --arg go_mod_sum "${deep_dependency_go_mod_sum}" \
+    --arg expected_zip "${expected_zip}" '
+      length == 1
+      and .[0].Path == $module
+      and .[0].Version == $version
+      and ((.[0].Error // "") == "")
+      and .[0].Sum == $module_sum
+      and .[0].GoModSum == $go_mod_sum
+      and .[0].Zip == $expected_zip
+    ' <<< "${dependency_download_json}" >/dev/null; then
+    printf 'authenticated dependency identity or checksum mismatch for %s\n' \
+      "${deep_dependency_id}" >&2
+    exit 1
+  fi
+  if [[ ! -f "${expected_zip}" || -L "${expected_zip}" ]]; then
+    printf 'authenticated dependency archive is missing or unsafe: %s\n' \
+      "${expected_zip}" >&2
+    exit 1
+  fi
+  canonical_zip="$(realpath -e -- "${expected_zip}")"
+  if [[ "${canonical_zip}" != "${expected_zip}" ]]; then
+    printf 'authenticated dependency archive resolves outside its private path: %s\n' \
+      "${expected_zip}" >&2
+    exit 1
+  fi
+
+  dependency_evidence_root="${run_dir}/dependency-source"
+  evidence_module_root="${dependency_evidence_root}/${deep_dependency_id}"
+  generation_module_root="${generation_shell_home}/dependencies/${deep_dependency_id}"
+  mkdir -p -m 700 -- \
+    "${evidence_module_root}/rate" \
+    "${generation_module_root}/rate"
+
+  extract_deep_dependency_member() {
+    local relative_path="$1"
+    local archive_member
+    local member_count
+    local evidence_output
+    local generation_output
+
+    archive_member="${deep_dependency_id}/${relative_path}"
+    if ! member_count="$(
+      unzip -Z1 -- "${expected_zip}" |
+        LC_ALL=C awk -v expected="${archive_member}" '
+          $0 == expected { matches++ }
+          END { print matches + 0 }
+        '
+    )" || [[ "${member_count}" != 1 ]]; then
+      printf 'dependency archive member is missing or duplicated: %s\n' \
+        "${archive_member}" >&2
+      exit 1
+    fi
+    evidence_output="${evidence_module_root}/${relative_path}"
+    generation_output="${generation_module_root}/${relative_path}"
+    if ! unzip -p -- \
+      "${expected_zip}" "${archive_member}" > "${evidence_output}.partial"; then
+      printf 'failed to extract authenticated dependency member: %s\n' \
+        "${archive_member}" >&2
+      exit 1
+    fi
+    mv -- "${evidence_output}.partial" "${evidence_output}"
+    cp -- "${evidence_output}" "${generation_output}"
+    if ! cmp -s -- "${evidence_output}" "${generation_output}"; then
+      printf 'failed to stage dependency member for generation: %s\n' \
+        "${archive_member}" >&2
+      exit 1
+    fi
+  }
+
+  extract_deep_dependency_member rate/rate.go
+  extract_deep_dependency_member rate/rate_test.go
+  cp -- "${worktree}/go.mod" "${dependency_evidence_root}/target-go.mod"
+  cp -- "${worktree}/go.sum" "${dependency_evidence_root}/target-go.sum"
+  verify_target_checkout
+
+  digest_output="$(sha256sum -- "${dependency_evidence_root}/target-go.mod")"
+  deep_dependency_target_go_mod_sha256="${digest_output%% *}"
+  digest_output="$(sha256sum -- "${dependency_evidence_root}/target-go.sum")"
+  deep_dependency_target_go_sum_sha256="${digest_output%% *}"
+  digest_output="$(sha256sum -- "${evidence_module_root}/rate/rate.go")"
+  deep_dependency_rate_go_sha256="${digest_output%% *}"
+  digest_output="$(sha256sum -- "${evidence_module_root}/rate/rate_test.go")"
+  deep_dependency_rate_test_go_sha256="${digest_output%% *}"
+
+  deep_dependency_source_manifest_relative="dependency-source/manifest.json"
+  jq -n \
+    --arg module "${deep_dependency_module}" \
+    --arg version "${deep_dependency_version}" \
+    --arg module_sum "${deep_dependency_module_sum}" \
+    --arg go_mod_sum "${deep_dependency_go_mod_sum}" \
+    --arg command_root "\$HOME/dependencies/${deep_dependency_id}" \
+    --arg target_go_mod_sha256 "${deep_dependency_target_go_mod_sha256}" \
+    --arg target_go_sum_sha256 "${deep_dependency_target_go_sum_sha256}" \
+    --arg rate_go_sha256 "${deep_dependency_rate_go_sha256}" \
+    --arg rate_test_go_sha256 "${deep_dependency_rate_test_go_sha256}" '
+      {
+        schema_version: 1,
+        module: $module,
+        version: $version,
+        module_sum: $module_sum,
+        go_mod_sum: $go_mod_sum,
+        authentication:
+          "fresh-private-gomodcache-go-mod-download-target-go.sum",
+        command_root: $command_root,
+        source_root: "dependency-source",
+        files: {
+          "target-go.mod": $target_go_mod_sha256,
+          "target-go.sum": $target_go_sum_sha256,
+          "golang.org/x/time@v0.14.0/rate/rate.go": $rate_go_sha256,
+          "golang.org/x/time@v0.14.0/rate/rate_test.go":
+            $rate_test_go_sha256
+        }
+      }
+    ' > "${run_dir}/${deep_dependency_source_manifest_relative}"
+  digest_output="$(
+    sha256sum -- "${run_dir}/${deep_dependency_source_manifest_relative}"
+  )"
+  deep_dependency_source_manifest_sha256="${digest_output%% *}"
+  deep_dependency_snapshot_prepared=true
+  verify_deep_dependency_snapshot
+}
 codex_auth_source="${CODEX_HOME:-${HOME}/.codex}/auth.json"
 codex_auth_canonical=""
 if [[ -f "${codex_auth_source}" && ! -L "${codex_auth_source}" ]]; then
@@ -2265,6 +2760,8 @@ build_generation_config() {
       --arg profiles_snapshot_sha256 "${profiles_snapshot_sha256}" \
       --argjson prompt_files "${prompt_files_json}" \
       --argjson prompt_digests "${prompt_digests_json}" \
+      --argjson case_prompt_files "${case_prompt_files_json}" \
+      --argjson case_prompt_digests "${case_prompt_digests_json}" \
       --argjson mechanical_navigation_semantics_enforced \
         "${mechanical_navigation_semantics_enforced}" \
       '{
@@ -2278,6 +2775,8 @@ build_generation_config() {
         profiles_snapshot_sha256: $profiles_snapshot_sha256,
         prompt_files: $prompt_files,
         prompt_digests: $prompt_digests,
+        case_prompt_files: $case_prompt_files,
+        case_prompt_digests: $case_prompt_digests,
         mechanical_navigation_semantics_enforced:
           $mechanical_navigation_semantics_enforced,
         mechanical_navigation_contract: {
@@ -2374,6 +2873,7 @@ if ! isolated_git -C "${worktree}" merge-base --is-ancestor \
     "${resolved_base}" "${resolved_target}" >&2
   exit 1
 fi
+prepare_deep_dependency_snapshot
 prepare_repo_view_source_snapshot
 cp -- "${runtime_experiment_dir}/profiles.tsv" \
   "${run_dir}/profiles-snapshot.tsv"
@@ -2386,33 +2886,9 @@ for selected_profile in "${selected_profiles[@]}"; do
   load_profile "${selected_profile}"
 done
 prepare_rendered_prompts
-build_generation_config
-printf '%s' "${generation_config_json}" \
-  > "${run_dir}/generation-config.json"
-verify_generation_input_snapshots
-if [[ -n "${baseline_from}" ]]; then
-  prepare_baseline_import
-fi
-(
-  cd "${runner_source_root}"
-  "${pinned_host_go_execution_environment[@]}" \
-    go build -o "${run_dir}/repo-view.bin" ./cmd/repo-view
-)
-(
-  cd "${run_dir}"
-  sha256sum repo-view.bin repo-view-source.tar.gz > source-SHA256SUMS
-)
 
-{
-  date -u '+created_at=%Y-%m-%dT%H:%M:%SZ'
-  isolated_git --version
-  "${pinned_host_go_execution_environment[@]}" go version
-  codex --version
-  jq --version
-  uname -a
-} > "${run_dir}/environment.txt"
-
-jq -n \
+write_run_manifest() {
+  jq -n \
   --arg run_id "${run_id}" \
   --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg source_repo "${source_repo}" \
@@ -2432,6 +2908,13 @@ jq -n \
   --arg go_path "${generation_go_path}" \
   --arg go_mod_cache "${generation_go_mod_cache}" \
   --arg go_cache "${generation_go_cache}" \
+  --arg dependency_source_manifest_path \
+    "${deep_dependency_source_manifest_relative}" \
+  --arg dependency_source_manifest_sha256 \
+    "${deep_dependency_source_manifest_sha256}" \
+  --arg dependency_module "${deep_dependency_module}" \
+  --arg dependency_version "${deep_dependency_version}" \
+  --arg dependency_sum "${deep_dependency_module_sum}" \
   --arg base_ref "${base_ref}" \
   --arg base_commit "${resolved_base}" \
   --arg task "${task}" \
@@ -2443,6 +2926,8 @@ jq -n \
   --argjson repo_view_dirty "${repo_view_dirty}" \
   --argjson prompt_digests "${prompt_digests_json}" \
   --argjson prompt_files "${prompt_files_json}" \
+  --argjson case_prompt_digests "${case_prompt_digests_json}" \
+  --argjson case_prompt_files "${case_prompt_files_json}" \
   --argjson mechanical_navigation_semantics_enforced \
     "${mechanical_navigation_semantics_enforced}" \
   '{
@@ -2466,6 +2951,17 @@ jq -n \
     go_path: $go_path,
     go_mod_cache: $go_mod_cache,
     go_cache: $go_cache,
+    dependency_source: (
+      if $dependency_source_manifest_path == "" then null
+      else {
+        manifest_path: $dependency_source_manifest_path,
+        manifest_sha256: $dependency_source_manifest_sha256,
+        module: $dependency_module,
+        version: $dependency_version,
+        sum: $dependency_sum
+      }
+      end
+    ),
     base_ref: $base_ref,
     base_commit: $base_commit,
     task_selection: $task,
@@ -2477,10 +2973,13 @@ jq -n \
     repo_view_dirty: $repo_view_dirty,
     prompt_files: $prompt_files,
     prompt_digests: $prompt_digests,
+    case_prompt_files: $case_prompt_files,
+    case_prompt_digests: $case_prompt_digests,
     mechanical_navigation_semantics_enforced:
       $mechanical_navigation_semantics_enforced,
     cached_input_weight: 0.1
   }' > "${run_dir}/manifest.json"
+}
 
 overall_status=0
 transcript_validation_failed=false
@@ -2496,17 +2995,25 @@ run_case() {
   local case_profile="$2"
   local case_task="$3"
   local prompt="$4"
+  local mode="${5:-run}"
   local stem
   local packet
+  local prompt_relative
   local started_seconds
   local ended_seconds
   local status
-  local optimized_prompt
   local navigation_prompt_guard
   local -a command
 
   if [[ "${case_variant}" == "baseline" ]]; then
     stem="baseline-${case_task}"
+    if [[ "${mode}" == "prepare" ]]; then
+      record_case_prompt "${stem}" "${prompt}"
+      return
+    fi
+    verify_case_prompt_snapshot "${stem}"
+    prompt_relative="${case_prompt_file_for_name[${stem}]}"
+    prompt="$(<"${run_dir}/${prompt_relative}")"
     command=(
       "${codex_environment[@]}"
       codex exec
@@ -2522,14 +3029,15 @@ run_case() {
   else
     load_profile "${case_profile}"
     stem="optimized-${case_profile}-${case_task}"
-    navigation_prompt_guard="$(cat <<EOF
+    if [[ "${mode}" == "prepare" ]]; then
+      navigation_prompt_guard="$(cat <<EOF
 MANDATORY experiment navigation protocol: your first repository command must be exactly:
 repo-view changed --root . --base ${resolved_base} --return ${profile_return} --context ${profile_context} --limit ${profile_limit} --max-code-lines ${profile_max_code} --max-patch-lines ${profile_max_patch} --json
 Use repo-view for repository source navigation. Do not use git, rg, grep, sed, cat, nl, head, tail, find, ls, or direct file reads under the repository root. Shell commands are allowed only for tests or for dependency and standard-library evidence outside the repository after repo-view has supplied the repository evidence. This protocol is part of the task and its mechanical validation; an answer produced after bypassing it is invalid.
 Do not run repo-view --help or any subcommand --help, and do not experiment with unsupported flags such as --related. A rejected attempt still invalidates the run. Every find, inspect, and outline command must include --root ., --context 20 or less, --limit ${profile_limit} or less, --max-code-lines ${profile_max_code} or less, --max-patch-lines ${profile_max_patch} or less, and --json. Valid forms are:
 - repo-view find SYMBOL... --root . --include defs|refs|both --return locations|line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json
-- repo-view inspect PATH:LINE... --root . --include scope|all --return line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json
-- repo-view outline PATH... --root . --return line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json
+- repo-view inspect PATH:LINE... --root . --include scope|all --return locations|line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json
+- repo-view outline PATH... --root . --return locations|line|context|scope --context N --limit N --max-code-lines N --max-patch-lines N --json
 Issue exactly one repo-view command at a time and wait for its completed result before issuing the next; parallel repo-view calls invalidate transcript budget accounting. Positional inputs to repo-view find must be identifiers or dependency names, not grep-style expressions containing punctuation such as braces or parentheses.
 For this task, use --include scope on inspect; do not use --include all. Keep follow-up --context at 12 or less. Use --return locations for broad discovery, then batch only the selected locations into inspect. Batch related definitions into one find --return scope only when their complete scopes are directly required evidence.
 EOF
@@ -2545,26 +3053,42 @@ When gathering fake-clock tests, directly inspect the TestClockedRateLimiter_Wai
 EOF
 )"
     else
-      navigation_prompt_guard+=$'\nUse the initial changed packet as the complete navigation budget for this simple task. Explicitly account for all four changed artifact categories already present there: production implementation, unit test, benchmark, and performance documentation. Do not issue another repository-navigation command.'
-      if [[ "${case_task}" == "explain" ]]; then
-        navigation_prompt_guard+=$'\nExplicitly call the performance documentation a changed artifact and write the focused result as 88 to 64 B/op and 2 allocations to 1 allocation. Include the affected downstream map through DynamicRateLimiterImpl, composite limiters, and worker, scheduler, migration, and request-adapter consumers. Also state the unchanged scope: Wait/WaitN, rate updates, token recycling, allowance checks, public interfaces, and call sites. Keep those downstream statements at interface-impact level because this simple task has no follow-up navigation budget.'
-      fi
-      if [[ "${case_task}" == "review" ]]; then
-        navigation_prompt_guard+=$'\nFor this review, explicitly conclude that no correctness regression was found and explain that RateLimiterImpl uses real time, making native Delay/Cancel clock behavior equivalent to the removed real-time wrapper during normal operation. Label the allocation-regression gap as a Low-severity finding and explicitly assess whether the benchmark merely reports allocations or contains an assertion/threshold that can fail CI. Preserve the test-coverage finding that the functional test covers immediate and rejected reservations but lacks successful delayed-reservation and cancellation-equivalence coverage. Do not present concurrent limiter reconfiguration as a change-specific risk: the underlying rate.Limiter supplies its own synchronization and this wrapper removal does not change it. This is a read-only source review; do not run tests.'
-      fi
+      navigation_prompt_guard+=$'\nUse exactly three repo-view commands for this simple task: the mandatory changed packet followed by the two source-grounding commands below. Do not issue any other repository-navigation command.\nFor command 2, inspect the complete core interface, implementation, wrapper, and time-source evidence with exactly: repo-view inspect common/quotas/rate_limiter.go:12 common/quotas/reservation.go:11 common/quotas/rate_limiter_impl.go:13 common/quotas/rate_limiter_impl.go:26 common/quotas/rate_limiter_impl.go:80 common/quotas/rate_limiter_impl.go:114 common/quotas/dynamic_rate_limiter_impl.go:28 common/quotas/dynamic_rate_limiter_impl.go:57 common/quotas/clocked_rate_limiter.go:54 common/quotas/clocked_rate_limiter.go:62 common/quotas/clocked_rate_limiter.go:70 common/clock/time_source.go:38 --root . --include scope --return scope --context 4 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json\nFor command 3, inspect the concrete production construction and reservation-consumption paths with exactly: repo-view inspect service/worker/scheduler/fx.go:120 service/worker/scheduler/activities.go:95 service/worker/pernamespaceworker.go:123 service/worker/pernamespaceworker.go:430 common/quotas/request_rate_limiter_adapter_impl.go:16 common/quotas/request_rate_limiter_adapter_impl.go:31 service/frontend/configs/quotas.go:346 common/persistence/client/health_request_rate_limiter.go:56 common/persistence/client/health_request_rate_limiter.go:82 service/matching/ratelimit_manager.go:81 service/history/replication/stream_sender_flow_controller.go:59 --root . --include scope --return context --context 4 --limit 20 --max-code-lines 60 --max-patch-lines 300 --json\nUse only the three completed responses as repository evidence. Verify that both fixed inspect responses report no code or result truncation; otherwise stop and disclose the truncation. Report the persistence-health, matching, replication, and worker or scheduler construction paths. Cite the exact inspected file path for each category rather than only naming a constructor or subsystem. Distinguish construction evidence from proven reservation consumption. Before answering, verify that the response covers the wrapper and native clock boundary; the complete public interfaces and both constructor signatures; unchanged Allow, AllowN, Wait, WaitN, rate and burst configuration, TokensAt, and RecycleToken operations; concrete Reserve and ReserveN consumers; unit-test behavior; the allocation benchmark; every measurement and validation outcome in the changed performance documentation; and every changed artifact category. These repo-view invocations are commands; do not describe the run as command-free. Do not run tests or any shell command other than the three required repo-view commands.'
     fi
     case "${case_task}" in
       deep-review|deep-explain)
-        navigation_prompt_guard+=$'\nUse exactly eight repo-view commands and at most one dependency-source shell command. Do not run go list, tests, benchmarks, or a dependency-wide rg. The eight repository commands are: (1) the mandatory changed packet; (2) the dedicated ClockedReservation reference check; (3) one direct context inspection of the known contract and behavior locations listed below; (4) one batched production-path discovery find; (5) one outline of only the selected production files, including service/worker/scheduler/fx.go; (6-7) two batched production-path context inspections; and (8) the final test inspection. Do not issue separate contract or behavior finds, a separate manifest lookup, or any other repository command. Reuse locations from commands 4-5 in commands 6-7.\nFor command 3, use --return context --context 6 and directly inspect reservation.go:11, rate_limiter.go:12, clock/time_source.go:35, rate_limiter_impl.go:22, rate_limiter_impl.go:49, clocked_rate_limiter.go:45, clocked_rate_limiter.go:50, clocked_rate_limiter.go:54, clocked_rate_limiter.go:58, clocked_rate_limiter.go:62, clocked_rate_limiter.go:66, clocked_rate_limiter.go:70, clocked_rate_limiter.go:74, multi_reservation_impl.go:30, multi_reservation_impl.go:42, multi_reservation_impl.go:54, multi_reservation_impl.go:61, and go.mod:76, all under common/quotas except the explicitly named clock and manifest paths. Commands 6-7 must include scheduler/fx.go:120 and :133 plus scheduler/activities.go:89, pernamespaceworker.go:123 and :430, and the selected reader construction, injection, caller, and delegation locations, so all three production paths are fully linked without another search.\nFor the final test-only inspection, use --return context --context 4 --max-code-lines 40 and directly batch these known locations: common/quotas/clocked_rate_limiter_test.go:77, common/quotas/clocked_rate_limiter_test.go:91, common/quotas/clocked_rate_limiter_test.go:108, common/quotas/clocked_rate_limiter_test.go:118, common/quotas/clocked_rate_limiter_test.go:133, common/quotas/clocked_rate_limiter_test.go:160, common/quotas/priority_reservation_impl_test.go:64, common/quotas/priority_reservation_impl_test.go:73, common/quotas/multi_reservation_impl_test.go:55, common/quotas/multi_reservation_impl_test.go:62, common/quotas/multi_reservation_impl_test.go:77, common/quotas/multi_reservation_impl_test.go:86, common/quotas/multi_rate_limiter_impl_test.go:68, common/quotas/multi_rate_limiter_impl_test.go:85, and common/quotas/multi_rate_limiter_impl_test.go:133. Keep production and documentation locations out of that test-only call.\nAfter the eight repository calls, use at most one bounded awk command for dependency evidence. Read only rate/rate.go lines 120-230 and rate/rate_test.go lines 343-420 from golang.org/x/time v0.14.0, selecting ranges by filename so unrelated same-numbered lines are not emitted. Those ranges contain the native reservation implementation and the focused reserve/cancellation tests. Do not read any other dependency ranges.\nIn the findings and conclusion, classify the exported ReserveN zero-argument Delay/Cancel wall-versus-monotonic behavior change as a narrow observable correctness/compatibility regression. Distinguish that API-level regression from production impact: state that no incorrect behavior or failure was found in the three inspected real-time production paths. Do not conclude that there is no correctness regression at all. Preserve these measured figures from the changed documentation: 88 to 64 B/op, +3.49% activity throughput, +19.45% write-admission throughput, and +4.49% read/drain throughput.'
-        navigation_prompt_guard+=$'\nFor command 6, directly inspect service/worker/scheduler/fx.go:120 and :133, service/worker/scheduler/activities.go:89, service/worker/pernamespaceworker.go:123 and :430, common/quotas/dynamic_rate_limiter_impl.go:99, and common/quotas/rate_limiter_impl.go:54. For command 7, directly inspect service/history/queues/reader_quotas.go:14 and :39, service/history/queues/queue_base.go:136 and :150, service/history/queues/reader.go:58 and :426, common/quotas/multi_request_rate_limiter_impl.go:17, :56, and :70, common/quotas/priority_rate_limiter_impl.go:77, common/quotas/request_rate_limiter_adapter_impl.go:31 and :35, common/quotas/dynamic_rate_limiter_impl.go:99, and common/quotas/rate_limiter_impl.go:54. These exact locations must close construction, injection, caller, reservation, and consumption without an unresolved link. In the same final test call, also include common/quotas/rate_limiter_impl_test.go:23 and common/quotas/bench_test.go:38. The final answer must cite rate_limiter_impl.go, reservation.go or rate_limiter.go, clocked_rate_limiter.go, rate_limiter_impl_test.go, and bench_test.go with line numbers. Use the exact labels "Measured results" and "Inferred downstream benefit" when separating performance evidence, and explicitly mention raw samples or artifacts, variance, or confidence intervals.'
+        if [[ "${case_profile}" == "investigative-verified-high" ]]; then
+          navigation_prompt_guard+="$(cat <<EOF
+
+Use exactly eight repo-view commands and exactly one dependency-source shell command. Do not run go list, tests, benchmarks, or a dependency-wide rg. Command 1 is the mandatory changed packet above. Commands 2 through 8 must be exactly:
+2. ${deep_reference_find_command}
+3. ${deep_contract_inspect_command}
+4. ${deep_path_find_command}
+5. ${deep_path_outline_command}
+6. ${deep_worker_inspect_command}
+7. ${deep_reader_inspect_command}
+8. ${deep_test_inspect_command}
+Then run this exact command 9, the only non-repo-view command:
+9. ${deep_dependency_awk_command}
+Do not issue a separate manifest lookup or any other repository command. Commands 4-5 provide discovery context; commands 6-7 combine that context with the fixed known locations above to close construction, injection, caller, reservation, and consumption without another search. Command 9 reads only rate/rate.go lines 120-230 and rate/rate_test.go lines 343-420 from golang.org/x/time v0.14.0. Those ranges contain the native reservation implementation and the focused reserve/cancellation tests. Do not read any other dependency ranges.
+EOF
+)"
+        fi
+        navigation_prompt_guard+=$'\nIn the findings and conclusion, classify the exported ReserveN zero-argument Delay/Cancel wall-versus-monotonic behavior change as a narrow observable correctness/compatibility regression. Distinguish that API-level regression from production impact: state that no incorrect behavior or failure was found in the three inspected real-time production paths. Do not conclude that there is no correctness regression at all. Preserve these measured figures from the changed documentation: 88 to 64 B/op, +3.49% activity throughput, +19.45% write-admission throughput, and +4.49% read/drain throughput. The final answer must cite rate_limiter_impl.go, reservation.go or rate_limiter.go, clocked_rate_limiter.go, rate_limiter_impl_test.go, and bench_test.go with line numbers. Use the exact labels "Measured results" and "Inferred downstream benefit" when separating performance evidence, and explicitly mention raw samples or artifacts, variance, or confidence intervals.'
         navigation_prompt_guard+=$'\nQualify the API conclusion precisely: the Reservation interface does not promise a particular zero-argument clock source, so call this a narrow observable behavior/compatibility regression only for external callers whose ReserveN timestamp retained a monotonic reading and who relied on the old wrapper\'s wall-only UTC zero-argument behavior. Do not describe the difference as applying to event, fake, or wall-only timestamps, and do not imply a universal contract violation or demonstrated production failure. Scope negative performance-evidence statements to the inspected changed documentation: say that section provides no raw per-run samples or linked raw artifacts, variance, or confidence intervals; do not claim a repository-wide absence without a repository-wide search. Report node health exactly as documented: all three nodes remained up. Do not call that UP/NORMAL. If you infer that no node went down, label it explicitly as an inference rather than a separately reported outcome.'
         navigation_prompt_guard+=$'\nPreserve these additional production-profile measurements from the changed documentation: the RateLimiterImpl.ReserveN wrapper\'s 166 MiB flat allocation disappeared, and total sampled server allocation fell from 27,150.57 MiB to 26,947.82 MiB (-0.75%).'
         navigation_prompt_guard+=$'\nThe final answer must explicitly state all three of these facts: go.mod pins golang.org/x/time v0.14.0; time.Now().UTC() strips the monotonic reading; and rejected-reservation cancellation is a no-op or does nothing. RateLimiterImpl.Reserve and ReserveN are declared to return the Reservation interface, not a concrete return type. Limit external concrete-type compatibility risk to callers that inspect the runtime dynamic type through a type assertion, reflection, or equivalent behavior; never call the method signature an exported concrete return type.'
         ;;
     esac
-    optimized_prompt="${navigation_prompt_guard}
+      prompt="${navigation_prompt_guard}
 
 ${prompt}"
+      record_case_prompt "${stem}" "${prompt}"
+      return
+    fi
+    verify_case_prompt_snapshot "${stem}"
+    prompt_relative="${case_prompt_file_for_name[${stem}]}"
+    prompt="$(<"${run_dir}/${prompt_relative}")"
     packet="${run_dir}/changed-packet-${case_profile}.json"
     if [[ ! -f "${packet}" ]]; then
       "${safe_git_environment[@]}" \
@@ -2603,7 +3127,7 @@ ${prompt}"
       -C "${worktree}"
       --ephemeral
       --json
-      "${optimized_prompt}"
+      "${prompt}"
     )
   fi
 
@@ -2656,6 +3180,63 @@ run_optimized() {
   done
 }
 
+prepare_case_prompts() {
+  local current_task
+  local prompt
+  local selected_profile
+
+  for current_task in "${selected_tasks[@]}"; do
+    prompt="${rendered_prompts[${current_task}]}"
+    run_case "baseline" "" "${current_task}" "${prompt}" prepare
+    if [[ "${variant}" != "baseline" ]]; then
+      for selected_profile in "${selected_profiles[@]}"; do
+        run_case \
+          "optimized" "${selected_profile}" "${current_task}" "${prompt}" \
+          prepare
+      done
+    fi
+  done
+}
+
+prepare_case_prompts
+build_generation_config
+printf '%s' "${generation_config_json}" \
+  > "${run_dir}/generation-config.json"
+verify_generation_input_snapshots
+if [[ -n "${baseline_from}" ]]; then
+  prepare_baseline_import
+fi
+write_run_manifest
+(
+  cd "${runner_source_root}"
+  "${pinned_host_go_execution_environment[@]}" \
+    go build -o "${run_dir}/repo-view.bin" ./cmd/repo-view
+)
+verify_deep_dependency_snapshot
+(
+  cd "${run_dir}"
+  source_checksum_paths=(repo-view.bin repo-view-source.tar.gz)
+  if "${deep_dependency_snapshot_prepared}"; then
+    source_checksum_paths+=(
+      dependency-source/manifest.json
+      dependency-source/target-go.mod
+      dependency-source/target-go.sum
+      dependency-source/golang.org/x/time@v0.14.0/rate/rate.go
+      dependency-source/golang.org/x/time@v0.14.0/rate/rate_test.go
+    )
+  fi
+  sha256sum -- "${source_checksum_paths[@]}" > source-SHA256SUMS
+)
+
+{
+  date -u '+created_at=%Y-%m-%dT%H:%M:%SZ'
+  isolated_git --version
+  "${pinned_host_go_execution_environment[@]}" go version
+  codex --version
+  jq --version
+  uname -a
+} > "${run_dir}/environment.txt"
+
 for current_task in "${selected_tasks[@]}"; do
   prompt="${rendered_prompts[${current_task}]}"
   if [[ "${order}" == "baseline-first" ]]; then
@@ -2667,6 +3248,7 @@ for current_task in "${selected_tasks[@]}"; do
   fi
 done
 
+verify_deep_dependency_snapshot
 verify_target_checkout
 verify_generation_input_snapshots
 if "${transcript_validation_failed}"; then

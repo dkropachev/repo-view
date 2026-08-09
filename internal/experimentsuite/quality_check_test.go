@@ -12,6 +12,288 @@ import (
 
 const qualityCheckGitFixtureContent = "tracked fixture\n"
 
+func TestQualityCheckRequiresExactUntruncatedSimpleContract(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(script)
+	for _, required := range []string{
+		"repo_view_simple_changed_command_exact",
+		"repo_view_simple_core_inspect_command_exact",
+		"repo_view_simple_consumer_inspect_command_exact",
+		"repo_view_simple_inspect_outputs_untruncated",
+		"$simple_changed_exact",
+		"$simple_core_exact",
+		"$simple_consumer_exact",
+		"$simple_untruncated",
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("quality-check simple pre-gate is missing %q", required)
+		}
+	}
+}
+
+func TestQualityCheckRequiresExactVerifiedDeepCommandSequence(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(script)
+	for _, required := range []string{
+		"repo_view_deep_command_sequence_exact",
+		"repo_view_deep_dependency_awk_exact",
+		"$deep_sequence_exact",
+		"$deep_dependency_exact",
+		"$repo_view_calls == 8",
+		"$find_calls == 2",
+		"$inspect_calls == 4",
+		"$outline_calls == 1",
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("quality-check deep pre-gate is missing %q", required)
+		}
+	}
+}
+
+func TestQualityCheckUsesJQMultilineRegexSemantics(t *testing.T) {
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("quality-check regex test requires jq: %v", err)
+	}
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const multilineCall = `test($pattern; "im")`
+	if got := strings.Count(string(script), multilineCall); got != 2 {
+		t.Fatalf("quality-check must use jq multiline matching for required and prohibited patterns; found %d calls", got)
+	}
+	if strings.Contains(string(script), `test($pattern; "is")`) {
+		t.Fatal("quality-check still uses jq's single-line-anchor mode instead of multiline matching")
+	}
+
+	type criterion struct {
+		ID     string   `json:"id"`
+		AllOf  []string `json:"all_of"`
+		NoneOf []string `json:"none_of"`
+	}
+	var rubric struct {
+		Tasks map[string]struct {
+			Criteria []criterion `json:"criteria"`
+		} `json:"tasks"`
+	}
+	rubricJSON, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-rubric.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(rubricJSON, &rubric); err != nil {
+		t.Fatal(err)
+	}
+	criterionByID := func(id string) criterion {
+		t.Helper()
+		for _, candidate := range rubric.Tasks["deep-explain"].Criteria {
+			if candidate.ID == id {
+				return candidate
+			}
+		}
+		t.Fatalf("deep-explain rubric is missing criterion %q", id)
+		return criterion{}
+	}
+	testCoverage := criterionByID("test_coverage_matrix")
+	productionPaths := criterionByID("production_paths")
+	clockSemantics := criterionByID("clock_semantics")
+	concreteType := criterionByID("concrete_type_risk")
+	if len(testCoverage.AllOf) == 0 || len(productionPaths.NoneOf) == 0 ||
+		len(clockSemantics.NoneOf) == 0 || len(concreteType.AllOf) == 0 {
+		t.Fatal("deep-explain rubric patterns required by this test are empty")
+	}
+
+	jqMatches := func(answer, pattern, flags string) bool {
+		t.Helper()
+		output, err := exec.Command(
+			jqPath, "-n", "--arg", "answer", answer, "--arg", "pattern", pattern,
+			"--arg", "flags", flags, `$answer | test($pattern; $flags)`,
+		).CombinedOutput()
+		if err != nil {
+			t.Fatalf("jq regex evaluation failed: %v\n%s", err, output)
+		}
+		return strings.TrimSpace(string(output)) == "true"
+	}
+
+	tests := []struct {
+		name          string
+		answer        string
+		pattern       string
+		wantMultiline bool
+		wantOldMode   bool
+	}{
+		{
+			name:          "required pattern crosses a Markdown line break",
+			answer:        "no explicit comparison was added\nbetween wall-clock and monotonic test coverage",
+			pattern:       testCoverage.AllOf[len(testCoverage.AllOf)-1],
+			wantMultiline: true,
+			wantOldMode:   false,
+		},
+		{
+			name: "current missing-coverage wording remains accepted",
+			answer: "Missing coverage includes:\n\n" +
+				"- a successful delayed RateLimiterImpl.ReserveN case;\n" +
+				"- direct old-versus-new zero-argument Delay and Cancel " +
+				"behavior with a monotonic-bearing ReserveN timestamp;",
+			pattern:       testCoverage.AllOf[len(testCoverage.AllOf)-1],
+			wantMultiline: true,
+			wantOldMode:   false,
+		},
+		{
+			name: "repository-external compatibility wording remains accepted",
+			answer: "Repository-external compatibility risk is limited to callers " +
+				"that inspect the runtime dynamic type through a type assertion.",
+			pattern:       concreteType.AllOf[len(concreteType.AllOf)-1],
+			wantMultiline: true,
+			wantOldMode:   true,
+		},
+		{
+			name:          "prohibited pattern crosses a Markdown line break",
+			answer:        "selected adapter path\ntherefore does not receive native ReserveN",
+			pattern:       productionPaths.NoneOf[0],
+			wantMultiline: true,
+			wantOldMode:   false,
+		},
+		{
+			name:          "explicit newline bound remains enforced",
+			answer:        "UTC\nwithout stripping monotonic data",
+			pattern:       clockSemantics.NoneOf[len(clockSemantics.NoneOf)-1],
+			wantMultiline: false,
+			wantOldMode:   false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := jqMatches(test.answer, test.pattern, "im"); got != test.wantMultiline {
+				t.Fatalf("jq multiline result = %t, want %t", got, test.wantMultiline)
+			}
+			if got := jqMatches(test.answer, test.pattern, "is"); got != test.wantOldMode {
+				t.Fatalf("jq old-mode result = %t, want %t", got, test.wantOldMode)
+			}
+		})
+	}
+}
+
+func TestQualityCheckJudgePromptAndTaskPromptDigestBinding(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	scriptBytes, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(scriptBytes)
+	for _, required := range []string{
+		"judge_cache_schema=8",
+		"legacy_judge_attestation_schema=2",
+		"Read the shared task prompt at ${prompt_task_prompt}",
+		"baseline's exact user prompt at ${prompt_baseline_user_prompt}",
+		"each candidate's exact user prompt, answer, transcript, and changed packet",
+		"Each case's exact user prompt governs only that case's task adherence",
+		"Never apply an optimized profile's navigation constraints",
+		"never against the baseline's length or exploratory breadth",
+		"deeper call-chain tracing beyond an accurately stated evidence boundary",
+		"unless the shared task prompt or rubric expressly requires a proven consuming chain",
+	} {
+		if !strings.Contains(script, required) {
+			t.Fatalf("quality-check judge prompt is missing %q", required)
+		}
+	}
+
+	functionBody := func(name, next string) string {
+		t.Helper()
+		startMarker := name + "() {"
+		start := strings.Index(script, startMarker)
+		if start < 0 {
+			t.Fatalf("quality-check is missing %s", startMarker)
+		}
+		end := strings.Index(script[start+len(startMarker):], "\n"+next+"() {")
+		if end < 0 {
+			t.Fatalf("quality-check is missing function after %s: %s", name, next)
+		}
+		return script[start : start+len(startMarker)+end]
+	}
+	for _, function := range []struct {
+		name string
+		next string
+	}{
+		{name: "judge_input_digest", next: "legacy_judge_input_digest"},
+		{name: "legacy_judge_input_digest", next: "judge_log_valid"},
+	} {
+		body := functionBody(function.name, function.next)
+		for _, required := range []string{
+			`local task_prompt_file="$9"`,
+			`local baseline_user_prompt_file="${10}"`,
+			`if (( $# % 4 != 0 )); then`,
+			`input_hash="$(file_digest "${task_prompt_file}")"`,
+			`printf 'file-input\0task-prompt\0%s\0' "${input_hash}"`,
+			`input_hash="$(file_digest "${baseline_user_prompt_file}")"`,
+			`printf 'file-input\0baseline-user-prompt\0%s\0' "${input_hash}"`,
+			`input_hash="$(file_digest "${candidate_user_prompt_file}")"`,
+			`printf 'file-input\0candidate-user-prompt-%s\0%s\0'`,
+		} {
+			if !strings.Contains(body, required) {
+				t.Fatalf("%s does not bind the shared task prompt with %q", function.name, required)
+			}
+		}
+	}
+}
+
+func TestQualityCheckLegacyJudgeBindingRequiresExactPromptArtifacts(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "quality-check.sh",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := string(content)
+	for _, required := range []string{
+		"legacy_prompt_bindings_valid=false",
+		`if "${bind_legacy_judges}" &&`,
+		"legacy judge binding requires exact prompt bindings",
+		`if "${manifest_valid}" || "${legacy_prompt_bindings_valid}"; then`,
+		"legacy shared prompt is missing or disagrees with manifest",
+		"legacy case prompt is missing or disagrees with manifest",
+	} {
+		if !strings.Contains(script, required) {
+			t.Errorf("quality-check legacy prompt binding is missing %q", required)
+		}
+	}
+}
+
 func TestQualityCheckJudgeCacheAndArtifactSelection(t *testing.T) {
 	bashPath := requireQualityCheckTools(t)
 	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
@@ -205,6 +487,7 @@ if [ "${1:-}" = "--version" ]; then
 fi
 output=
 checkout=
+prompt=
 ignore_user_config=0
 ignore_rules=0
 hooks_disabled=0
@@ -264,6 +547,7 @@ while [ "$#" -gt 0 ]; do
     model_configured=1
     shift 2
   else
+    prompt="$1"
     shift
   fi
 done
@@ -276,6 +560,10 @@ fi
 if [ "$model_configured" != "0" ]; then
   exit 91
 fi
+if [ -z "$prompt" ]; then
+  exit 92
+fi
+printf '%s\n' "$prompt" > "$fixture_root/judge-prompt"
 case "${CODEX_HOME:-}" in
   */repo-view-quality-codex-home.*) ;;
   *) exit 90 ;;
@@ -427,6 +715,116 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		}
 		return strings.TrimSpace(string(content))
 	}
+	rewriteTaskPrompt := func(content string) {
+		t.Helper()
+		promptContent := []byte(content)
+		if err := os.WriteFile(
+			filepath.Join(runDir, "prompts", "explain.txt"),
+			promptContent,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+
+		manifestPath := filepath.Join(runDir, "manifest.json")
+		manifestContent, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(manifestContent, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		promptDigests, ok := manifest["prompt_digests"].(map[string]any)
+		if !ok {
+			t.Fatal("fixture manifest is missing prompt_digests")
+		}
+		promptDigests["explain"] = sha256Bytes(promptContent)
+
+		configPath := filepath.Join(runDir, "generation-config.json")
+		configContent, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config map[string]any
+		if err := json.Unmarshal(configContent, &config); err != nil {
+			t.Fatal(err)
+		}
+		config["prompt_digests"] = promptDigests
+		configContent, err = json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, configContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		manifest["generation_config_sha256"] = sha256Bytes(configContent)
+		manifestContent, err = json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestPath, manifestContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rewriteCasePrompt := func(caseName, content string) {
+		t.Helper()
+		manifestPath := filepath.Join(runDir, "manifest.json")
+		manifestContent, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var manifest map[string]any
+		if err := json.Unmarshal(manifestContent, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		casePromptFiles, ok := manifest["case_prompt_files"].(map[string]any)
+		if !ok {
+			t.Fatal("fixture manifest is missing case_prompt_files")
+		}
+		relative, ok := casePromptFiles[caseName].(string)
+		if !ok || relative == "" {
+			t.Fatalf("fixture manifest is missing case prompt %q", caseName)
+		}
+		promptContent := []byte(content)
+		if err := os.WriteFile(
+			filepath.Join(runDir, relative), promptContent, 0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		casePromptDigests, ok := manifest["case_prompt_digests"].(map[string]any)
+		if !ok {
+			t.Fatal("fixture manifest is missing case_prompt_digests")
+		}
+		casePromptDigests[caseName] = sha256Bytes(promptContent)
+
+		configPath := filepath.Join(runDir, "generation-config.json")
+		configContent, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var config map[string]any
+		if err := json.Unmarshal(configContent, &config); err != nil {
+			t.Fatal(err)
+		}
+		config["case_prompt_files"] = casePromptFiles
+		config["case_prompt_digests"] = casePromptDigests
+		configContent, err = json.Marshal(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, configContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		manifest["generation_config_sha256"] = sha256Bytes(configContent)
+		manifestContent, err = json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(manifestPath, manifestContent, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	command := qualityCheckCommand("1", "--enforce")
 	output, err := command.CombinedOutput()
@@ -449,6 +847,23 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 	}
 	if got := codexCount(); got != "1" {
 		t.Fatalf("codex executions after initial audit = %s, want 1", got)
+	}
+	renderedJudgePrompt, err := os.ReadFile(filepath.Join(runDir, "judge-prompt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"Read the shared task prompt at ",
+		"/prompts/explain.txt",
+		"/baseline-explain.user-prompt.txt",
+		"/optimized-explain.user-prompt.txt",
+		"baseline's exact user prompt",
+		"Each case's exact user prompt governs only that case's task adherence",
+		"never against the baseline's length or exploratory breadth",
+	} {
+		if !strings.Contains(string(renderedJudgePrompt), required) {
+			t.Fatalf("rendered judge prompt is missing %q:\n%s", required, renderedJudgePrompt)
+		}
 	}
 	assertQualityCheckJudgeAggregate(t, runDir, 1, 1, true)
 	aggregateDigest, err := sha256File(
@@ -473,8 +888,32 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 	if got := codexCount(); got != "1" {
 		t.Fatalf("base-10 repeat count missed the cache: count = %s", got)
 	}
-	runQualityCheck("2")
+	firstPromptDigest, err := os.ReadFile(filepath.Join(
+		runDir, "quality", "judge-explain-1.inputs.sha256",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteTaskPrompt("fixture rendered prompt for explain, revision 2")
+	runQualityCheck("1")
 	if got := codexCount(); got != "2" {
+		t.Fatalf("changed task prompt reused cached judge: count = %s, want 2", got)
+	}
+	secondPromptDigest, err := os.ReadFile(filepath.Join(
+		runDir, "quality", "judge-explain-1.inputs.sha256",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstPromptDigest) == string(secondPromptDigest) {
+		t.Fatal("changed task prompt retained the same judge input digest")
+	}
+	runQualityCheck("1")
+	if got := codexCount(); got != "2" {
+		t.Fatalf("unchanged revised task prompt missed cache: count = %s", got)
+	}
+	runQualityCheck("2")
+	if got := codexCount(); got != "3" {
 		t.Fatalf("second independent repeat reused another slot: count = %s", got)
 	}
 	firstDigest, err := os.ReadFile(filepath.Join(
@@ -519,7 +958,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 			!strings.Contains(string(output), "judge target checkout is dirty") {
 			t.Fatalf("%s target result = %v\n%s", name, err, output)
 		}
-		if got := codexCount(); got != "2" {
+		if got := codexCount(); got != "3" {
 			t.Fatalf("%s target executed cached judge: count = %s", name, got)
 		}
 		clean()
@@ -561,13 +1000,13 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		t, runDir, "optimized-explain", "candidate answer v2",
 	)
 	runQualityCheck("1")
-	if got := codexCount(); got != "3" {
-		t.Fatalf("changed answer reused cached judge: count = %s, want 3", got)
+	if got := codexCount(); got != "4" {
+		t.Fatalf("changed answer reused cached judge: count = %s, want 4", got)
 	}
 	assertQualityCheckJudgeAggregate(t, runDir, 1, 1, true)
 
 	runQualityCheck("0")
-	if got := codexCount(); got != "3" {
+	if got := codexCount(); got != "4" {
 		t.Fatalf("offline aggregation executed codex: count = %s", got)
 	}
 	assertQualityCheckJudgeAggregate(t, runDir, 1, 1, true)
@@ -596,9 +1035,7 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		t.Fatalf("legacy judge gained a current-cache digest: %v", err)
 	}
 
-	writeQualityGenerationEvidence(
-		t, runDir, "optimized-explain", "candidate answer v3",
-	)
+	rewriteTaskPrompt("fixture rendered prompt for explain, revision 3")
 	runQualityCheck("0")
 	assertQualityCheckJudgeAggregate(t, runDir, 0, 0, false)
 	command = qualityCheckCommand("0", "--bind-legacy-judges")
@@ -608,11 +1045,9 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 			string(output),
 			"refusing to overwrite mismatched legacy judge attestation",
 		) {
-		t.Fatalf("legacy binding overwrote stale attestation: %v\n%s", err, output)
+		t.Fatalf("legacy binding ignored changed task prompt: %v\n%s", err, output)
 	}
-	writeQualityGenerationEvidence(
-		t, runDir, "optimized-explain", "candidate answer v2",
-	)
+	rewriteTaskPrompt("fixture rendered prompt for explain, revision 2")
 	runQualityCheck("0", "--bind-legacy-judges")
 	assertQualityCheckJudgeAggregate(t, runDir, 2, 2, false)
 
@@ -628,8 +1063,8 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		!strings.Contains(string(output), "judge output remained invalid") {
 		t.Fatalf("failed judge process was accepted: %v\n%s", err, output)
 	}
-	if got := codexCount(); got != "6" {
-		t.Fatalf("failed judge attempt count = %s, want 6", got)
+	if got := codexCount(); got != "7" {
+		t.Fatalf("failed judge attempt count = %s, want 7", got)
 	}
 	if _, err := os.Stat(filepath.Join(
 		runDir,
@@ -642,10 +1077,49 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"cached_input
 		t.Fatal(err)
 	}
 	runQualityCheck("1")
-	if got := codexCount(); got != "7" {
-		t.Fatalf("successful retry count = %s, want 7", got)
+	if got := codexCount(); got != "8" {
+		t.Fatalf("successful retry count = %s, want 8", got)
 	}
 	assertQualityCheckJudgeAggregate(t, runDir, 1, 1, true)
+
+	casePromptDigest, err := os.ReadFile(filepath.Join(
+		runDir, "quality", "judge-explain-1.inputs.sha256",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewriteCasePrompt("baseline-explain", "exact baseline prompt revision 2")
+	runQualityCheck("1")
+	if got := codexCount(); got != "9" {
+		t.Fatalf("changed baseline prompt reused cached judge: count = %s, want 9", got)
+	}
+	baselinePromptDigest, err := os.ReadFile(filepath.Join(
+		runDir, "quality", "judge-explain-1.inputs.sha256",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(casePromptDigest) == string(baselinePromptDigest) {
+		t.Fatal("changed baseline prompt retained the same judge input digest")
+	}
+	rewriteCasePrompt("optimized-explain", "exact candidate prompt revision 2")
+	runQualityCheck("1")
+	if got := codexCount(); got != "10" {
+		t.Fatalf("changed candidate prompt reused cached judge: count = %s, want 10", got)
+	}
+	candidatePromptDigest, err := os.ReadFile(filepath.Join(
+		runDir, "quality", "judge-explain-1.inputs.sha256",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(baselinePromptDigest) == string(candidatePromptDigest) {
+		t.Fatal("changed candidate prompt retained the same judge input digest")
+	}
+	runQualityCheck("1")
+	if got := codexCount(); got != "10" {
+		t.Fatalf("unchanged exact case prompts missed cache: count = %s", got)
+	}
 
 	aggregateNames := append(
 		append([]string(nil), qualityAggregateFiles...),
@@ -1261,6 +1735,112 @@ func TestQualityCheckRejectsVacuousAndMismatchedEvidence(t *testing.T) {
 		)
 		return runDir
 	}
+	t.Run("baseline-only provenance may feed optimized run", func(t *testing.T) {
+		runDir := newStrictRun(t)
+		manifestPath := filepath.Join(runDir, "manifest.json")
+		var manifest map[string]any
+		manifestContent, err := os.ReadFile(manifestPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(manifestContent, &manifest); err != nil {
+			t.Fatal(err)
+		}
+		manifest["variant_selection"] = "optimized"
+		manifest["baseline_from"] = "baseline-only"
+		writeJSON(t, manifestPath, manifest)
+
+		configPath := filepath.Join(runDir, "generation-config.json")
+		configContent, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var sourceConfig map[string]any
+		if err := json.Unmarshal(configContent, &sourceConfig); err != nil {
+			t.Fatal(err)
+		}
+		sourceCaseFiles := map[string]any{}
+		sourceCaseDigests := map[string]any{}
+		for name, relative := range manifest["case_prompt_files"].(map[string]any) {
+			if strings.HasPrefix(name, "baseline-") {
+				sourceCaseFiles[name] = relative
+			}
+		}
+		for name, digest := range manifest["case_prompt_digests"].(map[string]any) {
+			if strings.HasPrefix(name, "baseline-") {
+				sourceCaseDigests[name] = digest
+			}
+		}
+		sourceConfig["case_prompt_files"] = sourceCaseFiles
+		sourceConfig["case_prompt_digests"] = sourceCaseDigests
+		sourceConfig["mechanical_navigation_semantics_enforced"] = false
+		sourceConfigContent, err := json.Marshal(sourceConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sourceManifest := make(map[string]any, len(manifest))
+		for key, value := range manifest {
+			sourceManifest[key] = value
+		}
+		sourceManifest["variant_selection"] = "baseline"
+		sourceManifest["baseline_from"] = nil
+		sourceManifest["case_prompt_files"] = sourceCaseFiles
+		sourceManifest["case_prompt_digests"] = sourceCaseDigests
+		sourceManifest["mechanical_navigation_semantics_enforced"] = false
+		sourceManifest["generation_config_sha256"] =
+			sha256Bytes(sourceConfigContent)
+		writeJSON(
+			t,
+			filepath.Join(runDir, "baseline-source-manifest.json"),
+			sourceManifest,
+		)
+		if err := os.WriteFile(
+			filepath.Join(runDir, "baseline-source-generation-config.json"),
+			sourceConfigContent,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		copyEvidenceFile := func(source, destination string) {
+			t.Helper()
+			content, readErr := os.ReadFile(source)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(destination, content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		copyEvidenceFile(
+			filepath.Join(runDir, "profiles-snapshot.tsv"),
+			filepath.Join(runDir, "baseline-source-profiles-snapshot.tsv"),
+		)
+		copyEvidenceFile(
+			filepath.Join(runDir, "prompts", "explain.txt"),
+			filepath.Join(runDir, "baseline-source-prompts", "explain.txt"),
+		)
+		copyEvidenceFile(
+			filepath.Join(runDir, "baseline-explain.user-prompt.txt"),
+			filepath.Join(
+				runDir,
+				"baseline-source-baseline-explain.user-prompt.txt",
+			),
+		)
+
+		command := exec.Command(
+			bashPath, qualityCheck, runDir, "--skip-analyze", "--enforce",
+		)
+		output, err := command.CombinedOutput()
+		if err == nil || !strings.Contains(string(output), "# Quality Confirmation") {
+			t.Fatalf("optimized import result = %v\n%s", err, output)
+		}
+		if strings.Contains(string(output), "imported baseline") {
+			t.Fatalf("baseline-only import rejected structurally:\n%s", output)
+		}
+	})
 	t.Run("missing generation config", func(t *testing.T) {
 		runDir := newStrictRun(t)
 		if err := os.Remove(filepath.Join(runDir, "generation-config.json")); err != nil {
@@ -1432,6 +2012,22 @@ func TestQualityCheckRejectsVacuousAndMismatchedEvidence(t *testing.T) {
 		if err := os.WriteFile(
 			filepath.Join(runDir, "baseline-source-prompts", "explain.txt"),
 			prompt,
+			0o644,
+		); err != nil {
+			t.Fatal(err)
+		}
+		baselineUserPrompt, err := os.ReadFile(filepath.Join(
+			runDir, "baseline-explain.user-prompt.txt",
+		))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(
+			filepath.Join(
+				runDir,
+				"baseline-source-baseline-explain.user-prompt.txt",
+			),
+			baselineUserPrompt,
 			0o644,
 		); err != nil {
 			t.Fatal(err)
@@ -1748,6 +2344,7 @@ func qualityCheckCandidate(judge map[string]any) map[string]any {
 func qualityCheckMetricCase(
 	name, task, variant, profile string,
 ) map[string]any {
+	simpleContractValid := variant != "optimized" || strings.HasPrefix(task, "deep-")
 	return map[string]any{
 		"name":                                             name,
 		"task":                                             task,
@@ -1790,6 +2387,12 @@ func qualityCheckMetricCase(
 		"repo_view_first_invocation_changed":               false,
 		"repo_view_navigation_semantics_valid":             variant == "baseline",
 		"mechanical_navigation_semantics_enforced":         variant == "optimized",
+		"repo_view_simple_changed_command_exact":           simpleContractValid,
+		"repo_view_simple_core_inspect_command_exact":      simpleContractValid,
+		"repo_view_simple_consumer_inspect_command_exact":  simpleContractValid,
+		"repo_view_simple_inspect_outputs_untruncated":     simpleContractValid,
+		"repo_view_deep_command_sequence_exact":            true,
+		"repo_view_deep_dependency_awk_exact":              true,
 		"repo_view_navigation_semantic_violation_commands": []any{},
 		"repo_view_budget_tamper_command_count":            0,
 		"repo_view_budget_tamper_commands":                 []any{},
