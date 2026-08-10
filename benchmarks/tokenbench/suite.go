@@ -167,6 +167,12 @@ func LoadSuite(path string) (LoadedSuite, error) {
 	if bytes.IndexByte(prompt, 0) >= 0 {
 		return LoadedSuite{}, errors.New("prompt must not contain NUL")
 	}
+	if err := ValidateTreatmentNeutrality(
+		suite.DeveloperInstructions,
+		prompt,
+	); err != nil {
+		return LoadedSuite{}, err
+	}
 
 	return LoadedSuite{
 		suite:        suite,
@@ -219,6 +225,10 @@ func requireSuiteFields(raw []byte) error {
 
 // Validate enforces fields that must be known before pair resolution.
 func (suite Suite) Validate() error {
+	developerNeutralityErr := validateNeutralText(
+		"developer_instructions",
+		suite.DeveloperInstructions,
+	)
 	switch {
 	case suite.SchemaVersion != SuiteSchemaVersion:
 		return fmt.Errorf(
@@ -289,6 +299,8 @@ func (suite Suite) Validate() error {
 		)
 	case strings.ContainsRune(suite.DeveloperInstructions, '\x00'):
 		return errors.New("developer_instructions must not contain NUL")
+	case developerNeutralityErr != nil:
+		return developerNeutralityErr
 	case suite.SourceRoot == "":
 		return errors.New("source_root is required")
 	case len(suite.SourceRoot) > maximumSuitePathBytes:
