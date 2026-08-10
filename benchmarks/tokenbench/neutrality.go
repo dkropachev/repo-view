@@ -31,8 +31,10 @@ func ValidateTreatmentNeutrality(
 func validateNeutralText(label, value string) error {
 	tokens := neutralityTokens(value)
 	for index, token := range tokens {
+		compact := strings.NewReplacer("_", "", "-", "").Replace(token)
 		switch {
-		case token == "repo_view" || token == "repo-view" || token == "mcp":
+		case compact == "repoview" || compact == "mcp" ||
+			compact == "modelcontextprotocol":
 			return fmt.Errorf(
 				"%s names the benchmark treatment %q",
 				label,
@@ -42,6 +44,9 @@ func validateNeutralText(label, value string) error {
 			return fmt.Errorf("%s names the repo_view treatment", label)
 		case index+2 < len(tokens) && token == "model" &&
 			tokens[index+1] == "context" && tokens[index+2] == "protocol":
+			return fmt.Errorf("%s names the MCP treatment", label)
+		case index+2 < len(tokens) && token == "m" &&
+			tokens[index+1] == "c" && tokens[index+2] == "p":
 			return fmt.Errorf("%s names the MCP treatment", label)
 		}
 	}
