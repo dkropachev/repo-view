@@ -277,6 +277,13 @@ func (scanner *csharpScanner) Scan(
 	}
 	braceAdvanced := 0
 	if csharpValidExternalSymbol(validSymbols, csharpInterpolationOpenBrace) {
+		matched, handled := scanner.scanRawInterpolationBraceRun(
+			&cursor,
+			csharpValidExternalSymbol(validSymbols, csharpInterpolationStringContent),
+		)
+		if handled {
+			return matched
+		}
 		matched, advanced := scanner.scanInterpolationOpenBrace(&cursor)
 		if matched {
 			return true
@@ -285,6 +292,12 @@ func (scanner *csharpScanner) Scan(
 	}
 	if cursor.exhausted {
 		return false
+	}
+	if csharpValidExternalSymbol(validSymbols, csharpInterpolationStringContent) {
+		matched, handled := scanner.scanRawInterpolationClosingContentRun(&cursor)
+		if handled {
+			return matched
+		}
 	}
 	if csharpValidExternalSymbol(validSymbols, csharpInterpolationCloseBrace) &&
 		scanner.scanInterpolationCloseBrace(&cursor) {
@@ -492,10 +505,127 @@ func (scanner *csharpScanner) scanInterpolationOpenBrace(
 	return true, braceCount
 }
 
+// scanRawInterpolationBraceRun disambiguates a raw interpolated string's
+// opening-brace run before the generic scanner consumes its delimiter prefix.
+// For N dollar signs, fewer than N braces are content, exactly N start an
+// interpolation, N+1 through 2N-1 contain a literal prefix followed by an
+// interpolation, and 2N or more are invalid. For the mixed case, emit one
+// literal brace and leave the lexer marked there; repeated scans peel the
+// complete literal prefix until exactly N braces remain.
+func (scanner *csharpScanner) scanRawInterpolationBraceRun(
+	cursor *csharpScanCursor,
+	contentValid bool,
+) (matched, handled bool) {
+	current := scanner.currentInterpolation()
+	if current == nil || !current.raw() || current.openBraceCount != 0 ||
+		cursor.atEnd() || cursor.lexer.Lookahead != '{' {
+		return false, false
+	}
+	delimiter := int(current.dollarCount)
+	if delimiter == 0 {
+		return false, true
+	}
+
+	runLimit := delimiter * 2
+	braceCount := 0
+	for cursor.lexer.Lookahead == '{' && braceCount < runLimit {
+		if !cursor.advance(false) {
+			return false, true
+		}
+		braceCount++
+		if braceCount == 1 {
+			// Preserve the one-brace content token used when a valid run has a
+			// literal prefix. Later MarkEnd calls replace this for shorter and
+			// exact-delimiter runs.
+			cursor.lexer.MarkEnd()
+		}
+	}
+
+	switch {
+	case braceCount < delimiter:
+		if !contentValid {
+			return false, true
+		}
+		cursor.lexer.MarkEnd()
+		cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationStringContent)
+		return true, true
+	case braceCount == delimiter:
+		cursor.lexer.MarkEnd()
+		current.openBraceCount = uint8(braceCount)
+		cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationOpenBrace)
+		return true, true
+	case braceCount < runLimit:
+		if !contentValid {
+			return false, true
+		}
+		cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationStringContent)
+		return true, true
+	default:
+		return false, true
+	}
+}
+
+// scanRawInterpolationClosingContentRun handles closing braces while the raw
+// string is outside an interpolation. Only runs shorter than the dollar-sign
+// delimiter are literal content; a run at least as long as the delimiter is
+// an unmatched interpolation terminator and must remain a parse error.
+func (scanner *csharpScanner) scanRawInterpolationClosingContentRun(
+	cursor *csharpScanCursor,
+) (matched, handled bool) {
+	current := scanner.currentInterpolation()
+	if current == nil || !current.raw() || current.openBraceCount != 0 ||
+		cursor.atEnd() || cursor.lexer.Lookahead != '}' {
+		return false, false
+	}
+	delimiter := int(current.dollarCount)
+	if delimiter == 0 {
+		return false, true
+	}
+
+	braceCount := 0
+	for cursor.lexer.Lookahead == '}' && braceCount < delimiter {
+		if !cursor.advance(false) {
+			return false, true
+		}
+		braceCount++
+	}
+	if braceCount == delimiter {
+		return false, true
+	}
+	cursor.lexer.MarkEnd()
+	cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationStringContent)
+	return true, true
+}
+
 func (scanner *csharpScanner) scanInterpolationCloseBrace(cursor *csharpScanCursor) bool {
 	current := scanner.currentInterpolation()
 	if current == nil || !cursor.skipWhitespace(false) {
 		return false
+	}
+	if current.raw() {
+		delimiter := int(current.openBraceCount)
+		if delimiter == 0 {
+			return false
+		}
+		runLimit := delimiter * 2
+		braceCount := 0
+		for cursor.lexer.Lookahead == '}' && braceCount < runLimit {
+			if !cursor.advance(false) {
+				return false
+			}
+			braceCount++
+			if braceCount == delimiter {
+				// Preserve the valid interpolation endpoint while probing far
+				// enough to reject the raw-string-invalid 2N closing run.
+				cursor.lexer.MarkEnd()
+			}
+		}
+		if braceCount < delimiter || braceCount == runLimit {
+			return false
+		}
+		current.openBraceCount = 0
+		cursor.lexer.ResultSymbol = treesitter.Symbol(csharpInterpolationCloseBrace)
+		return true
 	}
 	braceCount := 0
 	for cursor.lexer.Lookahead == '}' {
@@ -573,6 +703,10 @@ func (scanner *csharpScanner) scanInterpolationStringContent(
 					(braceCount == 0 || cursor.lexer.Lookahead != '{') {
 					return didAdvance
 				}
+			}
+			if current.openBraceCount == 0 && cursor.lexer.Lookahead == '}' {
+				cursor.lexer.MarkEnd()
+				return didAdvance
 			}
 
 		case current.verbatim():
