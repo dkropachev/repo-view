@@ -32,9 +32,9 @@ const (
 // MCP tool declaration. InputSchema is freshly allocated on every call to
 // ToolSpecifications so callers cannot mutate the server's contract.
 type ToolSpecification struct {
+	InputSchema map[string]any
 	Name        string
 	Description string
-	InputSchema map[string]any
 }
 
 // ToolSpecifications returns the exact four tool descriptions and input
@@ -51,12 +51,17 @@ func ToolSpecifications() []ToolSpecification {
 var fullObjectID = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
 
 // Config binds all repository authority at process startup. Tool callers
-// cannot replace the root, base commit, or Git executable.
+// cannot replace the root, revisions, Git executable, or changed-state cache.
+// Exactly one changed-state provider must be configured: the pinned Git pair,
+// or CachePath/CacheSHA256/Head for cache-only execution.
 type Config struct {
 	Root                string
 	Base                string
+	Head                string
 	GitExecutable       string
 	GitExecutableSHA256 string
+	CachePath           string
+	CacheSHA256         string
 }
 
 // New creates a server with exactly the changed, find, inspect, and outline
@@ -76,14 +81,39 @@ func New(config Config) (*mcp.Server, error) {
 	if !fullObjectID.MatchString(config.Base) {
 		return nil, errors.New("MCP base must be a canonical full Git object ID")
 	}
-	if !validSHA256(config.GitExecutableSHA256) {
-		return nil, errors.New("MCP Git executable SHA-256 is invalid")
+	gitMode := config.GitExecutable != "" || config.GitExecutableSHA256 != ""
+	cacheMode := config.Head != "" || config.CachePath != "" || config.CacheSHA256 != ""
+	if gitMode == cacheMode {
+		return nil, errors.New("MCP requires exactly one Git or changed-state cache provider")
 	}
-	view, err := repoview.NewWithGit(
-		config.Root,
-		config.GitExecutable,
-		config.GitExecutableSHA256,
-	)
+	var view *repoview.RepoView
+	if cacheMode {
+		if !fullObjectID.MatchString(config.Head) {
+			return nil, errors.New("MCP head must be a canonical full Git object ID")
+		}
+		if !filepath.IsAbs(config.CachePath) || filepath.Clean(config.CachePath) != config.CachePath {
+			return nil, errors.New("MCP changed-state cache path must be absolute and canonical")
+		}
+		if !validSHA256(config.CacheSHA256) {
+			return nil, errors.New("MCP changed-state cache SHA-256 is invalid")
+		}
+		view, err = repoview.NewWithChangedStateCache(
+			config.Root,
+			config.CachePath,
+			config.CacheSHA256,
+			config.Base,
+			config.Head,
+		)
+	} else {
+		if !validSHA256(config.GitExecutableSHA256) {
+			return nil, errors.New("MCP Git executable SHA-256 is invalid")
+		}
+		view, err = repoview.NewWithGit(
+			config.Root,
+			config.GitExecutable,
+			config.GitExecutableSHA256,
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("construct MCP repository view: %w", err)
 	}

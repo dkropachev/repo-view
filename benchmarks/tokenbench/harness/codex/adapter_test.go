@@ -108,6 +108,7 @@ func TestBuildPreservesCommonInputAndPinsArgv(t *testing.T) {
 		`openai_base_url="http://127.0.0.1:43119/v1"`,
 		`debug.config_lockfile.export_dir="/tokenbench/config-lock"`,
 		`debug.config_lockfile.save_fields_resolved_from_model_catalog=true`,
+		`shell_environment_policy.set={PATH="/snapshot/toolbox"}`,
 	} {
 		if !containsPair(process.Argv, "-c", assignment) {
 			t.Fatalf("common argv omitted runtime assignment %q", assignment)
@@ -116,7 +117,10 @@ func TestBuildPreservesCommonInputAndPinsArgv(t *testing.T) {
 	if containsJoined(process.Argv, OfflineLocalProxyCapability) {
 		t.Fatal("offline local capability leaked from the exact environment into argv")
 	}
-	if got := digestJSON(t, process.Argv); got != "ec4775c01efc1da61f3b64439a23713cf0352c60eb42965d23444a2ee4b607c1" {
+	if process.Environment["PATH"] != adapter.layout.ToolboxRoot {
+		t.Fatal("built process PATH differs from the immutable toolbox root")
+	}
+	if got := digestJSON(t, process.Argv); got != "c658fbb45963664a63f02772e350c0e22c841eb2aa41d4eeb0e98cbfa27bc643" {
 		t.Fatalf("Codex v0.144.0 argv snapshot changed: got %s", got)
 	}
 
@@ -196,11 +200,23 @@ func TestCanonicalProcessValidationRejectsSharedHiddenOverrides(t *testing.T) {
 		{"config override", func(value *harness.ProcessSpec) {
 			value.Argv = append(value.Argv, "-c", `model="gpt-5.6"`)
 		}},
+		{"toolbox config override", func(value *harness.ProcessSpec) {
+			for index := range value.Argv {
+				if value.Argv[index] == `shell_environment_policy.set={PATH="/snapshot/toolbox"}` {
+					value.Argv[index] = `shell_environment_policy.set={PATH="/ambient/bin"}`
+					return
+				}
+			}
+		}},
+		{"PATH environment override", func(value *harness.ProcessSpec) {
+			value.Environment["PATH"] = "/ambient/bin"
+		}},
 		{"extra environment", func(value *harness.ProcessSpec) {
 			value.Environment["HIDDEN"] = "1"
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			mutated := process
 			mutated.Argv = append([]string(nil), process.Argv...)
 			mutated.Environment = cloneMap(process.Environment)
@@ -235,14 +251,30 @@ func TestResolvePinsIdentityAndSnapshotAllowlist(t *testing.T) {
 		first.Model != request.Model || first.ModelRevision != request.ExpectedModelRevision {
 		t.Fatalf("unexpected resolved identity: %+v", first)
 	}
-	if first.AdapterControlConfigSHA256 != "9d34d917f3e16f4b5fdc7c0ab85305ea90b842d135a9f56512e80aa68846d5e9" {
+	if first.AdapterControlConfigSHA256 != "8f06f9ca4654864b328ff6f28cf0453a6845b311a33a017470a296cd3dfb2d36" {
 		t.Fatalf("Codex control manifest snapshot changed: got %s", first.AdapterControlConfigSHA256)
 	}
-	if first.AdapterConfigSHA256 != "b8a0d03bdd0ff693b7aebc2131db426d0cd21a4195717b390f138ebef32c69c6" {
+	if first.AdapterConfigSHA256 != "4abc48e987ab8f041960711d0b880befe0e1e620956152f8cfb9b638e430b8a0" {
 		t.Fatalf("Codex resolved configuration snapshot changed: got %s", first.AdapterConfigSHA256)
 	}
 	if err := harness.ValidateIdentity(first); err != nil {
 		t.Fatal(err)
+	}
+	changedLayout := runtimeLayoutFixture()
+	changedLayout.ToolboxRoot = "/other-snapshot/toolbox"
+	changedAdapter, err := New(changedLayout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedRequest := request
+	changedRequest.Environment = changedLayout.Environment()
+	changedIdentity, err := changedAdapter.Resolve(context.Background(), changedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedIdentity.AdapterControlConfigSHA256 == first.AdapterControlConfigSHA256 ||
+		changedIdentity.AdapterConfigSHA256 == first.AdapterConfigSHA256 {
+		t.Fatal("toolbox root was absent from adapter identities")
 	}
 	wantSnapshots := []Snapshot{
 		{"gpt-5.4", "gpt-5.4@gpt-5.4-2026-03-05", "gpt-5.4-2026-03-05"},
@@ -281,6 +313,7 @@ func TestCommonEnvironmentIsExactAndDefensive(t *testing.T) {
 		"CODEX_HOME":        "/tokenbench/codex-home",
 		"CODEX_SQLITE_HOME": "/tokenbench/codex-home/sqlite",
 		"TMPDIR":            "/tokenbench/tmp",
+		"PATH":              "/snapshot/toolbox",
 		"CODEX_API_KEY":     OfflineLocalProxyCapability,
 	}
 	if !reflect.DeepEqual(first, want) {
@@ -300,6 +333,21 @@ func TestCommonEnvironmentIsExactAndDefensive(t *testing.T) {
 	}
 }
 
+func TestCommonEnvironmentIgnoresAmbientPATH(t *testing.T) {
+	t.Setenv("PATH", "/ambient/attacker-bin")
+	layout := runtimeLayoutFixture()
+	adapter := adapterFixture(t)
+	request := resolveRequest(invocationFixture(t))
+	request.Environment = map[string]string{}
+	environment, err := adapter.CommonEnvironment(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if environment["PATH"] != layout.ToolboxRoot || environment["PATH"] == os.Getenv("PATH") {
+		t.Fatalf("common PATH = %q, ambient PATH = %q", environment["PATH"], os.Getenv("PATH"))
+	}
+}
+
 func TestNewRejectsInvalidRuntimeLayout(t *testing.T) {
 	t.Parallel()
 	base := runtimeLayoutFixture()
@@ -316,11 +364,16 @@ func TestNewRejectsInvalidRuntimeLayout(t *testing.T) {
 		{"query", func(value *RuntimeLayout) { value.ProxyURL += "?secret=value" }},
 		{"relative home", func(value *RuntimeLayout) { value.Home = "home" }},
 		{"unclean Codex home", func(value *RuntimeLayout) { value.CodexHome = "/tokenbench/x/../codex-home" }},
+		{"missing toolbox", func(value *RuntimeLayout) { value.ToolboxRoot = "" }},
+		{"unclean toolbox", func(value *RuntimeLayout) { value.ToolboxRoot = "/snapshot/x/../toolbox" }},
+		{"toolbox PATH list", func(value *RuntimeLayout) { value.ToolboxRoot = "/snapshot/toolbox:/usr/bin" }},
 		{"equal directories", func(value *RuntimeLayout) { value.Temp = value.Home }},
 		{"nested directories", func(value *RuntimeLayout) { value.ConfigLock = filepath.Join(value.Home, "lock") }},
+		{"toolbox overlap", func(value *RuntimeLayout) { value.ToolboxRoot = filepath.Join(value.Home, "toolbox") }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			layout := base
 			test.mutate(&layout)
 			if _, err := New(layout); err == nil {
@@ -336,16 +389,20 @@ func TestNewRejectsInvalidRuntimeLayout(t *testing.T) {
 	if err != nil || got != base {
 		t.Fatalf("RuntimeLayout() = %+v, %v; want %+v", got, err, base)
 	}
-	if commitment, err := base.Commitment(); err != nil || commitment != "761ee3da3e03aa159be90e6fa754f177548a0614f5b7e61bcceba3ea9e8f9942" {
+	if commitment, err := base.Commitment(); err != nil || commitment != "f4d5b9b7630c4f3db0662154672af392706e9fd64e14bbf6211f2bf3e37d8490" {
 		t.Fatalf("RuntimeLayout commitment = %q, %v", commitment, err)
 	}
 	if !reflect.DeepEqual(base.Environment(), runtimeEnvironment(base)) {
 		t.Fatal("RuntimeLayout.Environment diverged from adapter environment")
 	}
+	if base.Environment()["PATH"] != base.ToolboxRoot {
+		t.Fatal("RuntimeLayout environment PATH differs from ToolboxRoot")
+	}
 	wantAssignments := []string{
 		`openai_base_url="http://127.0.0.1:43119/v1"`,
 		`debug.config_lockfile.export_dir="/tokenbench/config-lock"`,
 		`debug.config_lockfile.save_fields_resolved_from_model_catalog=true`,
+		`shell_environment_policy.set={PATH="/snapshot/toolbox"}`,
 	}
 	if got := base.ConfigAssignments(); !reflect.DeepEqual(got, wantAssignments) {
 		t.Fatalf("RuntimeLayout.ConfigAssignments = %q, want %q", got, wantAssignments)
@@ -377,6 +434,7 @@ func TestResolveRejectsUnpinnedOrInvalidInputs(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			request := base
 			request.Environment = cloneMap(base.Environment)
 			test.mutate(&request)
@@ -409,6 +467,7 @@ func TestResolvePinsReasoningEffortPerSnapshot(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.model+"/"+test.effort, func(t *testing.T) {
+			t.Parallel()
 			request := base
 			request.Environment = cloneMap(base.Environment)
 			request.Model = test.model
@@ -438,6 +497,7 @@ func TestBuildRejectsInvalidCommonInvocation(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			invocation := cloneInvocation(t, base)
 			test.mutate(&invocation)
 			if _, err := adapterFixture(t).Build(context.Background(), invocation); err == nil {
@@ -469,6 +529,7 @@ func TestMCPArgumentsRejectsNoncanonicalRegistration(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			server := cloneMCPServer(base)
 			test.mutate(&server)
 			if _, err := adapterFixture(t).MCPArguments(context.Background(), server); err == nil {
@@ -594,6 +655,7 @@ func runtimeLayoutFixture() RuntimeLayout {
 		CodexHome:            "/tokenbench/codex-home",
 		Temp:                 "/tokenbench/tmp",
 		ConfigLock:           "/tokenbench/config-lock",
+		ToolboxRoot:          "/snapshot/toolbox",
 		LocalProxyCapability: OfflineLocalProxyCapability,
 	}
 }

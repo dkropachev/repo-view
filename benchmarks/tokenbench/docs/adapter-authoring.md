@@ -1,22 +1,16 @@
 # Harness adapter authoring
 
-> Status: current adapter and external-process protocol contract. The interface, fake adapter, conformance helper, process bridge, and wrapper-level process parity are implemented. Target-process execution, live MCP handshake/read-only tool-surface verification, raw capture, and Codex are planned.
+Tokenbench separates harness translation from experiment ownership. An adapter
+resolves one common semantic request, renders one common process, encodes one
+already-approved MCP registration, and decodes bounded raw execution. It does
+not create arms, choose order, launch processes, retry, judge answers, or publish
+evidence.
 
-## Treatment ownership
+The fake adapter, shared conformance helpers, external-process bridge, and
+generic runner make a new harness easy to prototype without weakening the
+publishable Codex path. New adapters are non-publishable by default.
 
-An adapter resolves and renders common harness state. It does not construct or independently render experimental arms.
-
-Current central code owns the only semantic arm difference:
-
-- baseline has an empty, non-nil MCP registration array;
-- candidate has one array element, the code-owned `repo_view` registration;
-- removing candidate element zero makes the semantic invocations deeply equal.
-
-`Pair.Build` calls `Build` exactly once with the MCP-free common invocation. It clones the returned `ProcessSpec` and appends only the nonempty argv suffix returned by `MCPArguments(candidate.MCPServers[0])`. The adapter never receives candidate prompt, rubric, or arm label through `MCPArguments`.
-
-No adapter may append a navigator prompt, add a tool-use policy, choose an arm-only wrapper, alter `PATH` or another environment value, change permissions, or inject a second candidate-only setting.
-
-## Current Go interface
+## Interface
 
 ```go
 type Adapter interface {
@@ -26,192 +20,211 @@ type Adapter interface {
     Build(context.Context, Invocation) (ProcessSpec, error)
     Decode(context.Context, RawExecution) (Observation, error)
 }
+
+type CommonEnvironmentAdapter interface {
+    CommonEnvironment(context.Context, ResolveRequest) (map[string]string, error)
+}
 ```
 
-The methods are deterministic for equal input.
+Equal inputs must produce deeply equal outputs.
 
-- `Kind` returns the suite-selectable adapter kind.
-- `Resolve` binds common requested state to a concrete adapter, harness, model, immutable model revision, reasoning effort, and decoder identity.
-- `MCPArguments` serializes only one already-approved registration into a nonempty harness-native argv suffix.
-- `Build` renders only the common invocation and must reject nonempty `MCPServers`.
-- `Decode` normalizes raw execution supplied by a future runner; it does not execute the target process.
+- `Kind` is the suite-facing harness name.
+- `CommonEnvironment`, when implemented, derives the complete child environment
+  from common inputs. It is called during preparation and immediately before
+  rendering; results must match. Without it, the canonical environment is `{}`.
+- `Resolve` binds common requested settings to exact adapter, harness, model,
+  immutable model revision, reasoning, and decoder identities.
+- `Build` receives only a common invocation with an empty MCP list and returns
+  one complete `ProcessSpec`.
+- `MCPArguments` receives only the approved `MCPServer` and returns a nonempty
+  harness-native argv suffix.
+- `Decode` maps bounded `RawExecution` to one harness-neutral `Observation`; it
+  performs no launch or network call.
 
-## Current preparation and build sequence
+`ResolveRequest` has no arm, order, repetition, prompt answer key, token count,
+or quality result. It binds the complete common environment, harness executable
+and digest, requested/expected model identity, reasoning, permissions,
+developer instructions, working directory, source base/head/tree, standalone
+Git metadata, verifier Git path/digest, runner path/digest, and timeout.
 
-1. `PrepareSuite` verifies the harness executable and full source/Git snapshot, resolves and hashes the canonical tokenbench executable, checks adapter kind, and calls `Resolve` with an arm-free `ResolveRequest`.
-2. The returned `Identity` must match requested harness digest, model, expected immutable model revision, and reasoning effort. `PreparedSuite` privately retains that identity, source snapshot, tokenbench executable identity, and exact adapter capability.
-3. `ResolvePair` clones one common invocation, adds the sole candidate registration centrally, and proves semantic parity.
-4. `Pair.Build` recomputes parity, calls `Resolve` again with the same common request, and requires exact `Identity` equality.
-5. `Pair.Build` calls `Build` once, verifies the returned executable, prompt stdin bytes, complete environment, working directory, and timeout against common input, then centrally clones the process and appends `MCPArguments`.
-6. After all adapter control calls, `Pair.Build` reverifies the tokenbench, harness, and `repo_view` executables, source tree, standalone `.git` metadata, and pinned Git executable before returning `ProcessPair`.
+## Sole-delta construction
 
-The current `plan` CLI calls `Pair.Plan(ctx)`. That method calls the bound pair's `Build` exactly once, stores the returned process pair and its digest in `ResolvedPlan`, and does not launch either target process.
+Central tokenbench code, never the adapter, performs:
 
-A serialized or decoded plan is audit/transport data only. It contains rendered process specifications but has no adapter capability; `DecodePlan` cannot grant build or execution authority.
+```text
+common     = resolve one authored suite
+baseline   = deep clone common; mcp_servers = []
+candidate  = deep clone common; mcp_servers = [approved repo_view]
+proof      = remove candidate registration and require deep equality
 
-## Resolve request
+process    = adapter.Build(common-with-no-MCP)       // once
+suffix     = adapter.MCPArguments(approved server)   // treatment only
+baseline_p = deep clone process
+candidate_p= deep clone process; argv += suffix
+```
 
-`ResolveRequest` contains no arm field. It binds:
+`Build` must reject a nonempty MCP list. `MCPArguments` must not receive task
+prompt, developer instructions, rubric, order, or arm label. Do not implement a
+second candidate rendering branch or inject a prompt, `PATH`, wrapper, feature,
+permission, timeout, environment value, or executable alongside the suffix.
 
-- the complete common environment;
-- harness executable path and SHA-256;
-- requested model and exact expected `<model>@<immutable-revision>`;
-- reasoning effort, permission profile, and common developer instructions;
-- working directory;
-- source head, base, and tracked-tree digest;
-- suite-authored canonical Git executable path/digest and verified standalone `.git` metadata digest;
-- canonical tokenbench executable path and SHA-256;
-- timeout.
-
-The current suite path passes an empty environment map and no opaque authored harness arguments. Future harness-specific configuration belongs behind a pinned adapter identity, never in an arm override.
-
-## Identity and digest ownership
-
-Every valid `Identity` includes:
-
-- `kind` and `adapter_version`;
-- `adapter_executable_sha256`;
-- `adapter_control_config_sha256`;
-- `adapter_config_sha256`;
-- harness `executable_sha256` and `executable_version`;
-- resolved `model` and immutable `model_revision`;
-- `reasoning_effort`;
-- `decoder_schema`.
-
-For an in-process adapter, the adapter supplies all three adapter commitments. For the external process bridge:
-
-- the wrapper computes and overwrites `adapter_executable_sha256` from the exact external adapter executable bytes;
-- the wrapper computes and overwrites `adapter_control_config_sha256` from its private launch/control configuration;
-- the child supplies `adapter_config_sha256`, which must commit its effective child-side adapter configuration;
-- the child supplies the remaining identity fields, which the wrapper and tokenbench validators check.
-
-The suite's requested model and expected revision are separate inputs. Resolved `Identity.Model` must equal the requested model, and `Identity.ModelRevision` must equal the exact expected `<model>@<immutable-revision>`. `Pair.Build` repeats resolution and requires the whole identity to be unchanged.
-
-## Process requirements
-
-`Build` receives the already-approved common `Invocation` with zero MCP registrations. It must return a `ProcessSpec` whose:
-
-- `argv[0]` is the approved absolute harness executable;
-- `stdin` is the exact prompt byte sequence;
-- environment is complete and exactly equal to the common environment, with no ambient inheritance;
-- directory is the approved absolute working directory;
-- timeout is positive and exactly equal to the common timeout.
-
-Every string must be valid UTF-8 and contain no NUL. `MCPArguments` must return at least one valid argument. Central code appends that suffix without changing any common argv element.
-
-The current gate proves wrapper-level process equality. A future live adapter/runner must additionally expose and verify child-effective defaults, routing, feature state, native tool inventory, and other model-visible configuration.
-
-## External adapter protocol v1
-
-The current bridge protocol is exactly `tokenbench.external-adapter/v1`.
-
-### Process transport
-
-For every method call, the bridge:
-
-1. reverifies the external adapter before and after the call as the same non-hard-linked executable regular file and digest;
-2. launches the absolute executable directly, without a shell;
-3. sets cwd to the directory containing that executable;
-4. sets the child environment to exactly `process.Config.Environment`, without inheriting the parent environment;
-5. writes one compact JSON request value to stdin;
-6. requires exit code zero and zero bytes on stderr;
-7. reads one UTF-8 JSON response value from stdout.
-
-The default limit is 8 MiB independently for stdout and stderr; configuration may choose another positive limit. The configured control-process timeout applies to every call. A fixed 250 ms `WaitDelay` bounds post-exit waits for inherited stdout/stderr pipes. On Unix, the bridge places the adapter in its own process group and kills that group on cancellation and after the call so descendants cannot escape control; other platforms retain direct-child cancellation plus `WaitDelay`. Output overflow, timeout, nonzero exit, any stderr, invalid UTF-8, duplicate keys, unknown fields, protocol drift, a descendant holding pipes open, or a second/trailing JSON value fails the call.
-
-Every request carries `"protocol_version":"tokenbench.external-adapter/v1"`, an `"operation"`, and exactly one corresponding operation payload. Every response carries the protocol version but no operation field. After decoding, a successful response must have exactly one nonempty/non-null operation result and an empty/omitted `error`:
-
-| Operation | Request payload | Required decoded success result |
-| --- | --- | --- |
-| `resolve` | `"resolve": ResolveRequest` | non-null `"identity": Identity` |
-| `mcp_arguments` | `"mcp_server": MCPServer` | nonempty `"arguments": [string, ...]` |
-| `build` | `"invocation": Invocation` | non-null `"process": ProcessSpec` |
-| `decode` | `"execution": RawExecution` | non-null `"observation": Observation` |
-
-A failure response carries the exact protocol version and a nonempty `"error"`; every success payload must decode as empty. The bridge validates that exclusive error shape before returning the child error. Because shape validation happens after JSON decoding, absent or `null` pointer payloads and absent, `null`, or empty `arguments` all count as empty; producers should omit them canonically.
-
-The nested field names are the JSON tags on the current harness types. Go `[]byte` fields are standard JSON base64 strings:
-
-- `Invocation.prompt`;
-- `ProcessSpec.stdin`;
-- `RawExecution.stdout`;
-- `RawExecution.stderr`.
-
-Non-nil byte slices use padded RFC 4648 standard base64 as produced by Go `encoding/json`; a nil slice encodes as JSON `null`. Adapters must not use arrays of byte integers or raw embedded text.
-
-### External process control commitment
-
-The canonical control record pins:
-
-- absolute adapter command and its executable SHA-256;
-- adapter kind;
-- fixed adapter argv;
-- complete adapter control environment;
-- bridge and wire-protocol versions;
-- per-call timeout;
-- output limit;
-- the bridge's fixed process `WaitDelay`.
-
-The bridge canonicalizes those values and commits them as `adapter_control_config_sha256`. If `CommitmentKey` is present, the commitment is HMAC-SHA-256; a supplied key must be at least 32 bytes. Any nonempty control environment requires such a secret key, preventing secret environment values from being recoverable by dictionary attack against an unkeyed digest. With an empty environment and no key, the bridge uses ordinary SHA-256.
-
-The key is control-plane secret material, not evidence. Changing the command, executable bytes, argv, kind, environment, bridge/protocol version, timeout, output limit, or committed wait delay changes the commitment. The current CLI constructs its external adapter with an empty control environment and deterministic 30-second bridge timeout.
-
-### Per-operation rules
-
-For `resolve`, the child returns its child-owned effective configuration digest and identity. The bridge overwrites wrapper-owned executable/control commitments, validates all identity fields, and requires returned kind to match configured kind.
-
-For `build`, the bridge rejects nonempty MCP registrations before invoking the child and verifies that invocation wrapper commitments match this bridge instance. The child returns the common `ProcessSpec`; central tokenbench code performs the final common-input equality check.
-
-For `mcp_arguments`, the child sees only `MCPServer` and returns a nonempty suffix. It cannot receive task prompt, developer instructions, quality rubric, or arm metadata through this operation.
-
-For `decode`, the child receives exact raw stdout/stderr bytes, exit code, and timeout flag and returns `Observation`. Token counters must be nonnegative and cached input cannot exceed input.
-
-## Registration and read-only status
-
-Current central code creates exactly:
+Current live central code constructs this exact registration from the immutable
+snapshot:
 
 ```text
 name: repo_view
-command: pinned absolute repo-view executable
-arguments: ["mcp", "--root", working_directory, "--base", source_base_revision]
+command: <immutable tools/repo-view>
+arguments:
+  mcp --root <immutable source/worktree>
+      --base <full base object id>
+      --head <full head object id>
+      --changed-state-cache <immutable canonical cache>
+      --changed-state-cache-sha256 <exact digest>
 environment: {}
 required: true
 read_only: true
 ```
 
-The executable and full registration are digest-bound, and no shared MCP registration is permitted. The current `read_only` value is a declaration, not live proof. A future runner must verify the actual MCP handshake, server identity, declared tool schemas, and absence of mutating operations before publishing a conformant result.
+The cache-only repo-view backend cannot fall back to Git. Baseline inherits the
+same pinned repo-view image at the same fixed descriptor and has the same
+filesystem/execute policy, but has no MCP configuration that references it.
 
-## Conformance tests
+## Identity ownership
 
-The current shared conformance helpers repeat equal-input `Resolve`, `Build`, `Decode`, and `MCPArguments` calls to check determinism. They also check complete request-to-invocation binding, identity validity, process validity, zero-versus-one registration cardinality, one common rendering path, and nonempty MCP encoding. Those repeated conformance calls do not change the runtime contract: one `Pair.Build` calls `Build` and `MCPArguments` once each. The fake and external process adapters exercise that contract without live credentials.
+Every `Identity` includes:
 
-Adapter tests should additionally cover:
+- adapter version and exact adapter executable SHA-256;
+- adapter control-config and effective adapter-config SHA-256;
+- harness executable digest/version;
+- resolved model and immutable model revision;
+- reasoning effort and decoder schema.
 
-- requested versus resolved model/revision mismatch;
-- adapter executable, wrapper control, and child effective-config digest drift;
-- source/Git identity or working-directory drift;
-- candidate passed incorrectly to `Build`;
-- empty, invalid, or nondeterministic MCP suffix;
-- external protocol version/shape/UTF-8/duplicate/trailing/stderr failures;
-- deterministic external-adapter cwd and complete environment;
-- timeout, descendant-held-pipe, and Unix process-group cleanup behavior;
-- keyed control-environment changes and executable mutation;
-- raw usage errors and interrupted output.
+Resolved model must equal the requested model, and revision must exactly equal
+the authored `<model>@<immutable-revision>`. Tokenbench calls `Resolve` again
+before rendering and requires the whole identity to remain equal.
 
-## Codex and other live harnesses
+For an in-process adapter, the implementation owns all adapter commitments. For
+the external bridge:
 
-Codex is the first planned live/model-backed adapter. It must implement the same interface and sole-delta construction, expose exact resolved model revision and effective configuration, use native MCP registration without prompt or environment assistance, and preserve raw events for later capture.
+- the wrapper overwrites `adapter_executable_sha256` from the opened adapter
+  program;
+- the wrapper overwrites `adapter_control_config_sha256` from its exact command,
+  argv, environment, protocol, timeout, limits, and wait policy;
+- the child supplies `adapter_config_sha256` for its effective internal config
+  and supplies the remaining semantic identity fields.
 
-A live harness is unsupported if it requires a candidate-only prompt, wrapper, `PATH`, environment variable, permission, hidden default, or any rendering path beyond the central MCP argv suffix.
+When a control environment is nonempty, the wrapper requires a private key of
+at least 32 bytes and uses HMAC-SHA-256 so evidence cannot recover low-entropy
+secret values by dictionary attack. The key and values are never evidence.
 
-## Review checklist
+## Process and decode requirements
 
-- `ResolveRequest` is arm-free and complete.
-- Requested and resolved immutable model identities match.
-- Adapter executable, control, and child configuration commitments are distinct and stable.
-- `Build` accepts only common state and is called once.
-- `MCPArguments` accepts only the approved registration and returns a nonempty suffix.
-- Central clone-plus-append is the only process delta.
-- Source, `.git`, Git executable, tokenbench executable, harness, MCP executable, and adapter identity are reverified.
-- Serialized plans remain audit-only.
-- Live read-only MCP verification is not claimed before implementation.
+`Build` returns a complete process whose:
+
+- `argv[0]` is the exact approved absolute harness executable;
+- stdin is the exact prompt bytes;
+- environment is non-nil, complete, and exactly common (no ambient inheritance);
+- cwd is the exact common immutable source path;
+- timeout exactly matches the invocation;
+- strings are valid UTF-8 and contain no NUL.
+
+Central code checks all fields before appending the candidate suffix and
+reverifies source, Git, runner, harness, repo-view, artifact bundle, and snapshot
+authority around adapter calls.
+
+`Decode` must reject malformed/ambiguous raw state. Counters are nonnegative,
+cached input cannot exceed input, tool-call count is bounded, and a completed
+observation requires a bounded final answer. Missing data is not zero. A decoder
+may receive sanitized artifacts such as provider wire trace and effective config
+and should cross-check them rather than trusting stdout alone.
+
+## External adapter protocol v1
+
+Use `harness/process` when the adapter should be an independently versioned
+executable. The protocol is `tokenbench.external-adapter/v1`.
+
+For every method call the bridge:
+
+1. opens and hashes an absolute, executable, single-link regular file;
+2. launches it directly without a shell, in its containing directory;
+3. supplies exactly the configured control environment, never ambient values;
+4. writes one compact JSON request to stdin;
+5. requires exit zero, empty stderr, bounded valid UTF-8 stdout, and exactly one
+   strict JSON response;
+6. kills the process group/descendants on timeout or after output completion;
+7. reopens and rehashes the executable after the call.
+
+Default stdout/stderr limits are 8 MiB each. Timeout and a fixed 250 ms inherited
+pipe wait are committed control inputs. Overflow, invalid UTF-8, duplicate or
+unknown fields, trailing JSON, nonzero exit, any stderr, descendant-held pipes,
+timeout, or executable drift fails the call.
+
+Every request has:
+
+```json
+{"protocol_version":"tokenbench.external-adapter/v1","operation":"<name>","<payload>":{}}
+```
+
+Every response has the protocol version and either exactly one success payload
+or a nonempty `error`. It has no `operation` field.
+
+| Operation | Request member | Success member |
+| --- | --- | --- |
+| `resolve` | `resolve: ResolveRequest` | `identity: Identity` |
+| `mcp_arguments` | `mcp_server: MCPServer` | `arguments: [string, ...]` |
+| `build` | `invocation: Invocation` | `process: ProcessSpec` |
+| `decode` | `execution: RawExecution` | `observation: Observation` |
+
+Go `[]byte` fields (`Invocation.prompt`, `ProcessSpec.stdin`, stdout, stderr,
+artifact data) use standard padded base64 as emitted by `encoding/json`; nil is
+JSON `null`. Do not encode byte arrays as integer arrays or embedded raw text.
+
+The bridge validates exclusive response shape after strict decoding. A failure
+response must leave every success payload empty. A success response must leave
+`error` empty. Empty/null arguments are not a valid MCP suffix.
+
+## Testing a new adapter
+
+Start with `harness/conformance`. Add deterministic fixtures for:
+
+- repeated equal-input `CommonEnvironment`, `Resolve`, `Build`,
+  `MCPArguments`, and `Decode` calls;
+- complete request-to-identity/invocation binding;
+- requested/resolved model and revision mismatch;
+- adapter executable, control config, and effective config drift;
+- common source/Git/runner/cwd/environment/timeout drift;
+- rejection of candidate/nonempty MCP input to `Build`;
+- empty, invalid, nondeterministic, or extra-setting MCP suffixes;
+- raw success, ordinary failure, partial output, usage ambiguity, and bounds;
+- external protocol version/shape/UTF-8/duplicate/trailing/stderr/timeout and
+  descendant cleanup failures;
+- executable replacement/hard-link races and keyed control-environment changes.
+
+`runner.New` can exercise a generic adapter/lifecycle and optional containment,
+but its results are intentionally non-publishable. This is the correct path for
+development and private comparisons.
+
+## Promoting another harness to publishable
+
+Adding an adapter implementation is not enough. A separate reviewed change must
+add all of the following as code-owned, unforgeable policy:
+
+- exact harness executable/version and model-revision allowlists;
+- a production constructor distinguishable from test/offline constructors by
+  private concrete state;
+- one fresh common runtime layout and exact environment/argv/config policy;
+- a local credential-isolating capture boundary and pinned provider route;
+- effective child config capture and normalization proving the sole delta;
+- exact native and MCP tool declaration/handshake checks;
+- raw provider/event capture and a pinned decoder that cross-check each other;
+- full descendant containment, kernel policy identity, resource accounting, and
+  fail-closed cleanup;
+- publication validation that recognizes only that exact implementation;
+- ordinary, race, adversarial, and mandatory privileged tests plus current
+  documentation.
+
+Do not expose a `Publishable() bool` knob, registration hook, caller interface,
+or serialized certificate that lets extension code grant itself authority. If a
+harness cannot expose its effective configuration and tool/provider state, it
+remains useful for non-publishable experiments but is unsupported for conformant
+tokenbench evidence.

@@ -41,26 +41,27 @@ func TestValidateAndPlanRejectNonCodexAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	suite := tokenbench.Suite{
-		SchemaVersion:         tokenbench.SuiteSchemaVersion,
-		ID:                    "cli-fixture",
-		PromptFile:            "prompt.md",
-		HarnessKind:           "fake",
-		HarnessExecutable:     harnessPath,
-		HarnessSHA256:         tokenbench.SHA256([]byte("harness")),
-		GitExecutable:         gitExecutable,
-		GitExecutableSHA256:   gitSHA256,
-		Model:                 "fixed-model",
-		ExpectedModelRevision: "fixed-model@2026-08-01",
-		ReasoningEffort:       "medium",
-		PermissionProfile:     "read-only",
-		DeveloperInstructions: "common instructions",
-		SourceRoot:            sourceRoot,
-		SourceRevision:        head,
-		SourceBaseRevision:    base,
-		SourceTreeSHA256:      treeDigest,
-		TimeoutMillis:         30_000,
-		Repetitions:           10,
-		Seed:                  42,
+		SchemaVersion:          tokenbench.SuiteSchemaVersion,
+		ID:                     "cli-fixture",
+		PromptFile:             "prompt.md",
+		HarnessKind:            "fake",
+		HarnessExecutable:      harnessPath,
+		HarnessSHA256:          tokenbench.SHA256([]byte("harness")),
+		ArtifactManifestSHA256: tokenbench.SHA256([]byte("artifact-manifest")),
+		GitExecutable:          gitExecutable,
+		GitExecutableSHA256:    gitSHA256,
+		Model:                  "fixed-model",
+		ExpectedModelRevision:  "fixed-model@2026-08-01",
+		ReasoningEffort:        "medium",
+		PermissionProfile:      "read-only",
+		DeveloperInstructions:  "common instructions",
+		SourceRoot:             sourceRoot,
+		SourceRevision:         head,
+		SourceBaseRevision:     base,
+		SourceTreeSHA256:       treeDigest,
+		TimeoutMillis:          30_000,
+		Repetitions:            10,
+		Seed:                   42,
 	}
 	suiteRaw, err := json.Marshal(suite)
 	if err != nil {
@@ -121,7 +122,8 @@ func TestCLIRejectsSerializedPlanAndExternalAdapterAuthority(t *testing.T) {
 		{
 			name: "run requires repetition",
 			args: []string{
-				"run", "--suite", "/suite.json", "--repo-view-mcp", "/repo-view",
+				"run", "--suite", "/suite.json", "--artifact-bundle", "/artifacts",
+				"--snapshot-root", "/snapshot",
 				"--state-root", "/state", "--cas", "/cas", "--root-out", "/root.json",
 				"--credential-fd", "3", "--signing-key-file", "/signing-key",
 			},
@@ -131,6 +133,11 @@ func TestCLIRejectsSerializedPlanAndExternalAdapterAuthority(t *testing.T) {
 			name: "serialized plan",
 			args: []string{"run", "--plan", "/untrusted-plan.json"},
 			want: "flag provided but not defined: -plan",
+		},
+		{
+			name: "legacy repo-view path cannot bypass bundle",
+			args: []string{"run", "--repo-view-mcp", "/repo-view"},
+			want: "flag provided but not defined: -repo-view-mcp",
 		},
 		{
 			name: "external adapter",
@@ -155,6 +162,57 @@ func TestCLIRejectsSerializedPlanAndExternalAdapterAuthority(t *testing.T) {
 			var stdout, stderr bytes.Buffer
 			if exit := run(context.Background(), test.args, &stdout, &stderr); exit == 0 || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("exit=%d stderr=%q, want %q", exit, stderr.String(), test.want)
+			}
+		})
+	}
+}
+
+func TestRunPathsKeepMutableOutputsSnapshotBundleAndSourceDisjoint(t *testing.T) {
+	directory := t.TempDir()
+	valid := runPaths{
+		StateRoot:          filepath.Join(directory, "state"),
+		SnapshotRoot:       filepath.Join(directory, "snapshot"),
+		ArtifactBundleRoot: filepath.Join(directory, "artifacts"),
+		CAS:                filepath.Join(directory, "cas"),
+		RootOutput:         filepath.Join(directory, "root.json"),
+		SigningKeyFile:     filepath.Join(directory, "signing.key"),
+		TrustPolicy:        filepath.Join(directory, "trust.json"),
+		SourceRoot:         filepath.Join(directory, "source"),
+	}
+	resolved, err := resolveRunPaths(valid)
+	if err != nil || !reflect.DeepEqual(resolved, valid) {
+		t.Fatalf("valid run paths = %#v, %v", resolved, err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		mutate func(*runPaths)
+	}{
+		{
+			name: "snapshot below writable state",
+			mutate: func(paths *runPaths) {
+				paths.SnapshotRoot = filepath.Join(paths.StateRoot, "snapshot")
+			},
+		},
+		{
+			name: "artifact bundle below source",
+			mutate: func(paths *runPaths) {
+				paths.ArtifactBundleRoot = filepath.Join(paths.SourceRoot, "artifacts")
+			},
+		},
+		{
+			name: "CAS contains signing key",
+			mutate: func(paths *runPaths) {
+				paths.SigningKeyFile = filepath.Join(paths.CAS, "key")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			forged := valid
+			test.mutate(&forged)
+			if _, err := resolveRunPaths(forged); err == nil ||
+				!strings.Contains(err.Error(), "disjoint") {
+				t.Fatalf("overlapping paths accepted: %v", err)
 			}
 		})
 	}
@@ -220,7 +278,7 @@ func TestSigningKeySourceIsPinnedPrivateAndCanonical(t *testing.T) {
 	if err := os.WriteFile(newlinePath, secretText, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadEd25519Signer(newlinePath); err != errSigningKeySource ||
+	if _, err := loadEd25519Signer(newlinePath); !errors.Is(err, errSigningKeySource) ||
 		strings.Contains(err.Error(), string(secretText)) {
 		t.Fatalf("noncanonical key error leaked or varied: %v", err)
 	}
@@ -232,7 +290,7 @@ func TestSigningKeySourceIsPinnedPrivateAndCanonical(t *testing.T) {
 	if err := os.Chmod(modePath, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadEd25519Signer(modePath); err != errSigningKeySource {
+	if _, err := loadEd25519Signer(modePath); !errors.Is(err, errSigningKeySource) {
 		t.Fatalf("group-readable key was accepted: %v", err)
 	}
 
@@ -244,7 +302,7 @@ func TestSigningKeySourceIsPinnedPrivateAndCanonical(t *testing.T) {
 	if err := os.Link(hardlinkSource, hardlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadEd25519Signer(hardlinkSource); err != errSigningKeySource {
+	if _, err := loadEd25519Signer(hardlinkSource); !errors.Is(err, errSigningKeySource) {
 		t.Fatalf("multiply-linked key was accepted: %v", err)
 	}
 
@@ -252,7 +310,7 @@ func TestSigningKeySourceIsPinnedPrivateAndCanonical(t *testing.T) {
 	if err := os.Symlink(validPath, symlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadEd25519Signer(symlink); err != errSigningKeySource {
+	if _, err := loadEd25519Signer(symlink); !errors.Is(err, errSigningKeySource) {
 		t.Fatalf("symlink key was accepted: %v", err)
 	}
 }
@@ -277,7 +335,7 @@ func TestCredentialErrorsNeverContainCredentialBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = loadCredentialFD(descriptor)
-	if err != errCredentialSource || strings.Contains(err.Error(), secret) ||
+	if !errors.Is(err, errCredentialSource) || strings.Contains(err.Error(), secret) ||
 		strings.Contains(err.Error(), "SUPER-SECRET") {
 		t.Fatalf("credential error leaked or varied: %v", err)
 	}
@@ -376,7 +434,7 @@ func TestCredentialPipesAreReadOnlyPrivateAndDeadlineBounded(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := loadCredentialFDWithin(descriptor, 25*time.Millisecond); err != errCredentialSource {
+		if _, err := loadCredentialFDWithin(descriptor, 25*time.Millisecond); !errors.Is(err, errCredentialSource) {
 			t.Fatalf("world-readable FIFO error = %v", err)
 		}
 		if !descriptorIsClosed(descriptor) {
@@ -394,7 +452,7 @@ func TestCredentialPipesAreReadOnlyPrivateAndDeadlineBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 		started := time.Now()
-		if _, err := loadCredentialFDWithin(descriptor, time.Second); err != errCredentialSource {
+		if _, err := loadCredentialFDWithin(descriptor, time.Second); !errors.Is(err, errCredentialSource) {
 			t.Fatalf("read-write FIFO error = %v", err)
 		}
 		if time.Since(started) > 250*time.Millisecond {
@@ -413,7 +471,7 @@ func TestCredentialPipesAreReadOnlyPrivateAndDeadlineBounded(t *testing.T) {
 		defer writer.Close()
 		descriptor := duplicateCredentialDescriptor(t, reader)
 		started := time.Now()
-		if _, err := loadCredentialFDWithin(descriptor, 40*time.Millisecond); err != errCredentialSource {
+		if _, err := loadCredentialFDWithin(descriptor, 40*time.Millisecond); !errors.Is(err, errCredentialSource) {
 			t.Fatalf("nonterminating pipe error = %v", err)
 		}
 		elapsed := time.Since(started)
@@ -450,7 +508,11 @@ func TestCredentialCloseNeverTargetsAReusedDescriptorNumber(t *testing.T) {
 	if err := unix.Dup3(int(unrelated.Fd()), descriptor, unix.O_CLOEXEC); err != nil {
 		t.Fatal(err)
 	}
-	defer unix.Close(descriptor)
+	defer func() {
+		if err := unix.Close(descriptor); err != nil {
+			t.Errorf("close unrelated reused descriptor: %v", err)
+		}
+	}()
 	if _, err := unix.FcntlInt(uintptr(descriptor), unix.F_GETFD, 0); err != nil {
 		t.Fatalf("unrelated descriptor occupying the consumed number was closed: %v", err)
 	}
@@ -492,7 +554,8 @@ func descriptorIsClosed(descriptor int) bool {
 func TestCleanupBoundaryPrecedesSigningAndAttemptsBothClosers(t *testing.T) {
 	executorFailure := errors.New("executor cleanup failed")
 	lifecycleFailure := errors.New("lifecycle cleanup failed")
-	order := make([]string, 0, 2)
+	snapshotFailure := errors.New("snapshot cleanup failed")
+	order := make([]string, 0, 3)
 	err := closeExecutionBoundary(
 		func(context.Context) error {
 			order = append(order, "executor")
@@ -502,9 +565,14 @@ func TestCleanupBoundaryPrecedesSigningAndAttemptsBothClosers(t *testing.T) {
 			order = append(order, "lifecycle")
 			return lifecycleFailure
 		},
+		func() error {
+			order = append(order, "snapshot")
+			return snapshotFailure
+		},
 	)
-	if !reflect.DeepEqual(order, []string{"executor", "lifecycle"}) ||
-		!errors.Is(err, executorFailure) || !errors.Is(err, lifecycleFailure) {
+	if !reflect.DeepEqual(order, []string{"executor", "lifecycle", "snapshot"}) ||
+		!errors.Is(err, executorFailure) || !errors.Is(err, lifecycleFailure) ||
+		!errors.Is(err, snapshotFailure) {
 		t.Fatalf("cleanup order/errors = %q, %v", order, err)
 	}
 

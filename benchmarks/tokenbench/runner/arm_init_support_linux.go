@@ -23,11 +23,11 @@ import (
 )
 
 type pinnedCommonExecutable struct {
+	info       os.FileInfo
 	file       *os.File
 	launchFile *os.File
 	path       string
 	digest     string
-	info       os.FileInfo
 }
 
 func (pinned *pinnedCommonExecutable) close() error {
@@ -55,7 +55,7 @@ func prepareArmInit(requireStatic bool) (*pinnedCommonExecutable, int, error) {
 		return nil, 0, err
 	}
 	if abi < minimumLandlockABI {
-		return nil, 0, fmt.Errorf("Landlock ABI %d is below required ABI %d", abi, minimumLandlockABI)
+		return nil, 0, fmt.Errorf("landlock ABI %d is below required ABI %d", abi, minimumLandlockABI)
 	}
 	if err := unix.Prctl(unix.PR_SET_DUMPABLE, 0, 0, 0, 0); err != nil {
 		return nil, 0, fmt.Errorf("disable runner dumpability: %w", err)
@@ -282,6 +282,7 @@ func executableLinkCount(info os.FileInfo) uint64 {
 	if !ok || stat == nil {
 		return 0
 	}
+	//nolint:unconvert // syscall.Stat_t.Nlink is uint32 on arm64 and uint64 on amd64.
 	return uint64(stat.Nlink)
 }
 
@@ -304,15 +305,15 @@ func normalizeWritablePaths(paths []string) ([]string, error) {
 	sort.Strings(result)
 	for index, path := range result {
 		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
-			return nil, fmt.Errorf("Landlock writable path %q is not absolute, canonical, and non-root", path)
+			return nil, fmt.Errorf("landlock writable path %q is not absolute, canonical, and non-root", path)
 		}
 		if path == cgroupMountPath || strings.HasPrefix(path, cgroupMountPath+"/") ||
 			path == "/proc" || strings.HasPrefix(path, "/proc/") ||
 			path == "/sys" || strings.HasPrefix(path, "/sys/") {
-			return nil, fmt.Errorf("Landlock writable path %q overlaps a protected kernel filesystem", path)
+			return nil, fmt.Errorf("landlock writable path %q overlaps a protected kernel filesystem", path)
 		}
 		if index != 0 && result[index-1] == path {
-			return nil, fmt.Errorf("Landlock writable path %q is duplicated", path)
+			return nil, fmt.Errorf("landlock writable path %q is duplicated", path)
 		}
 	}
 	return result, nil
@@ -324,7 +325,7 @@ func normalizePolicyPaths(paths []string, kind string) ([]string, error) {
 	for index, path := range result {
 		if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path || path == "/" {
 			return nil, fmt.Errorf(
-				"Landlock %s path %q is not absolute, canonical, and non-root",
+				"landlock %s path %q is not absolute, canonical, and non-root",
 				kind,
 				path,
 			)
@@ -333,10 +334,10 @@ func normalizePolicyPaths(paths []string, kind string) ([]string, error) {
 			path == "/proc" || strings.HasPrefix(path, "/proc/") ||
 			path == "/sys" || strings.HasPrefix(path, "/sys/") ||
 			path == "/dev" || strings.HasPrefix(path, "/dev/") {
-			return nil, fmt.Errorf("Landlock %s path %q overlaps a protected host filesystem", kind, path)
+			return nil, fmt.Errorf("landlock %s path %q overlaps a protected host filesystem", kind, path)
 		}
 		if index != 0 && result[index-1] == path {
-			return nil, fmt.Errorf("Landlock %s path %q is duplicated", kind, path)
+			return nil, fmt.Errorf("landlock %s path %q is duplicated", kind, path)
 		}
 	}
 	return result, nil
@@ -355,7 +356,7 @@ func openWritableRoots(paths []string) ([]*os.File, error) {
 	for _, path := range paths {
 		before, err := os.Lstat(path)
 		if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
-			return nil, fmt.Errorf("Landlock writable root %q is not a real directory", path)
+			return nil, fmt.Errorf("landlock writable root %q is not a real directory", path)
 		}
 		descriptor, err := unix.Open(path, unix.O_PATH|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
@@ -365,7 +366,7 @@ func openWritableRoots(paths []string) ([]*os.File, error) {
 		opened, err := root.Stat()
 		if err != nil || !os.SameFile(before, opened) {
 			_ = root.Close()
-			return nil, fmt.Errorf("Landlock writable root %q changed while opening", path)
+			return nil, fmt.Errorf("landlock writable root %q changed while opening", path)
 		}
 		roots = append(roots, root)
 	}
@@ -387,10 +388,10 @@ func openPolicyRoots(paths []string, executable, requireVerity bool) ([]*os.File
 		before, err := os.Lstat(path)
 		if err != nil || before.Mode()&os.ModeSymlink != 0 ||
 			!before.Mode().IsRegular() && !before.IsDir() {
-			return nil, fmt.Errorf("Landlock input root %q is not a real file or directory", path)
+			return nil, fmt.Errorf("landlock input root %q is not a real file or directory", path)
 		}
 		if executable && (!before.Mode().IsRegular() || before.Mode().Perm()&0o111 == 0) {
-			return nil, fmt.Errorf("Landlock executable %q is not an executable regular file", path)
+			return nil, fmt.Errorf("landlock executable %q is not an executable regular file", path)
 		}
 		flags := unix.O_PATH | unix.O_NOFOLLOW | unix.O_CLOEXEC
 		if before.IsDir() {
@@ -405,7 +406,7 @@ func openPolicyRoots(paths []string, executable, requireVerity bool) ([]*os.File
 		if err != nil || !os.SameFile(before, opened) || opened.Mode() != before.Mode() ||
 			opened.Size() != before.Size() || !opened.ModTime().Equal(before.ModTime()) {
 			_ = root.Close()
-			return nil, fmt.Errorf("Landlock input root %q changed while opening", path)
+			return nil, fmt.Errorf("landlock input root %q changed while opening", path)
 		}
 		if requireVerity {
 			if err := requireFSVerity(root); err != nil {
@@ -437,6 +438,7 @@ func probeArmInitBoundary(
 	manager *cgroupManager,
 	armInit, common, devNull *os.File,
 	timeout time.Duration,
+	usePIDNamespace bool,
 ) error {
 	arm, err := manager.newArm()
 	if err != nil {
@@ -458,25 +460,35 @@ func probeArmInitBoundary(
 			[]uint16{},
 		),
 	}
+	if usePIDNamespace {
+		command.Env = append(
+			command.Env,
+			armInitPIDNamespaceEnvironment+"="+armInitVersion,
+		)
+	}
 	command.Dir = "/"
 	var stdout, stderr bytes.Buffer
 	command.Stdout = &stdout
 	command.Stderr = &stderr
-	if err := configureContainedCommand(command, arm); err != nil {
+	if err := configureContainedCommand(command, arm, usePIDNamespace); err != nil {
 		_ = arm.killAndRemove(timeout)
 		return err
 	}
 	runErr := command.Run()
 	cleanupErr := arm.killAndRemove(timeout)
-	want := armInitVersion + ":atomic-cgroup+landlock+no-new-privs+target-dumpable+seccomp\n"
+	want := armInitVersion + ":atomic-cgroup+landlock+no-new-privs+target-dumpable+seccomp+no-caps\n"
+	if usePIDNamespace {
+		want = armInitVersion + ":atomic-cgroup+landlock+no-new-privs+target-dumpable+seccomp+no-caps+pid-namespace\n"
+	}
 	if runErr != nil || cleanupErr != nil || stdout.String() != want || stderr.Len() != 0 {
-		return fmt.Errorf(
+		detail := fmt.Sprintf(
 			"arm-init startup probe failed: run=%v cleanup=%v stdout=%q stderr=%q",
 			runErr,
 			cleanupErr,
 			stdout.String(),
 			stderr.String(),
 		)
+		return errors.Join(errors.New(detail), runErr, cleanupErr)
 	}
 	return nil
 }

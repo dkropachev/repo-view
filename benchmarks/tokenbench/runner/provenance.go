@@ -1,9 +1,12 @@
 package runner
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 )
+
+const ConformancePolicySchemaVersion = "tokenbench.runner-conformance-policy/v2"
 
 type constructionMode string
 
@@ -12,7 +15,7 @@ const (
 	conformantCodexConstruction constructionMode = "builtin-codex-v0.144.0"
 
 	codexLifecyclePackage         = "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner/codex"
-	codexIdentityPrefix           = "tokenbench.codex-runner/codex-cli-v0.144.0/v1/sha256:"
+	codexIdentityPrefix           = "tokenbench.codex-runner/codex-cli-v0.144.0/v2/sha256:"
 	productionRoutePolicy         = "openai-api/v1:https://api.openai.com/v1"
 	productionNetworkPolicyPrefix = "go-system-roots/v1;proxy=disabled;ambient-overrides=forbidden/sha256:"
 )
@@ -21,11 +24,25 @@ const (
 // code-owned conformant path with the exact built-in Codex lifecycle. Generic
 // New construction is never publishable, even when handed that lifecycle.
 func (executor *Executor) Publishable() bool {
-	return executor != nil &&
+	if executor == nil {
+		return false
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	return executor.publishableLocked()
+}
+
+// publishableLocked reports publication eligibility at one executor-state
+// instant. The caller must hold executor.mu so Close cannot detach the policy
+// descriptors between this check and ConformancePolicy's defensive copy.
+func (executor *Executor) publishableLocked() bool {
+	return !executor.closed &&
 		executor.construction == conformantCodexConstruction &&
 		executor.containment != nil &&
 		executor.containment.requireBounded &&
 		executor.fullFilesystemPolicy &&
+		executor.exactNetworkBoundary &&
+		executor.pidNamespace &&
 		executor.lifecycleIdentity != "" &&
 		exactCodexLifecycle(executor.lifecycle) &&
 		executor.lifecycle.Identity() == executor.lifecycleIdentity
@@ -33,6 +50,31 @@ func (executor *Executor) Publishable() bool {
 
 // Conformant is a semantic alias for Publishable.
 func (executor *Executor) Conformant() bool { return executor.Publishable() }
+
+// ConformancePolicy returns a defensive copy of the exact policy enforced by
+// a publishable executor. Callers must compare it to separate immutable input
+// authority; this value cannot make a generic executor publishable.
+func (executor *Executor) ConformancePolicy() (ConformancePolicyIdentity, error) {
+	if executor == nil {
+		return ConformancePolicyIdentity{}, errors.New("executor is not publishable")
+	}
+	executor.mu.Lock()
+	defer executor.mu.Unlock()
+	if !executor.publishableLocked() {
+		return ConformancePolicyIdentity{}, errors.New("executor is not publishable")
+	}
+	if executor.commonMCP == nil || executor.armInit == nil {
+		return ConformancePolicyIdentity{}, errors.New("executor conformance images are unavailable")
+	}
+	return ConformancePolicyIdentity{
+		SchemaVersion:             ConformancePolicySchemaVersion,
+		ReadOnlyPaths:             append([]string(nil), executor.readOnlyPaths...),
+		ExecutablePaths:           append([]string(nil), executor.executablePaths...),
+		CommonMCPExecutable:       executor.commonMCP.path,
+		CommonMCPExecutableSHA256: executor.commonMCP.digest,
+		ArmInitExecutableSHA256:   executor.armInit.digest,
+	}, nil
+}
 
 // PublicationBoundaryClosed is true only after this executor proved all arm
 // descendants gone and the exact built-in lifecycle closed its listener,

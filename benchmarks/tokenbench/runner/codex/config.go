@@ -17,23 +17,25 @@ import (
 	"github.com/pelletier/go-toml/v2"
 )
 
-func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) ([]byte, error) {
+func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) (_ []byte, resultErr error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	directoryBefore, err := lifecycle.stateRoot.Lstat("config-lock")
 	if err != nil || directoryBefore.Mode()&os.ModeSymlink != 0 ||
 		!directoryBefore.IsDir() || directoryBefore.Mode().Perm() != 0o700 {
-		return nil, errors.New("Codex config-lock directory is not the private runtime directory")
+		return nil, errors.New("codex config-lock directory is not the private runtime directory")
 	}
 	directory, err := lifecycle.stateRoot.OpenRoot("config-lock")
 	if err != nil {
 		return nil, fmt.Errorf("open Codex config-lock directory: %w", err)
 	}
-	defer directory.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, directory, "close Codex config-lock directory")
+	}()
 	directoryOpened, err := directory.Stat(".")
 	if err != nil || !os.SameFile(directoryBefore, directoryOpened) {
-		return nil, errors.New("Codex config-lock directory changed while opening")
+		return nil, errors.New("codex config-lock directory changed while opening")
 	}
 	directoryFile, err := directory.Open(".")
 	if err != nil {
@@ -45,7 +47,7 @@ func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) ([]byte, er
 		return nil, errors.Join(readErr, closeErr)
 	}
 	if len(entries) != 1 {
-		return nil, fmt.Errorf("Codex config-lock directory contains %d entries, want exactly one", len(entries))
+		return nil, fmt.Errorf("codex config-lock directory contains %d entries, want exactly one", len(entries))
 	}
 	name := entries[0].Name()
 	before, err := directory.Lstat(name)
@@ -54,10 +56,10 @@ func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) ([]byte, er
 	}
 	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
 		before.Mode().Perm()&0o022 != 0 || hasMultipleLinks(before) {
-		return nil, errors.New("Codex effective config is not a private, single-link regular file")
+		return nil, errors.New("codex effective config is not a private, single-link regular file")
 	}
 	if before.Size() <= 0 || before.Size() > harnesscodex.MaxEffectiveConfigBytes {
-		return nil, errors.New("Codex effective config is empty or exceeds its byte limit")
+		return nil, errors.New("codex effective config is empty or exceeds its byte limit")
 	}
 	file, err := directory.Open(name)
 	if err != nil {
@@ -65,8 +67,11 @@ func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) ([]byte, er
 	}
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) {
-		file.Close()
-		return nil, errors.New("Codex effective config changed while opening")
+		return nil, joinCloseError(
+			errors.New("codex effective config changed while opening"),
+			file,
+			"close Codex effective config",
+		)
 	}
 	content, readErr := io.ReadAll(io.LimitReader(file, harnesscodex.MaxEffectiveConfigBytes+1))
 	closeErr = file.Close()
@@ -74,28 +79,28 @@ func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) ([]byte, er
 		return nil, errors.Join(readErr, closeErr)
 	}
 	if len(content) == 0 || len(content) > harnesscodex.MaxEffectiveConfigBytes {
-		return nil, errors.New("Codex effective config is empty or exceeds its byte limit")
+		return nil, errors.New("codex effective config is empty or exceeds its byte limit")
 	}
 	after, err := directory.Lstat(name)
 	if err != nil || !os.SameFile(opened, after) || before.Mode() != after.Mode() ||
 		before.Size() != after.Size() || before.ModTime() != after.ModTime() ||
 		hasMultipleLinks(after) {
-		return nil, errors.New("Codex effective config changed while reading")
+		return nil, errors.New("codex effective config changed while reading")
 	}
 	if !utf8.Valid(content) || bytes.IndexByte(content, 0) >= 0 {
-		return nil, errors.New("Codex effective config contains invalid text")
+		return nil, errors.New("codex effective config contains invalid text")
 	}
 	if bytes.Contains(content, []byte(lifecycle.credential)) {
-		return nil, errors.New("Codex effective config contains the real upstream credential")
+		return nil, errors.New("codex effective config contains the real upstream credential")
 	}
 	if bytes.Contains(content, []byte("CODEX_API_KEY")) ||
 		bytes.Contains(content, []byte(lifecycle.layout.LocalProxyCapability)) {
-		return nil, errors.New("Codex effective config contains credential-shaped launch data")
+		return nil, errors.New("codex effective config contains credential-shaped launch data")
 	}
 	directoryAfter, err := lifecycle.stateRoot.Lstat("config-lock")
 	if err != nil || !os.SameFile(directoryOpened, directoryAfter) ||
 		directoryAfter.Mode() != directoryBefore.Mode() {
-		return nil, errors.New("Codex config-lock directory changed while reading")
+		return nil, errors.New("codex config-lock directory changed while reading")
 	}
 	return content, nil
 }
@@ -114,9 +119,9 @@ func compareEffectiveConfigs(baseline, candidate armSnapshot) error {
 }
 
 type effectiveConfigLock struct {
-	Config       map[string]any `toml:"config"`
-	CodexVersion string         `toml:"codex_version"`
-	Version      int64          `toml:"version"`
+	Config       map[string]any `json:"Config"       toml:"config"`
+	CodexVersion string         `json:"CodexVersion" toml:"codex_version"`
+	Version      int64          `json:"Version"      toml:"version"`
 }
 
 func normalizeEffectiveConfig(

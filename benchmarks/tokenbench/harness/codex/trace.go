@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"mime"
+	"net/http"
+	"reflect"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
@@ -19,22 +23,22 @@ const (
 	ResponsesTraceArtifactName = "codex.responses_trace"
 	// ResponsesTraceMediaType identifies the strict exported ResponsesTrace JSON
 	// schema below.
-	ResponsesTraceMediaType = "application/vnd.tokenbench.codex.responses-trace.v1+json"
+	ResponsesTraceMediaType = "application/vnd.tokenbench.codex.responses-trace.v3+json"
 	// PartialResponsesTraceArtifactName is emitted for an ordinary terminal arm
 	// so all sanitized provider progress remains auditable even though Decode is
 	// intentionally skipped.
 	PartialResponsesTraceArtifactName = "codex.responses_trace.partial"
 	// PartialResponsesTraceMediaType identifies the strict partial trace schema.
-	PartialResponsesTraceMediaType = "application/vnd.tokenbench.codex.partial-responses-trace.v1+json"
+	PartialResponsesTraceMediaType = "application/vnd.tokenbench.codex.partial-responses-trace.v3+json"
 	// EffectiveConfigArtifactName is the runner-exported effective Codex config.
 	EffectiveConfigArtifactName = "codex.effective_config"
 	// EffectiveConfigMediaType pins the parser profile used for the config bytes.
 	EffectiveConfigMediaType = "application/toml;profile=codex-v0.144.0"
 	// ResponsesTraceSchemaVersion is the sole accepted provider trace schema.
-	ResponsesTraceSchemaVersion = "tokenbench.codex.responses-trace/v1"
+	ResponsesTraceSchemaVersion = "tokenbench.codex.responses-trace/v3"
 	// PartialResponsesTraceSchemaVersion is separate because incomplete request
 	// sequences are never valid decoder input.
-	PartialResponsesTraceSchemaVersion = "tokenbench.codex.partial-responses-trace/v1"
+	PartialResponsesTraceSchemaVersion = "tokenbench.codex.partial-responses-trace/v3"
 
 	ToolKindCommand    = "command"
 	ToolKindMCP        = "mcp"
@@ -44,10 +48,43 @@ const (
 	MaxResponsesTraceBytes = 8 << 20
 	// MaxEffectiveConfigBytes is the runner and decoder byte limit for config.
 	MaxEffectiveConfigBytes = 1 << 20
+	// MaxProviderResponseBodyBytes is the largest complete provider response
+	// body whose exact bytes may be committed by a v3 trace.
+	MaxProviderResponseBodyBytes = 32 << 20
+	// MaxResponsesTraceRequests bounds ordered requests, attempts, and complete
+	// responses in one v3 trace.
+	MaxResponsesTraceRequests = 4096
+	// MaxResponsesTraceSSEEvents bounds dispatched provider SSE data events.
+	MaxResponsesTraceSSEEvents = 100000
+	// MaxResponsesSSEEventBytes bounds one SSE event before normalized capture.
+	// An event cannot validly exceed the enclosing provider response body.
+	MaxResponsesSSEEventBytes = MaxProviderResponseBodyBytes
 
-	maxTraceResponses = 4096
+	maxTraceResponses = MaxResponsesTraceRequests
 	maxTraceTools     = 4096
 	maxTraceOutputs   = 100000
+	maxDynamicFields  = 100000
+	maxTraceSSEEvents = MaxResponsesTraceSSEEvents
+)
+
+const (
+	DynamicFieldProviderCacheRouting = "provider_cache_routing_identifier"
+	DynamicFieldFreshProcessNonce    = "fresh_process_nonce"
+	DynamicFieldClockNonce           = "clock_nonce"
+
+	RequestAuthorizationBearerCredential = "bearer_credential_secret"
+
+	SSEMappingForwardedUnmapped = "forwarded_unmapped"
+	SSEMappingCompletedResponse = "completed_response"
+	SSEMappingStreamDone        = "stream_done"
+
+	ResponseAttemptCompleted          = "completed"
+	ResponseAttemptTransport          = "transport"
+	ResponseAttemptResponseBody       = "response_body"
+	ResponseAttemptResponseStatus     = "response_status"
+	ResponseAttemptResponseHeaders    = "response_headers"
+	ResponseAttemptSemanticValidation = "semantic_validation"
+	ResponseAttemptDownstreamForward  = "downstream_forward"
 )
 
 var allowedMCPTools = []string{"changed", "find", "inspect", "outline"}
@@ -79,29 +116,125 @@ var allowedMCPSupportCalls = map[string]struct{}{
 // request with its tool list separated from the non-tool payload so pair-level
 // validation can authorize only the repo_view declaration delta.
 type ResponsesTrace struct {
-	SchemaVersion string                   `json:"schema_version"`
-	FirstRequest  *ResponsesRequestTrace   `json:"first_request"`
-	Responses     []ResponsesResponseTrace `json:"responses"`
+	SchemaVersion    string                         `json:"schema_version"`
+	FirstRequest     *ResponsesRequestTrace         `json:"first_request"`
+	Requests         []ResponsesRequestSnapshot     `json:"requests"`
+	ResponseAttempts []ProviderResponseAttemptTrace `json:"response_attempts"`
+	Responses        []ResponsesResponseTrace       `json:"responses"`
+	TLSRequired      bool                           `json:"production_tls_required"`
 }
 
 // PartialResponsesTrace retains completed, sanitized response entries and
 // their original request sequence numbers after an ordinary process failure.
 // It never masquerades as the complete decoder artifact.
 type PartialResponsesTrace struct {
-	SchemaVersion     string                   `json:"schema_version"`
-	FirstRequest      *ResponsesRequestTrace   `json:"first_request"`
-	Responses         []ResponsesResponseTrace `json:"responses"`
-	ResponseSequences []int                    `json:"response_sequences"`
-	RequestCount      int                      `json:"request_count"`
+	FirstRequest       *ResponsesRequestTrace         `json:"first_request"`
+	SchemaVersion      string                         `json:"schema_version"`
+	CaptureErrorSHA256 string                         `json:"capture_error_sha256"`
+	Requests           []ResponsesRequestSnapshot     `json:"requests"`
+	ResponseAttempts   []ProviderResponseAttemptTrace `json:"response_attempts"`
+	Responses          []ResponsesResponseTrace       `json:"responses"`
+	ResponseSequences  []int                          `json:"response_sequences"`
+	RequestCount       int                            `json:"request_count"`
+	TLSRequired        bool                           `json:"production_tls_required"`
 }
 
 // ResponsesRequestTrace describes the sanitized first Responses request.
-// NonToolPayloadSHA256 is the SHA-256 of the runner's canonical request after
-// removing tools and normalizing runner-authorized transport identifiers.
+// NonceNormalizedNonToolPayloadSHA256 is only a reviewed parity projection:
+// it removes tools and substitutes validated nonce fields. It is never an
+// exact provider-input commitment; ExactBodySHA256 and Headers carry that
+// application-wire evidence.
 type ResponsesRequestTrace struct {
-	Model                string                     `json:"model"`
-	NonToolPayloadSHA256 string                     `json:"non_tool_payload_sha256"`
-	Tools                []ResponsesToolDeclaration `json:"tools"`
+	Model                               string                             `json:"model"`
+	ExactBodySHA256                     string                             `json:"exact_body_sha256"`
+	NonceNormalizedNonToolPayloadSHA256 string                             `json:"nonce_normalized_non_tool_payload_sha256"`
+	Headers                             ProviderRequestHeadersTrace        `json:"headers"`
+	DynamicFields                       []ProviderRequestDynamicFieldTrace `json:"dynamic_fields"`
+	Tools                               []ResponsesToolDeclaration         `json:"tools"`
+}
+
+// ResponsesRequestSnapshot commits every provider request, including one for
+// which transport or process failure prevented a completed response. Tools are
+// represented by their canonical digest to keep the ordered list bounded.
+type ResponsesRequestSnapshot struct {
+	Headers                             ProviderRequestHeadersTrace        `json:"headers"`
+	Model                               string                             `json:"model"`
+	ExactBodySHA256                     string                             `json:"exact_body_sha256"`
+	NonceNormalizedNonToolPayloadSHA256 string                             `json:"nonce_normalized_non_tool_payload_sha256"`
+	ToolsSHA256                         string                             `json:"tools_sha256"`
+	DynamicFields                       []ProviderRequestDynamicFieldTrace `json:"dynamic_fields"`
+	Sequence                            int                                `json:"sequence"`
+}
+
+// ProviderRequestHeadersTrace commits the complete reviewed semantic envelope
+// reconstructed for the upstream request. It is not a raw HTTP/2 wire-header
+// capture: transport framing and the reusable Authorization value are never
+// hashed or exported. Authorization presence is explicitly classified, and
+// the parity projection normalizes only the validated sticky turn-state nonce.
+type ProviderRequestHeadersTrace struct {
+	ReviewedSemanticSHA256 string `json:"reviewed_semantic_sha256"`
+	// ExactApplicationSHA256 is retained only as a non-serialized source-level
+	// compatibility alias for callers compiled against the v2 Go API. New code
+	// uses ReviewedSemanticSHA256.
+	ExactApplicationSHA256 string `json:"-"`
+	ParityProjectionSHA256 string `json:"parity_projection_sha256"`
+	ContentTypeSHA256      string `json:"content_type_sha256"`
+	UserAgentSHA256        string `json:"user_agent_sha256"`
+	AcceptSHA256           string `json:"accept_sha256"`
+	OpenAIBetaSHA256       string `json:"openai_beta_sha256"`
+	TurnStateSHA256        string `json:"turn_state_sha256"`
+	AuthorizationClass     string `json:"authorization_class"`
+	AcceptPresent          bool   `json:"accept_present"`
+	OpenAIBetaPresent      bool   `json:"openai_beta_present"`
+	TurnStatePresent       bool   `json:"turn_state_present"`
+}
+
+// ProviderRequestDynamicFieldTrace preserves exact presence and value
+// commitments for fields intentionally projected during pair comparison.
+// Classification distinguishes behaviorally significant cache routing from
+// fresh-process and clock nonces.
+type ProviderRequestDynamicFieldTrace struct {
+	JSONPointer    string `json:"json_pointer"`
+	SHA256         string `json:"sha256"`
+	Classification string `json:"classification"`
+	Present        bool   `json:"present"`
+}
+
+// ProviderResponseAttemptTrace is the ordered, bounded provider outcome for
+// every forwarded request. It exists even when no completed response could be
+// semantically mapped. BodySHA256 commits the complete body when BodyComplete
+// is true and the exact bounded prefix otherwise.
+type ProviderResponseAttemptTrace struct {
+	Stage          string                       `json:"stage"`
+	ErrorClass     string                       `json:"error_class"`
+	BodySHA256     string                       `json:"body_sha256"`
+	Headers        ProviderResponseHeadersTrace `json:"headers"`
+	TLSConnections []TLSConnectionTrace         `json:"tls_connections"`
+	Sequence       int                          `json:"sequence"`
+	StatusCode     int                          `json:"status_code"`
+	BodyBytes      int                          `json:"body_bytes"`
+	StatusPresent  bool                         `json:"status_present"`
+	HeadersPresent bool                         `json:"headers_present"`
+	BodyCaptured   bool                         `json:"body_captured"`
+	BodyComplete   bool                         `json:"body_complete"`
+}
+
+// ProviderResponseHeadersTrace commits the complete reviewed semantic header
+// projection without retaining provider identifiers or state. It is not a raw
+// HTTP/2 wire-header capture; unconsumed response headers are intentionally
+// outside this behaviorally relevant projection.
+type ProviderResponseHeadersTrace struct {
+	ReviewedSemanticSHA256   string `json:"reviewed_semantic_sha256"`
+	ContentTypeSHA256        string `json:"content_type_sha256"`
+	ContentEncodingSHA256    string `json:"content_encoding_sha256"`
+	ProviderModelSHA256      string `json:"provider_model_sha256"`
+	TurnStateSHA256          string `json:"turn_state_sha256"`
+	ReasoningIncludedSHA256  string `json:"reasoning_included_sha256"`
+	ContentTypePresent       bool   `json:"content_type_present"`
+	ContentEncodingPresent   bool   `json:"content_encoding_present"`
+	ProviderModelPresent     bool   `json:"provider_model_present"`
+	TurnStatePresent         bool   `json:"turn_state_present"`
+	ReasoningIncludedPresent bool   `json:"reasoning_included_present"`
 }
 
 // ResponsesToolDeclaration is one normalized provider-visible tool schema.
@@ -120,17 +253,47 @@ type ResponsesToolDeclaration struct {
 // Usage is a pointer so omission is distinguishable from a legitimate all-zero
 // provider counter object.
 type ResponsesResponseTrace struct {
-	RequestModel                string                 `json:"request_model"`
-	RequestNonToolPayloadSHA256 string                 `json:"request_non_tool_payload_sha256"`
-	RequestToolsSHA256          string                 `json:"request_tools_sha256"`
-	ResponseModel               string                 `json:"response_model"`
-	ProviderModelHeader         string                 `json:"provider_model_header"`
-	TurnStateSHA256             string                 `json:"turn_state_sha256"`
-	Outputs                     []ResponsesOutputTrace `json:"outputs"`
-	Usage                       *harness.Usage         `json:"usage"`
-	TLSConnections              []TLSConnectionTrace   `json:"tls_connections,omitempty"`
-	ProviderTotalTokens         *int64                 `json:"provider_total_tokens"`
-	ReasoningIncluded           bool                   `json:"reasoning_included"`
+	ProviderTotalTokens                        *int64                    `json:"provider_total_tokens"`
+	Usage                                      *harness.Usage            `json:"usage"`
+	ProviderModelHeader                        string                    `json:"provider_model_header"`
+	RequestHeadersSHA256                       string                    `json:"request_headers_sha256"`
+	RequestToolsSHA256                         string                    `json:"request_tools_sha256"`
+	ResponseModel                              string                    `json:"response_model"`
+	TurnStateSHA256                            string                    `json:"turn_state_sha256"`
+	RequestModel                               string                    `json:"request_model"`
+	RequestNonceNormalizedNonToolPayloadSHA256 string                    `json:"request_nonce_normalized_non_tool_payload_sha256"`
+	RequestExactBodySHA256                     string                    `json:"request_exact_body_sha256"`
+	Outputs                                    []ResponsesOutputTrace    `json:"outputs"`
+	TLSConnections                             []TLSConnectionTrace      `json:"tls_connections,omitempty"`
+	Wire                                       ProviderResponseWireTrace `json:"wire"`
+	ReasoningIncluded                          bool                      `json:"reasoning_included"`
+}
+
+// ProviderResponseWireTrace commits the exact bounded bytes forwarded to the
+// Codex child and the ordered SSE-to-completed-response mapping used by the
+// decoder. JSON responses use an empty, non-nil SSEEvents list.
+type ProviderResponseWireTrace struct {
+	CompletedEventSequence  *int                     `json:"completed_event_sequence"`
+	RawContentType          string                   `json:"raw_content_type"`
+	MediaType               string                   `json:"media_type"`
+	ExactBodySHA256         string                   `json:"exact_body_sha256"`
+	CanonicalResponseSHA256 string                   `json:"canonical_response_sha256"`
+	SSEEvents               []ResponsesSSEEventTrace `json:"sse_events"`
+	StatusCode              int                      `json:"status_code"`
+	BodyBytes               int                      `json:"body_bytes"`
+}
+
+// ResponsesSSEEventTrace retains every dispatched data event in exact order.
+// Exact body framing/comments remain committed by ExactBodySHA256.
+type ResponsesSSEEventTrace struct {
+	Event                string `json:"event"`
+	Type                 string `json:"type"`
+	DataSHA256           string `json:"data_sha256"`
+	CanonicalJSONSHA256  string `json:"canonical_json_sha256"`
+	MappedResponseSHA256 string `json:"mapped_response_sha256"`
+	Mapping              string `json:"mapping"`
+	Sequence             int    `json:"sequence"`
+	EventPresent         bool   `json:"event_present"`
 }
 
 // TLSConnectionTrace commits the authenticated production transport used for
@@ -172,11 +335,11 @@ type ResponsesToolCall struct {
 }
 
 type decodedTrace struct {
-	usage         harness.Usage
 	model         string
 	toolCalls     []ResponsesToolCall
 	toolCallNames []string
 	outputs       []ResponsesOutputTrace
+	usage         harness.Usage
 }
 
 // AllowedMCPTools returns the exact repo_view tool allowlist, without the
@@ -204,7 +367,7 @@ func ParseResponsesTrace(raw []byte) (ResponsesTrace, error) {
 func ParsePartialResponsesTrace(raw []byte) (PartialResponsesTrace, error) {
 	if len(raw) == 0 || len(raw) > MaxResponsesTraceBytes {
 		return PartialResponsesTrace{}, errors.New(
-			"Codex partial Responses trace is empty or exceeds its byte limit",
+			"codex partial Responses trace is empty or exceeds its byte limit",
 		)
 	}
 	var trace PartialResponsesTrace
@@ -216,47 +379,48 @@ func ParsePartialResponsesTrace(raw []byte) (PartialResponsesTrace, error) {
 	}
 	if trace.SchemaVersion != PartialResponsesTraceSchemaVersion ||
 		trace.RequestCount < 0 || trace.RequestCount > maxTraceResponses ||
+		trace.Requests == nil || len(trace.Requests) != trace.RequestCount ||
+		trace.ResponseAttempts == nil || len(trace.ResponseAttempts) != trace.RequestCount ||
 		trace.Responses == nil || trace.ResponseSequences == nil ||
 		len(trace.Responses) != len(trace.ResponseSequences) ||
-		len(trace.Responses) > trace.RequestCount {
+		len(trace.Responses) > trace.RequestCount ||
+		trace.CaptureErrorSHA256 != "" && !validSHA256(trace.CaptureErrorSHA256) {
 		return PartialResponsesTrace{}, errors.New(
-			"Codex partial Responses trace envelope is invalid",
+			"codex partial Responses trace envelope is invalid",
 		)
 	}
 	if (trace.RequestCount == 0) != (trace.FirstRequest == nil) {
 		return PartialResponsesTrace{}, errors.New(
-			"Codex partial Responses trace request identity is inconsistent",
+			"codex partial Responses trace request identity is inconsistent",
 		)
 	}
-	prior := -1
-	for _, sequence := range trace.ResponseSequences {
-		if sequence <= prior || sequence < 0 || sequence >= trace.RequestCount {
-			return PartialResponsesTrace{}, errors.New(
-				"Codex partial Responses trace sequences are not canonical",
-			)
-		}
-		prior = sequence
+	if trace.RequestCount == 0 {
+		return trace, nil
 	}
-	if trace.FirstRequest != nil {
-		if !validText(trace.FirstRequest.Model) || trace.FirstRequest.Model == "" ||
-			!validSHA256(trace.FirstRequest.NonToolPayloadSHA256) ||
-			trace.FirstRequest.Tools == nil ||
-			len(trace.FirstRequest.Tools) > maxTraceTools {
-			return PartialResponsesTrace{}, errors.New(
-				"Codex partial Responses first request is invalid",
-			)
-		}
+	if _, err := validateTraceContents(
+		trace.FirstRequest,
+		trace.Requests,
+		trace.ResponseAttempts,
+		trace.Responses,
+		trace.ResponseSequences,
+		trace.TLSRequired,
+		false,
+	); err != nil {
+		return PartialResponsesTrace{}, fmt.Errorf(
+			"validate Codex partial Responses trace: %w",
+			err,
+		)
 	}
 	return trace, nil
 }
 
 func decodeArtifacts(artifacts []harness.Artifact) (decodedTrace, error) {
 	if err := harness.ValidateArtifacts(artifacts); err != nil {
-		return decodedTrace{}, fmt.Errorf("Codex artifacts: %w", err)
+		return decodedTrace{}, fmt.Errorf("codex artifacts: %w", err)
 	}
 	if len(artifacts) != 2 {
 		return decodedTrace{}, fmt.Errorf(
-			"Codex execution requires exactly two artifacts, got %d",
+			"codex execution requires exactly two artifacts, got %d",
 			len(artifacts),
 		)
 	}
@@ -284,13 +448,13 @@ func decodeArtifacts(artifacts []harness.Artifact) (decodedTrace, error) {
 		}
 	}
 	if len(traceRaw) == 0 || len(traceRaw) > MaxResponsesTraceBytes {
-		return decodedTrace{}, errors.New("Codex Responses trace is empty or exceeds its byte limit")
+		return decodedTrace{}, errors.New("codex Responses trace is empty or exceeds its byte limit")
 	}
 	if len(configRaw) == 0 || len(configRaw) > MaxEffectiveConfigBytes {
-		return decodedTrace{}, errors.New("Codex effective config is empty or exceeds its byte limit")
+		return decodedTrace{}, errors.New("codex effective config is empty or exceeds its byte limit")
 	}
 	if !utf8.Valid(configRaw) || bytes.IndexByte(configRaw, 0) >= 0 {
-		return decodedTrace{}, errors.New("Codex effective config contains invalid text")
+		return decodedTrace{}, errors.New("codex effective config contains invalid text")
 	}
 
 	_, decoded, err := parseResponsesTrace(traceRaw)
@@ -300,7 +464,7 @@ func decodeArtifacts(artifacts []harness.Artifact) (decodedTrace, error) {
 func parseResponsesTrace(raw []byte) (ResponsesTrace, decodedTrace, error) {
 	if len(raw) == 0 || len(raw) > MaxResponsesTraceBytes {
 		return ResponsesTrace{}, decodedTrace{}, errors.New(
-			"Codex Responses trace is empty or exceeds its byte limit",
+			"codex Responses trace is empty or exceeds its byte limit",
 		)
 	}
 	var trace ResponsesTrace
@@ -322,20 +486,191 @@ func validateResponsesTrace(trace ResponsesTrace) (decodedTrace, error) {
 		)
 	}
 	if trace.FirstRequest == nil {
-		return decodedTrace{}, errors.New("Codex Responses trace omitted first_request")
+		return decodedTrace{}, errors.New("codex Responses trace omitted first_request")
 	}
 	if len(trace.Responses) == 0 || len(trace.Responses) > maxTraceResponses {
-		return decodedTrace{}, errors.New("Codex Responses trace has invalid response cardinality")
+		return decodedTrace{}, errors.New("codex Responses trace has invalid response cardinality")
 	}
-	first := trace.FirstRequest
-	if !validText(first.Model) || first.Model == "" {
-		return decodedTrace{}, errors.New("Codex first request model is invalid")
+	if trace.Requests == nil || len(trace.Requests) != len(trace.Responses) {
+		return decodedTrace{}, errors.New("codex Responses trace request snapshots are incomplete")
 	}
-	if !validSHA256(first.NonToolPayloadSHA256) {
-		return decodedTrace{}, errors.New("Codex first request non-tool payload digest is invalid")
+	if trace.ResponseAttempts == nil || len(trace.ResponseAttempts) != len(trace.Requests) {
+		return decodedTrace{}, errors.New("codex Responses trace response attempts are incomplete")
+	}
+	sequences := make([]int, len(trace.Responses))
+	for index := range sequences {
+		sequences[index] = index
+	}
+	return validateTraceContents(
+		trace.FirstRequest,
+		trace.Requests,
+		trace.ResponseAttempts,
+		trace.Responses,
+		sequences,
+		trace.TLSRequired,
+		true,
+	)
+}
+
+type traceResponseValidation struct {
+	firstRequest       *ResponsesRequestTrace
+	declarations       map[string]ResponsesToolDeclaration
+	requestToolsSHA256 string
+	providerModel      string
+	turnStateSHA256    string
+	result             decodedTrace
+	outputCount        int
+	tlsModeObserved    bool
+	tlsExpected        bool
+}
+
+func validateTraceContents(
+	first *ResponsesRequestTrace,
+	requests []ResponsesRequestSnapshot,
+	attempts []ProviderResponseAttemptTrace,
+	responses []ResponsesResponseTrace,
+	responseSequences []int,
+	tlsRequired bool,
+	requireCompleted bool,
+) (decodedTrace, error) {
+	declarations, requestToolsSHA256, err := validateFirstRequest(first)
+	if err != nil {
+		return decodedTrace{}, err
+	}
+	if len(requests) == 0 || len(requests) > maxTraceResponses ||
+		len(attempts) != len(requests) || len(responses) != len(responseSequences) ||
+		len(responses) > len(requests) {
+		return decodedTrace{}, errors.New("codex Responses trace content cardinality is invalid")
+	}
+	for index, request := range requests {
+		if err := validateRequestSnapshot(request, index); err != nil {
+			return decodedTrace{}, fmt.Errorf("codex request %d: %w", index, err)
+		}
+		if request.Model != first.Model {
+			return decodedTrace{}, fmt.Errorf("codex request %d changed the requested model", index)
+		}
+		if request.ToolsSHA256 != requestToolsSHA256 {
+			return decodedTrace{}, fmt.Errorf("codex request %d tool commitment drifted", index)
+		}
+	}
+	if err := requestTraceMatchesSnapshot(first, requests[0], requestToolsSHA256); err != nil {
+		return decodedTrace{}, fmt.Errorf("codex first request: %w", err)
+	}
+	for index, attempt := range attempts {
+		if err := validateProviderResponseAttempt(attempt, index, requireCompleted); err != nil {
+			return decodedTrace{}, fmt.Errorf("codex response attempt %d: %w", index, err)
+		}
+	}
+	if err := validateTraceTLSPolicy(tlsRequired, attempts, responses); err != nil {
+		return decodedTrace{}, err
+	}
+
+	state := traceResponseValidation{
+		firstRequest:       first,
+		declarations:       declarations,
+		requestToolsSHA256: requestToolsSHA256,
+		result: decodedTrace{
+			model:     first.Model,
+			toolCalls: make([]ResponsesToolCall, 0),
+			outputs:   make([]ResponsesOutputTrace, 0),
+		},
+	}
+	retained := make([]bool, len(requests))
+	priorSequence := -1
+	for responseIndex, response := range responses {
+		sequence := responseSequences[responseIndex]
+		if sequence <= priorSequence || sequence < 0 || sequence >= len(requests) {
+			return decodedTrace{}, errors.New("codex retained response sequences are not canonical")
+		}
+		retained[sequence] = true
+		priorSequence = sequence
+		if err := state.validateResponse(
+			response,
+			requests[sequence],
+			attempts[sequence],
+			sequence,
+		); err != nil {
+			return decodedTrace{}, fmt.Errorf("codex response %d: %w", sequence, err)
+		}
+	}
+	for sequence, attempt := range attempts {
+		requiresResponse := attempt.Stage == ResponseAttemptCompleted ||
+			attempt.Stage == ResponseAttemptDownstreamForward
+		if retained[sequence] != requiresResponse {
+			return decodedTrace{}, fmt.Errorf(
+				"codex response %d retention differs from its provider attempt stage",
+				sequence,
+			)
+		}
+	}
+	return state.result, nil
+}
+
+// validateTraceTLSPolicy makes production TLS mode explicit so removing every
+// connection cannot downgrade a production trace into a local one. A provider
+// transport may fail before a TLS handshake produces verified connection
+// evidence; that sole exception is represented by a transport-stage attempt
+// with no observed status, headers, or body.
+func validateTraceTLSPolicy(
+	required bool,
+	attempts []ProviderResponseAttemptTrace,
+	responses []ResponsesResponseTrace,
+) error {
+	if !required {
+		for _, attempt := range attempts {
+			if len(attempt.TLSConnections) != 0 {
+				return errors.New("nonproduction trace contains provider TLS evidence")
+			}
+		}
+		for _, response := range responses {
+			if len(response.TLSConnections) != 0 {
+				return errors.New("nonproduction response contains provider TLS evidence")
+			}
+		}
+		return nil
+	}
+	for sequence, attempt := range attempts {
+		if len(attempt.TLSConnections) != 0 {
+			continue
+		}
+		preHandshakeTransportFailure := attempt.Stage == ResponseAttemptTransport &&
+			!attempt.StatusPresent && !attempt.HeadersPresent && !attempt.BodyCaptured
+		if !preHandshakeTransportFailure {
+			return fmt.Errorf(
+				"production response attempt %d omitted required TLS evidence",
+				sequence,
+			)
+		}
+	}
+	for responseIndex, response := range responses {
+		if len(response.TLSConnections) == 0 {
+			return fmt.Errorf(
+				"production response %d omitted required TLS evidence",
+				responseIndex,
+			)
+		}
+	}
+	return nil
+}
+
+func validateFirstRequest(
+	first *ResponsesRequestTrace,
+) (map[string]ResponsesToolDeclaration, string, error) {
+	if first == nil || !validText(first.Model) || first.Model == "" {
+		return nil, "", errors.New("codex first request model is invalid")
+	}
+	if !validSHA256(first.ExactBodySHA256) ||
+		!validSHA256(first.NonceNormalizedNonToolPayloadSHA256) {
+		return nil, "", errors.New("codex first request body commitment is invalid")
+	}
+	if err := validateProviderRequestHeaders(first.Headers); err != nil {
+		return nil, "", fmt.Errorf("codex first request headers: %w", err)
+	}
+	if err := validateDynamicFields(first.DynamicFields); err != nil {
+		return nil, "", fmt.Errorf("codex first request dynamic fields: %w", err)
 	}
 	if first.Tools == nil || len(first.Tools) > maxTraceTools {
-		return decodedTrace{}, errors.New("Codex first request tool list is not canonical")
+		return nil, "", errors.New("codex first request tool list is not canonical")
 	}
 	declarations := make(map[string]ResponsesToolDeclaration, len(first.Tools))
 	mcpDeclarations := make(map[string]struct{})
@@ -343,27 +678,31 @@ func validateResponsesTrace(trace ResponsesTrace) (decodedTrace, error) {
 	commandDeclarations := 0
 	for index, declaration := range first.Tools {
 		if !validText(declaration.Name) || declaration.Name == "" {
-			return decodedTrace{}, fmt.Errorf("Codex tool declaration %d has an invalid name", index)
+			return nil, "", fmt.Errorf("codex tool declaration %d has an invalid name", index)
 		}
 		switch declaration.WireType {
 		case "function":
 			if declaration.Strict == nil {
-				return decodedTrace{}, fmt.Errorf("Codex function declaration %q omitted strict", declaration.Name)
+				return nil, "", fmt.Errorf("codex function declaration %q omitted strict", declaration.Name)
 			}
 		case "custom":
 			if declaration.Strict != nil {
-				return decodedTrace{}, fmt.Errorf("Codex custom declaration %q contains strict", declaration.Name)
+				return nil, "", fmt.Errorf("codex custom declaration %q contains strict", declaration.Name)
 			}
 		default:
-			return decodedTrace{}, fmt.Errorf("Codex declaration %q has unsupported wire type %q", declaration.Name, declaration.WireType)
+			return nil, "", fmt.Errorf(
+				"codex declaration %q has unsupported wire type %q",
+				declaration.Name,
+				declaration.WireType,
+			)
 		}
 		if !validSHA256(declaration.DescriptionSHA256) ||
 			!validSHA256(declaration.InputSchemaSHA256) {
-			return decodedTrace{}, fmt.Errorf("Codex tool declaration %q has an invalid digest", declaration.Name)
+			return nil, "", fmt.Errorf("codex tool declaration %q has an invalid digest", declaration.Name)
 		}
 		key := declaration.Kind + "\x00" + declaration.Name
 		if _, exists := declarations[key]; exists {
-			return decodedTrace{}, fmt.Errorf("duplicate Codex tool declaration %q", declaration.Name)
+			return nil, "", fmt.Errorf("duplicate Codex tool declaration %q", declaration.Name)
 		}
 		declarations[key] = declaration
 		switch declaration.Kind {
@@ -371,193 +710,530 @@ func validateResponsesTrace(trace ResponsesTrace) (decodedTrace, error) {
 			commandDeclarations++
 		case ToolKindMCP:
 			if declaration.WireType != "function" || declaration.Strict == nil || *declaration.Strict {
-				return decodedTrace{}, fmt.Errorf("repo_view declaration %q has an unsupported wire shape", declaration.Name)
+				return nil, "", fmt.Errorf(
+					"repo_view declaration %q has an unsupported wire shape",
+					declaration.Name,
+				)
 			}
 			if _, ok := allowedNormalizedMCPCalls[declaration.Name]; !ok {
-				return decodedTrace{}, fmt.Errorf("unsupported Codex MCP tool declaration %q", declaration.Name)
+				return nil, "", fmt.Errorf("unsupported Codex MCP tool declaration %q", declaration.Name)
 			}
 			mcpDeclarations[declaration.Name] = struct{}{}
 		case ToolKindMCPSupport:
 			if declaration.WireType != "function" || declaration.Strict == nil || *declaration.Strict {
-				return decodedTrace{}, fmt.Errorf("MCP support declaration %q has an unsupported wire shape", declaration.Name)
+				return nil, "", fmt.Errorf(
+					"mcp support declaration %q has an unsupported wire shape",
+					declaration.Name,
+				)
 			}
 			if _, ok := allowedMCPSupportCalls[declaration.Name]; !ok {
-				return decodedTrace{}, fmt.Errorf("unsupported Codex MCP support declaration %q", declaration.Name)
+				return nil, "", fmt.Errorf("unsupported Codex MCP support declaration %q", declaration.Name)
 			}
 			mcpSupportDeclarations[declaration.Name] = struct{}{}
 		default:
-			return decodedTrace{}, fmt.Errorf("unsupported Codex tool kind %q", declaration.Kind)
+			return nil, "", fmt.Errorf("unsupported Codex tool kind %q", declaration.Kind)
 		}
 	}
 	if commandDeclarations == 0 {
-		return decodedTrace{}, errors.New("Codex first request omitted the pinned command tool")
+		return nil, "", errors.New("codex first request omitted the pinned command tool")
 	}
 	if len(mcpDeclarations) != 0 && len(mcpDeclarations) != len(allowedNormalizedMCPCalls) {
-		return decodedTrace{}, errors.New("Codex first request has a partial repo_view tool surface")
+		return nil, "", errors.New("codex first request has a partial repo_view tool surface")
 	}
 	if len(mcpSupportDeclarations) != 0 &&
 		len(mcpSupportDeclarations) != len(allowedMCPSupportCalls) {
-		return decodedTrace{}, errors.New("Codex first request has a partial MCP support tool surface")
+		return nil, "", errors.New("codex first request has a partial MCP support tool surface")
 	}
 	if (len(mcpDeclarations) == 0) != (len(mcpSupportDeclarations) == 0) {
-		return decodedTrace{}, errors.New("Codex first request MCP and support surfaces are inconsistent")
-	}
-
-	result := decodedTrace{
-		model:     first.Model,
-		toolCalls: make([]ResponsesToolCall, 0),
-		outputs:   make([]ResponsesOutputTrace, 0),
+		return nil, "", errors.New("codex first request MCP and support surfaces are inconsistent")
 	}
 	toolsRaw, err := json.Marshal(first.Tools)
 	if err != nil {
-		return decodedTrace{}, fmt.Errorf("encode Codex request tool commitment: %w", err)
+		return nil, "", fmt.Errorf("encode Codex request tool commitment: %w", err)
 	}
-	requestToolsSHA256 := digest(toolsRaw)
-	providerModel := ""
-	tlsEvidenceObserved := false
-	tlsEvidenceExpected := false
-	for responseIndex, response := range trace.Responses {
-		if response.RequestModel != first.Model {
-			return decodedTrace{}, fmt.Errorf(
-				"Codex response %d request model %q differs from first request model %q",
-				responseIndex, response.RequestModel, first.Model,
-			)
+	return declarations, digest(toolsRaw), nil
+}
+
+func (state *traceResponseValidation) validateResponse(
+	response ResponsesResponseTrace,
+	request ResponsesRequestSnapshot,
+	attempt ProviderResponseAttemptTrace,
+	sequence int,
+) error {
+	if err := validateResponseRequestReference(response, request); err != nil {
+		return err
+	}
+	if response.RequestModel != state.firstRequest.Model ||
+		response.RequestToolsSHA256 != state.requestToolsSHA256 {
+		return errors.New("request model or tool commitment differs from first request")
+	}
+	if err := validateProviderResponseWire(response.Wire); err != nil {
+		return fmt.Errorf("wire: %w", err)
+	}
+	if err := responseMatchesAttempt(response.Wire, attempt); err != nil {
+		return fmt.Errorf("attempt: %w", err)
+	}
+	if err := state.validateResponseHeaders(response, attempt, sequence); err != nil {
+		return fmt.Errorf("headers: %w", err)
+	}
+	if !validText(response.ResponseModel) || response.ResponseModel == "" ||
+		response.ProviderModelHeader != response.ResponseModel {
+		return errors.New("provider model header differs from its valid response model")
+	}
+	if _, ok := snapshotForProviderModel(state.firstRequest.Model, response.ResponseModel); !ok {
+		return fmt.Errorf(
+			"reported unsupported model resolution %q -> %q",
+			state.firstRequest.Model,
+			response.ResponseModel,
+		)
+	}
+	if state.providerModel == "" {
+		state.providerModel = response.ResponseModel
+	} else if state.providerModel != response.ResponseModel {
+		return errors.New("codex provider model changed within one turn")
+	}
+	if response.Usage == nil {
+		return errors.New("usage is omitted")
+	}
+	if err := harness.ValidateUsage(*response.Usage); err != nil {
+		return fmt.Errorf("usage: %w", err)
+	}
+	if response.Usage.CacheWriteInputTokens != 0 {
+		return errors.New("codex Responses trace reported unsupported cache-write tokens")
+	}
+	if response.ProviderTotalTokens != nil {
+		total := *response.ProviderTotalTokens
+		if total < 0 || total != response.Usage.InputTokens+response.Usage.OutputTokens {
+			return errors.New("provider total_tokens is inconsistent")
 		}
-		if !validSHA256(response.RequestNonToolPayloadSHA256) {
-			return decodedTrace{}, fmt.Errorf(
-				"Codex response %d request payload commitment is invalid",
-				responseIndex,
-			)
+	}
+	if err := addUsage(&state.result.usage, *response.Usage); err != nil {
+		return fmt.Errorf("codex Responses trace usage: %w", err)
+	}
+	if !state.tlsModeObserved {
+		state.tlsModeObserved = true
+		state.tlsExpected = len(response.TLSConnections) != 0
+	} else if state.tlsExpected != (len(response.TLSConnections) != 0) {
+		return errors.New("codex production TLS evidence is incomplete within one arm")
+	}
+	for connectionIndex, connection := range response.TLSConnections {
+		if err := validateTLSConnectionTrace(connection); err != nil {
+			return fmt.Errorf("TLS connection %d: %w", connectionIndex, err)
 		}
-		if responseIndex == 0 &&
-			response.RequestNonToolPayloadSHA256 != first.NonToolPayloadSHA256 {
-			return decodedTrace{}, errors.New(
-				"first Codex response request commitment differs from first_request",
-			)
+	}
+	if !equalTLSConnectionTraces(response.TLSConnections, attempt.TLSConnections) {
+		return errors.New("response TLS evidence differs from its provider attempt")
+	}
+	if response.Outputs == nil {
+		return errors.New("outputs must be an array")
+	}
+	if len(response.Outputs) > maxTraceOutputs-state.outputCount {
+		return errors.New("codex Responses trace exceeds its output-item limit")
+	}
+	state.outputCount += len(response.Outputs)
+	for outputIndex, output := range response.Outputs {
+		if err := state.validateOutput(output); err != nil {
+			return fmt.Errorf("output %d: %w", outputIndex, err)
 		}
-		if response.RequestToolsSHA256 != requestToolsSHA256 {
-			return decodedTrace{}, fmt.Errorf(
-				"Codex response %d request tool commitment differs from first_request",
-				responseIndex,
-			)
+	}
+	return nil
+}
+
+func (state *traceResponseValidation) validateResponseHeaders(
+	response ResponsesResponseTrace,
+	attempt ProviderResponseAttemptTrace,
+	sequence int,
+) error {
+	headers := attempt.Headers
+	if !headers.ContentTypePresent || headers.ContentEncodingPresent ||
+		!headers.ProviderModelPresent {
+		return errors.New("required reviewed response-header presence is invalid")
+	}
+	contentTypeSHA256, err := canonicalStringValuesSHA256([]string{response.Wire.RawContentType})
+	if err != nil || headers.ContentTypeSHA256 != contentTypeSHA256 {
+		return errors.New("raw content type differs from its reviewed header commitment")
+	}
+	providerModelSHA256, err := canonicalStringValuesSHA256([]string{response.ProviderModelHeader})
+	if err != nil || headers.ProviderModelSHA256 != providerModelSHA256 {
+		return errors.New("provider model differs from its reviewed header commitment")
+	}
+	if headers.ReasoningIncludedPresent != response.ReasoningIncluded {
+		return errors.New("reasoning-included presence differs from its semantic claim")
+	}
+	if !validSHA256(response.TurnStateSHA256) {
+		return errors.New("turn-state commitment is invalid")
+	}
+	if state.turnStateSHA256 == "" {
+		if sequence != 0 || !headers.TurnStatePresent ||
+			response.TurnStateSHA256 != headers.TurnStateSHA256 {
+			return errors.New("initial sticky turn state is not bound to its response header")
 		}
-		if !validText(response.ResponseModel) || response.ResponseModel == "" {
-			return decodedTrace{}, fmt.Errorf("Codex response %d model is invalid", responseIndex)
+		state.turnStateSHA256 = response.TurnStateSHA256
+		return nil
+	}
+	if response.TurnStateSHA256 != state.turnStateSHA256 ||
+		headers.TurnStatePresent && headers.TurnStateSHA256 != state.turnStateSHA256 {
+		return errors.New("sticky turn-state commitment changed within one turn")
+	}
+	return nil
+}
+
+func (state *traceResponseValidation) validateOutput(output ResponsesOutputTrace) error {
+	if !validSHA256(output.WireSHA256) {
+		return errors.New("wire commitment is invalid")
+	}
+	switch output.Type {
+	case OutputTypeAssistantMessage:
+		if !validSHA256(output.PayloadSHA256) || output.Kind != "" || output.Name != "" {
+			return errors.New("assistant output is invalid")
 		}
-		if response.ProviderModelHeader != response.ResponseModel {
-			return decodedTrace{}, fmt.Errorf(
-				"Codex response %d provider model header differs from its body",
-				responseIndex,
-			)
+	case OutputTypeReasoning:
+		if output.PayloadSHA256 != "" && !validSHA256(output.PayloadSHA256) ||
+			output.Kind != "" || output.Name != "" {
+			return errors.New("reasoning output is invalid")
 		}
-		if !validSHA256(response.TurnStateSHA256) {
-			return decodedTrace{}, fmt.Errorf("Codex response %d turn-state commitment is invalid", responseIndex)
+	case OutputTypeToolCall:
+		call := ResponsesToolCall{
+			Kind:            output.Kind,
+			Name:            output.Name,
+			ArgumentsSHA256: output.PayloadSHA256,
 		}
-		if _, ok := snapshotForProviderModel(first.Model, response.ResponseModel); !ok {
-			return decodedTrace{}, fmt.Errorf(
-				"Codex response %d reported unsupported model resolution %q -> %q",
-				responseIndex, first.Model, response.ResponseModel,
-			)
+		if err := validateToolCall(state.declarations, call); err != nil {
+			return err
 		}
-		if providerModel == "" {
-			providerModel = response.ResponseModel
-		} else if providerModel != response.ResponseModel {
-			return decodedTrace{}, errors.New("Codex provider model changed within one turn")
+		state.result.toolCalls = append(state.result.toolCalls, call)
+		state.result.toolCallNames = append(state.result.toolCallNames, call.Name)
+	default:
+		return fmt.Errorf("unsupported type %q", output.Type)
+	}
+	if output.PayloadSHA256 != "" {
+		state.result.outputs = append(state.result.outputs, output)
+	}
+	return nil
+}
+
+func canonicalStringValuesSHA256(values []string) (string, error) {
+	raw, err := json.Marshal(values)
+	if err != nil {
+		return "", err
+	}
+	return digest(raw), nil
+}
+
+func equalTLSConnectionTraces(left, right []TLSConnectionTrace) bool {
+	if len(left) == 0 && len(right) == 0 {
+		return true
+	}
+	return reflect.DeepEqual(left, right)
+}
+
+func validateProviderRequestHeaders(headers ProviderRequestHeadersTrace) error {
+	if headers.ExactApplicationSHA256 != "" &&
+		headers.ExactApplicationSHA256 != headers.ReviewedSemanticSHA256 {
+		return errors.New("deprecated request-header alias differs from reviewed commitment")
+	}
+	for name, value := range map[string]string{
+		"reviewed semantic": headers.ReviewedSemanticSHA256,
+		"parity projection": headers.ParityProjectionSHA256,
+		"content type":      headers.ContentTypeSHA256,
+		"user agent":        headers.UserAgentSHA256,
+	} {
+		if !validSHA256(value) {
+			return fmt.Errorf("%s commitment is invalid", name)
 		}
-		if response.Usage == nil {
-			return decodedTrace{}, fmt.Errorf("Codex response %d omitted usage", responseIndex)
+	}
+	for name, field := range map[string]struct {
+		digest  string
+		present bool
+	}{
+		"Accept":      {digest: headers.AcceptSHA256, present: headers.AcceptPresent},
+		"OpenAI-Beta": {digest: headers.OpenAIBetaSHA256, present: headers.OpenAIBetaPresent},
+		"turn state":  {digest: headers.TurnStateSHA256, present: headers.TurnStatePresent},
+	} {
+		if field.present != validSHA256(field.digest) {
+			return fmt.Errorf("%s presence and commitment are inconsistent", name)
 		}
-		if response.ProviderTotalTokens != nil {
-			total := *response.ProviderTotalTokens
-			if total < 0 || total != response.Usage.InputTokens+response.Usage.OutputTokens {
-				return decodedTrace{}, fmt.Errorf(
-					"Codex response %d provider total_tokens is inconsistent",
-					responseIndex,
-				)
+	}
+	if headers.AuthorizationClass != RequestAuthorizationBearerCredential {
+		return errors.New("authorization classification is invalid")
+	}
+	return nil
+}
+
+func validateDynamicFields(fields []ProviderRequestDynamicFieldTrace) error {
+	if len(fields) == 0 || len(fields) > maxDynamicFields {
+		return errors.New("dynamic field list is empty or oversized")
+	}
+	prior := ""
+	hasCacheRouting := false
+	hasFreshNonce := false
+	hasClockNonce := false
+	hasInputTurnNonce := false
+	for index, field := range fields {
+		if !field.Present || !validText(field.JSONPointer) ||
+			field.JSONPointer == "" || len(field.JSONPointer) > 2048 ||
+			!validSHA256(field.SHA256) || index != 0 && field.JSONPointer <= prior {
+			return errors.New("dynamic fields are not present, valid, ordered, and unique")
+		}
+		switch field.Classification {
+		case DynamicFieldProviderCacheRouting:
+			if field.JSONPointer != "/prompt_cache_key" {
+				return errors.New("cache-routing classification is used on an unexpected field")
 			}
-		}
-		if !tlsEvidenceObserved {
-			tlsEvidenceObserved = true
-			tlsEvidenceExpected = len(response.TLSConnections) != 0
-		} else if tlsEvidenceExpected != (len(response.TLSConnections) != 0) {
-			return decodedTrace{}, errors.New(
-				"Codex production TLS evidence is incomplete within one arm",
-			)
-		}
-		for connectionIndex, connection := range response.TLSConnections {
-			if err := validateTLSConnectionTrace(connection); err != nil {
-				return decodedTrace{}, fmt.Errorf(
-					"Codex response %d TLS connection %d: %w",
-					responseIndex,
-					connectionIndex,
-					err,
-				)
+			hasCacheRouting = true
+		case DynamicFieldFreshProcessNonce:
+			hasFreshNonce = true
+			if strings.HasPrefix(field.JSONPointer, "/input/") &&
+				strings.HasSuffix(field.JSONPointer, "/internal_chat_message_metadata_passthrough/turn_id") {
+				hasInputTurnNonce = true
 			}
-		}
-		if err := harness.ValidateUsage(*response.Usage); err != nil {
-			return decodedTrace{}, fmt.Errorf("Codex response %d usage: %w", responseIndex, err)
-		}
-		if response.Usage.CacheWriteInputTokens != 0 {
-			return decodedTrace{}, errors.New("Codex Responses trace reported unsupported cache-write tokens")
-		}
-		if err := addUsage(&result.usage, *response.Usage); err != nil {
-			return decodedTrace{}, fmt.Errorf("Codex Responses trace usage: %w", err)
-		}
-		if response.Outputs == nil {
-			return decodedTrace{}, fmt.Errorf("Codex response %d outputs must be an array", responseIndex)
-		}
-		if len(result.outputs)+len(response.Outputs) > maxTraceOutputs {
-			return decodedTrace{}, errors.New("Codex Responses trace exceeds its output-item limit")
-		}
-		for outputIndex, output := range response.Outputs {
-			if !validSHA256(output.WireSHA256) {
-				return decodedTrace{}, fmt.Errorf(
-					"Codex response %d output %d has an invalid wire commitment",
-					responseIndex, outputIndex,
-				)
+		case DynamicFieldClockNonce:
+			if field.JSONPointer != "/client_metadata/x-codex-turn-metadata/turn_started_at_unix_ms" {
+				return errors.New("clock classification is used on an unexpected field")
 			}
-			switch output.Type {
-			case OutputTypeAssistantMessage:
-				if !validSHA256(output.PayloadSHA256) || output.Kind != "" || output.Name != "" {
-					return decodedTrace{}, fmt.Errorf(
-						"Codex response %d assistant output %d is invalid",
-						responseIndex, outputIndex,
-					)
+			hasClockNonce = true
+		default:
+			return errors.New("dynamic field classification is unsupported")
+		}
+		prior = field.JSONPointer
+	}
+	if !hasCacheRouting || !hasFreshNonce || !hasClockNonce || !hasInputTurnNonce {
+		return errors.New("dynamic field classifications are incomplete")
+	}
+	return nil
+}
+
+func validateRequestSnapshot(request ResponsesRequestSnapshot, sequence int) error {
+	if request.Sequence != sequence || !validText(request.Model) || request.Model == "" ||
+		!validSHA256(request.ExactBodySHA256) ||
+		!validSHA256(request.NonceNormalizedNonToolPayloadSHA256) ||
+		!validSHA256(request.ToolsSHA256) {
+		return errors.New("request identity or commitment is invalid")
+	}
+	if err := validateProviderRequestHeaders(request.Headers); err != nil {
+		return fmt.Errorf("headers: %w", err)
+	}
+	if err := validateDynamicFields(request.DynamicFields); err != nil {
+		return fmt.Errorf("dynamic fields: %w", err)
+	}
+	return nil
+}
+
+func requestTraceMatchesSnapshot(
+	first *ResponsesRequestTrace,
+	snapshot ResponsesRequestSnapshot,
+	toolsSHA256 string,
+) error {
+	if first == nil || snapshot.Sequence != 0 || first.Model != snapshot.Model ||
+		first.ExactBodySHA256 != snapshot.ExactBodySHA256 ||
+		first.NonceNormalizedNonToolPayloadSHA256 != snapshot.NonceNormalizedNonToolPayloadSHA256 ||
+		toolsSHA256 != snapshot.ToolsSHA256 ||
+		!reflect.DeepEqual(first.Headers, snapshot.Headers) ||
+		!reflect.DeepEqual(first.DynamicFields, snapshot.DynamicFields) {
+		return errors.New("detailed trace differs from ordered snapshot")
+	}
+	return nil
+}
+
+func validateResponseRequestReference(
+	response ResponsesResponseTrace,
+	request ResponsesRequestSnapshot,
+) error {
+	if response.RequestModel != request.Model ||
+		response.RequestExactBodySHA256 != request.ExactBodySHA256 ||
+		response.RequestNonceNormalizedNonToolPayloadSHA256 != request.NonceNormalizedNonToolPayloadSHA256 ||
+		response.RequestToolsSHA256 != request.ToolsSHA256 ||
+		response.RequestHeadersSHA256 != request.Headers.ReviewedSemanticSHA256 {
+		return errors.New("request reference differs from its ordered snapshot")
+	}
+	return nil
+}
+
+func validateProviderResponseWire(wire ProviderResponseWireTrace) error {
+	if wire.StatusCode != http.StatusOK || wire.BodyBytes <= 0 ||
+		wire.BodyBytes > MaxProviderResponseBodyBytes || !validSHA256(wire.ExactBodySHA256) ||
+		!validSHA256(wire.CanonicalResponseSHA256) || wire.SSEEvents == nil ||
+		len(wire.SSEEvents) > maxTraceSSEEvents || !validText(wire.RawContentType) ||
+		wire.RawContentType == "" || len(wire.RawContentType) > 1024 {
+		return errors.New("response wire envelope is invalid")
+	}
+	parsedMediaType, _, err := mime.ParseMediaType(wire.RawContentType)
+	if err != nil || parsedMediaType != wire.MediaType {
+		return errors.New("response raw content type does not map to its media type")
+	}
+	switch wire.MediaType {
+	case "application/json":
+		if len(wire.SSEEvents) != 0 || wire.CompletedEventSequence != nil {
+			return errors.New("json response contains an SSE mapping")
+		}
+	case "text/event-stream":
+		if len(wire.SSEEvents) == 0 || wire.CompletedEventSequence == nil ||
+			*wire.CompletedEventSequence < 0 || *wire.CompletedEventSequence >= len(wire.SSEEvents) {
+			return errors.New("sse response omitted its completed-event mapping")
+		}
+		completed := 0
+		for index, event := range wire.SSEEvents {
+			if event.Sequence != index || !validText(event.Event) || !validText(event.Type) ||
+				event.Type == "" || !validSHA256(event.DataSHA256) ||
+				event.EventPresent != (event.Event != "") {
+				return errors.New("sse event identity is invalid")
+			}
+			switch event.Mapping {
+			case SSEMappingForwardedUnmapped:
+				if !validSHA256(event.CanonicalJSONSHA256) || event.MappedResponseSHA256 != "" {
+					return errors.New("unmapped SSE event commitment is invalid")
 				}
-			case OutputTypeReasoning:
-				if output.PayloadSHA256 != "" && !validSHA256(output.PayloadSHA256) ||
-					output.Kind != "" || output.Name != "" {
-					return decodedTrace{}, fmt.Errorf(
-						"Codex response %d reasoning output %d is invalid",
-						responseIndex, outputIndex,
-					)
+			case SSEMappingCompletedResponse:
+				completed++
+				if index != *wire.CompletedEventSequence || event.Type != "response.completed" ||
+					!validSHA256(event.CanonicalJSONSHA256) ||
+					event.MappedResponseSHA256 != wire.CanonicalResponseSHA256 {
+					return errors.New("completed SSE mapping is invalid")
 				}
-			case OutputTypeToolCall:
-				call := ResponsesToolCall{
-					Kind:            output.Kind,
-					Name:            output.Name,
-					ArgumentsSHA256: output.PayloadSHA256,
+			case SSEMappingStreamDone:
+				if event.Type != "[DONE]" || event.EventPresent ||
+					event.CanonicalJSONSHA256 != "" || event.MappedResponseSHA256 != "" {
+					return errors.New("sse done mapping is invalid")
 				}
-				if err := validateToolCall(declarations, call); err != nil {
-					return decodedTrace{}, fmt.Errorf(
-						"Codex response %d output %d: %w",
-						responseIndex, outputIndex, err,
-					)
-				}
-				result.toolCalls = append(result.toolCalls, call)
-				result.toolCallNames = append(result.toolCallNames, call.Name)
 			default:
-				return decodedTrace{}, fmt.Errorf(
-					"Codex response %d output %d has unsupported type %q",
-					responseIndex, outputIndex, output.Type,
-				)
-			}
-			if output.PayloadSHA256 != "" {
-				result.outputs = append(result.outputs, output)
+				return errors.New("sse mapping is unsupported")
 			}
 		}
+		if completed != 1 {
+			return errors.New("sse response does not map exactly one completed response")
+		}
+	default:
+		return errors.New("response wire media type is unsupported")
 	}
-	return result, nil
+	return nil
+}
+
+func validateProviderResponseAttempt(
+	attempt ProviderResponseAttemptTrace,
+	sequence int,
+	requireCompleted bool,
+) error {
+	if attempt.Sequence != sequence ||
+		attempt.StatusPresent != (attempt.StatusCode != 0) ||
+		attempt.StatusPresent && (attempt.StatusCode < 100 || attempt.StatusCode > 599) ||
+		attempt.HeadersPresent != (attempt.Headers.ReviewedSemanticSHA256 != "") ||
+		attempt.BodyComplete && !attempt.BodyCaptured ||
+		attempt.BodyCaptured != validSHA256(attempt.BodySHA256) ||
+		!attempt.BodyCaptured && (attempt.BodyBytes != 0 || attempt.BodySHA256 != "") ||
+		attempt.BodyBytes < 0 || attempt.BodyBytes > MaxProviderResponseBodyBytes+1 ||
+		attempt.BodyComplete && attempt.BodyBytes > MaxProviderResponseBodyBytes ||
+		attempt.TLSConnections == nil || len(attempt.TLSConnections) > 16 {
+		return errors.New("response attempt envelope is invalid")
+	}
+	for connectionIndex, connection := range attempt.TLSConnections {
+		if err := validateTLSConnectionTrace(connection); err != nil {
+			return fmt.Errorf("TLS connection %d: %w", connectionIndex, err)
+		}
+	}
+	if attempt.HeadersPresent {
+		if err := validateProviderResponseHeaders(attempt.Headers); err != nil {
+			return err
+		}
+	} else if !reflect.DeepEqual(attempt.Headers, ProviderResponseHeadersTrace{}) {
+		return errors.New("absent response headers retain commitments")
+	}
+	validStage := false
+	for _, stage := range []string{
+		ResponseAttemptCompleted,
+		ResponseAttemptTransport,
+		ResponseAttemptResponseBody,
+		ResponseAttemptResponseStatus,
+		ResponseAttemptResponseHeaders,
+		ResponseAttemptSemanticValidation,
+		ResponseAttemptDownstreamForward,
+	} {
+		if attempt.Stage == stage {
+			validStage = true
+			break
+		}
+	}
+	if !validStage {
+		return errors.New("response attempt stage is unsupported")
+	}
+	if attempt.Stage == ResponseAttemptCompleted {
+		if attempt.ErrorClass != "" {
+			return errors.New("completed response attempt contains an error class")
+		}
+	} else if attempt.ErrorClass != attempt.Stage+"_failure" {
+		return errors.New("failed response attempt error class is inconsistent")
+	}
+	observedResponse := attempt.StatusPresent && attempt.HeadersPresent
+	completeBody := attempt.BodyCaptured && attempt.BodyComplete
+	semanticHeaders := attempt.Headers.ContentTypePresent &&
+		!attempt.Headers.ContentEncodingPresent &&
+		attempt.Headers.ProviderModelPresent &&
+		(sequence != 0 || attempt.Headers.TurnStatePresent)
+	switch attempt.Stage {
+	case ResponseAttemptTransport:
+		if attempt.BodyCaptured || attempt.StatusPresent != attempt.HeadersPresent {
+			return errors.New("transport-stage response attempt contains unreachable state")
+		}
+	case ResponseAttemptResponseBody:
+		if !observedResponse || !attempt.BodyCaptured {
+			return errors.New("response-body attempt omitted its status, headers, or body prefix")
+		}
+	case ResponseAttemptResponseStatus:
+		if !observedResponse || !completeBody || attempt.StatusCode == http.StatusOK {
+			return errors.New("response-status attempt does not contain a complete non-200 response")
+		}
+	case ResponseAttemptResponseHeaders:
+		if !observedResponse || !completeBody || attempt.StatusCode != http.StatusOK {
+			return errors.New("response-headers attempt omitted its complete 200 response")
+		}
+	case ResponseAttemptSemanticValidation:
+		if !observedResponse || !completeBody || attempt.StatusCode != http.StatusOK ||
+			!semanticHeaders {
+			return errors.New("semantic-validation attempt omitted its validated header/body prerequisites")
+		}
+	case ResponseAttemptDownstreamForward, ResponseAttemptCompleted:
+		if !observedResponse || !completeBody || attempt.StatusCode != http.StatusOK ||
+			!semanticHeaders {
+			return errors.New("completed semantic response attempt is incomplete")
+		}
+	}
+	if requireCompleted && attempt.Stage != ResponseAttemptCompleted {
+		return errors.New("complete trace contains a failed response attempt")
+	}
+	return nil
+}
+
+func validateProviderResponseHeaders(headers ProviderResponseHeadersTrace) error {
+	if !validSHA256(headers.ReviewedSemanticSHA256) {
+		return errors.New("response header aggregate commitment is invalid")
+	}
+	for name, field := range map[string]struct {
+		digest  string
+		present bool
+	}{
+		"content type":       {digest: headers.ContentTypeSHA256, present: headers.ContentTypePresent},
+		"content encoding":   {digest: headers.ContentEncodingSHA256, present: headers.ContentEncodingPresent},
+		"provider model":     {digest: headers.ProviderModelSHA256, present: headers.ProviderModelPresent},
+		"turn state":         {digest: headers.TurnStateSHA256, present: headers.TurnStatePresent},
+		"reasoning included": {digest: headers.ReasoningIncludedSHA256, present: headers.ReasoningIncludedPresent},
+	} {
+		if field.present != validSHA256(field.digest) {
+			return fmt.Errorf("response %s presence and commitment are inconsistent", name)
+		}
+	}
+	return nil
+}
+
+func responseMatchesAttempt(
+	wire ProviderResponseWireTrace,
+	attempt ProviderResponseAttemptTrace,
+) error {
+	if attempt.Stage != ResponseAttemptCompleted &&
+		attempt.Stage != ResponseAttemptDownstreamForward || !attempt.BodyComplete ||
+		attempt.StatusCode != wire.StatusCode || attempt.BodyBytes != wire.BodyBytes ||
+		attempt.BodySHA256 != wire.ExactBodySHA256 {
+		return errors.New("completed response wire differs from its provider attempt")
+	}
+	return nil
 }
 
 func validateTLSConnectionTrace(connection TLSConnectionTrace) error {
@@ -579,15 +1255,6 @@ func validateTLSConnectionTrace(connection TLSConnectionTrace) error {
 		}
 	}
 	return nil
-}
-
-func cloneTLSConnectionTrace(source TLSConnectionTrace) TLSConnectionTrace {
-	clone := source
-	clone.VerifiedChainsSHA256 = make([][]string, len(source.VerifiedChainsSHA256))
-	for index, chain := range source.VerifiedChainsSHA256 {
-		clone.VerifiedChainsSHA256[index] = append([]string(nil), chain...)
-	}
-	return clone
 }
 
 func validateToolCall(
@@ -621,22 +1288,22 @@ func validateToolCall(
 		}
 	}
 	if _, declared := declarations[call.Kind+"\x00"+call.Name]; !declared {
-		return fmt.Errorf("Codex called undeclared tool %q", call.Name)
+		return fmt.Errorf("codex called undeclared tool %q", call.Name)
 	}
 	return nil
 }
 
 func addUsage(total *harness.Usage, next harness.Usage) error {
 	values := []struct {
-		name   string
 		target *int64
+		name   string
 		value  int64
 	}{
-		{"input", &total.InputTokens, next.InputTokens},
-		{"cached input", &total.CachedInputTokens, next.CachedInputTokens},
-		{"cache-write input", &total.CacheWriteInputTokens, next.CacheWriteInputTokens},
-		{"output", &total.OutputTokens, next.OutputTokens},
-		{"reasoning", &total.ReasoningTokens, next.ReasoningTokens},
+		{name: "input", target: &total.InputTokens, value: next.InputTokens},
+		{name: "cached input", target: &total.CachedInputTokens, value: next.CachedInputTokens},
+		{name: "cache-write input", target: &total.CacheWriteInputTokens, value: next.CacheWriteInputTokens},
+		{name: "output", target: &total.OutputTokens, value: next.OutputTokens},
+		{name: "reasoning", target: &total.ReasoningTokens, value: next.ReasoningTokens},
 	}
 	for _, value := range values {
 		if value.value > math.MaxInt64-*value.target {
@@ -649,7 +1316,7 @@ func addUsage(total *harness.Usage, next harness.Usage) error {
 
 func strictUnmarshalJSON(raw []byte, destination any) error {
 	if !utf8.Valid(raw) {
-		return errors.New("JSON must be valid UTF-8")
+		return errors.New("json must be valid UTF-8")
 	}
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
 		return err
@@ -691,7 +1358,7 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 				}
 				key, ok := keyToken.(string)
 				if !ok {
-					return errors.New("JSON object key is not a string")
+					return errors.New("json object key is not a string")
 				}
 				if _, exists := seen[key]; exists {
 					return fmt.Errorf("duplicate JSON object key %q", key)
@@ -733,7 +1400,7 @@ func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, errors.New("JSON value has trailing content")
+		return nil, errors.New("json value has trailing content")
 	}
 	return json.Marshal(value)
 }

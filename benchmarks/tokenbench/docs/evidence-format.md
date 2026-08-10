@@ -1,135 +1,204 @@
 # Evidence format
 
-> Status: proposed versioned evidence format. No CAS writer, capture bundle, replay, statistics, or report schema exists yet. The current serializable `ResolvedPlan` is an audit artifact only and is not evidence or execution authority.
+Tokenbench currently publishes two immutable bundle kinds: a raw `capture` and
+an offline-derived `replay`. Both have an Ed25519-signed attestation envelope as
+their public root. A plan by itself is audit data, not evidence or execution
+authority.
 
-## Principles
+## Object references and CAS
 
-Tokenbench evidence is intended to be:
+Every object is identified by:
 
-- **immutable:** capture and derived analysis are never edited in place;
-- **content-addressed:** every object is named and verified by a cryptographic digest;
-- **self-describing:** manifests pin schemas, producers, adapters, decoders, and repository inputs;
-- **replayable:** token decoding, quality checks, and reporting run without a live model;
-- **complete about failure:** incomplete, invalid, excluded, and retried attempts remain visible;
-- **secret-free:** credential values and unrestricted environment dumps are prohibited.
-
-## Current audit artifact versus future evidence
-
-Current `Pair.Plan(ctx)` serializes the suite/prompt digests, two semantic invocations, resolved model/adapter/source/tokenbench-executable identities, parity proof, rendered process pair, and rendered-process digest. `ResolvedPlan.Validate` recomputes parity and process commitments and checks the rendered sole-delta shape; `DecodePlan` also rejects invalid UTF-8, duplicate/unknown fields, and trailing JSON.
-
-Validation does not reread the suite, source, `.git`, Git executable, tokenbench/harness/MCP executables, or adapter configuration. A decoded plan contains the verified `ProcessPair`, but not the retained adapter capability, so it cannot call `Pair.Build` or authorize execution. A future capture manifest may reference a plan digest, but must also prove fresh suite preparation, build-time re-resolution/reverification, actual process launch, and raw capture.
-
-## Proposed bundle model
-
-A bundle is a small canonical manifest that refers to immutable objects in a content-addressed store (CAS):
-
-```text
-bundle manifest
-  -> canonical run specification
-  -> corpus/task objects
-  -> requested/resolved model and adapter wrapper/child identities
-  -> source tree, standalone .git metadata, Git executable, and tokenbench executable identities
-  -> pair/attempt manifests
-       -> requested and effective configuration
-       -> prompt and repository identity
-       -> verified common process and candidate MCP argv suffix
-       -> live MCP handshake/server/tool-surface record
-       -> raw stdout/stderr/event streams
-       -> response and exit record
-       -> raw usage events
-       -> parity and quality results
-  -> optional derived analysis/report objects
+```json
+{"digest":"sha256:<64 lowercase hex>","size":123,"media_type":"type/subtype"}
 ```
 
-Objects use a versioned media type, byte length, and a digest such as `sha256:<lowercase-hex>`. Canonical JSON should use one pinned serialization rule before hashing; opaque raw streams are hashed byte-for-byte.
+The digest covers exact bytes. Media types are lowercase and parameter-free at
+the CAS layer; an adapter artifact's original parameterized media type is stored
+inside its semantic envelope.
 
-A directory layout may cache objects as `objects/sha256/<prefix>/<remainder>` and keep named bundle manifests separately. Paths are an implementation detail; the digest is the identity.
+The CAS is append-only and bounded. It accepts an absolute, canonical, real
+directory on one filesystem. A transaction:
 
-## Bundle kinds and lineage
+1. creates an exclusive private staging directory and lease;
+2. writes each object through a retained inode pin while hashing and bounding
+   bytes;
+3. verifies mode, link count, size, inode identity, and digest;
+4. publishes with atomic no-replace semantics, accepting an existing path only
+   when its exact bytes and metadata verify;
+5. syncs objects and directories before publishing the designated root last;
+6. reopens and verifies the complete expected object graph;
+7. removes and syncs private staging state.
 
-- **capture bundle:** raw outputs and execution metadata from paired attempts.
-- **replay bundle:** normalized usage/events produced from one capture bundle by pinned decoders.
-- **analysis bundle:** paired metrics and quality results derived from capture or replay.
-- **report bundle:** rendered tables and narrative derived from an analysis bundle.
-- **legacy-import bundle:** immutable preservation of historical artifacts and their limitations.
+Stale recovery is lease-aware and validates every owned name/inode. Publication
+states distinguish `retryable`, `durable`, `visible`, and `indeterminate`; a
+later sync/cleanup failure cannot be collapsed into success. When visibility is
+uncertain, the CLI writes an exclusive typed recovery record instead of a
+canonical root file. Cleanup residue is never accepted as evidence.
 
-Every derived manifest lists parent bundle digests and producer identity. Changing a decoder, price table, quality rule, or report template creates a new derived bundle. A convenient mutable alias such as `latest` may exist outside evidence, but it is never a source of provenance.
+## Signed root
 
-## Root manifest fields
+The public root references
+`application/vnd.tokenbench.attestation.v1+json`. Its canonical
+envelope contains:
 
-The planned root manifest records at least:
+- project context;
+- signer key ID;
+- bundle kind (`capture` or `replay`);
+- exact subject `ObjectRef`;
+- sorted parent signed-root references;
+- an unpadded base64url Ed25519 signature over a domain-separated canonical
+  statement.
 
-- schema name/version and bundle kind;
-- bundle digest and creation timestamp;
-- producer source revision plus canonical tokenbench executable path/digest;
-- parent bundle digests;
-- canonical run-spec and corpus digests;
-- repository locator, full base/head IDs, tracked-tree digest, standalone `.git` metadata digest, canonical Git executable path/digest, and tokenbench executable identity;
-- requested model and exact resolved `<model>@<immutable-revision>`;
-- adapter executable, keyed wrapper-control, child effective-configuration, version, harness executable/version, decoder, quality-policy, and price-table identities as applicable;
-- pair-manifest digests and declared attempt counts;
-- integrity status and explicit limitations;
-- classification such as `conformant`, `invalid`, or `legacy-nonconformant`.
+No public key is embedded as authority. `verify`, `run`, and `replay` require an
+independently supplied canonical `tokenbench.trust-policy/v1`. The policy binds
+each `ed25519-sha256:<public-key-digest>` ID to an active/retired/revoked status
+and sorted allowed roles. Current verification rejects retired and revoked keys
+because v1 intentionally has no trusted timestamp.
 
-Timestamps describe evidence creation, not object identity, unless a future schema explicitly includes them in canonical bytes.
+The root reference file emitted by the CLI is itself the exact compact canonical
+JSON encoding of the attestation `ObjectRef`; it is not an alias or filename
+lookup.
 
-## Pair and attempt records
+## Capture v3 graph
 
-A pair record links task, repetition, randomization seed/position, baseline attempt, candidate attempt, and any retry chain. Each attempt should record:
+The signed capture subject media type is
+`application/vnd.tokenbench.capture.v3+json`:
 
-- arm and lifecycle state;
-- exact prompt object digest and role sequence;
-- repository/tree, standalone `.git`, pinned Git executable, tokenbench executable, and model-visible path identities;
-- requested model, resolved immutable revision, reasoning, and canonical requested/effective configuration object digests;
-- harness identity plus distinct adapter executable, wrapper-control, and child effective-config digests;
-- the candidate registration digest, or its verified absence for baseline;
-- common `ProcessSpec` digest and the exact candidate-only MCP argv suffix;
-- live MCP handshake, server identity, and read-only tool-schema result;
-- start/end observations and timeout policy;
-- raw stdout, stderr, structured event, tool-handshake, response, and exit object digests;
-- provider usage event digests, not only derived totals;
-- parity, infrastructure, decoder, and quality outcomes;
-- retry predecessor and exclusion reason when applicable.
+```text
+signed capture root
+  -> capture v3 subject
+       -> plan v3
+            -> exact suite/prompt commitments
+            -> sole-delta invocations and rendered processes
+            -> trusted artifact manifest/provenance
+            -> origin and immutable execution inputs
+            -> parity and process commitments
+       -> baseline attempt
+            -> stdout bytes
+            -> stderr bytes
+            -> sanitized Codex artifacts
+            -> optional normalized observation OR ordinary failure
+            -> exact termination/truncation/resource state
+       -> candidate attempt (same shape)
+       -> executor identity, randomized order, repetition
+```
 
-Baseline and candidate prompt, model, adapter, source/Git, and protected configuration commitments must match. Baseline records an empty MCP array; candidate records exactly one `repo_view` element. Candidate process must be a central clone of the one adapter-built common process plus only the recorded MCP suffix. The future live record must show that this registration actually resolved to the expected read-only server/tool surface.
+The plan is bounded to 64 MiB before either arm starts and uses
+`application/vnd.tokenbench.plan.v3+json`. It is marked publishable only when it
+contains the trusted artifact audit and immutable origin/execution inputs
+created by live private authority. `DecodePlan` strictly validates all
+commitments but never recreates that authority.
 
-## Usage records
+Raw process streams are stored byte-for-byte. Adapter artifacts include the
+Codex effective configuration and either a complete or sanitized partial
+Responses trace. The trace commits ordered provider request/response attempts,
+exact body digests, bounded SSE events, canonical reviewed-semantic-header
+digests, TLS identities, dynamic fields, provider model, usage, tool
+declarations/calls, and capture errors within fixed limits. It does not claim
+to retain raw HTTP/2 framing, header order, or header-name casing.
+Authorization headers and upstream credentials are excluded.
 
-Normalized usage is derived, never substituted for raw events. A record should include value, unit, source event/object, decoder version, and overlap semantics for:
+Complete traces use
+`application/vnd.tokenbench.codex.responses-trace.v3+json`; ordinary terminal
+process failures use
+`application/vnd.tokenbench.codex.partial-responses-trace.v3+json`. A partial
+trace preserves bounded audit evidence but does not turn a provider-routing,
+capture, parity, or cleanup failure into publication authority.
+
+An attempt has exactly one of these outcomes:
+
+- successful decoding with one canonical normalized observation;
+- a recorded ordinary execution/decode failure plus its raw/partial evidence.
+
+An integrity failure never becomes a signed capture. Capture loading verifies
+the signature and trust role, every object ref and exact media type, plan parity,
+built-in Codex executable/model/adapter allowlists, common process shape,
+attempt/arm/order consistency, normalized observations, and the full transitive
+graph.
+
+## Replay v1 graph
+
+The signed replay subject media type is
+`application/vnd.tokenbench.replay.v1+json`:
+
+```text
+signed replay root
+  -> replay v1 subject
+       -> parent signed capture root
+       -> exact built-in decoder identity
+       -> baseline decoded observation or retained failure
+       -> candidate decoded observation or retained failure
+```
+
+Replay first authenticates and reconstructs the full parent. It binds the exact
+Codex adapter/decoder configuration from the capture plan, decodes only
+successful raw attempts, preserves ordinary failures, validates the
+reconstructed run, and authenticates the parent again immediately before
+staging the child. Parent run identity must be byte-stable across decoding.
+
+Replay receives no credential, model client, live repository, clock, random
+source, or writable parent capability. Any decoder failure publishes nothing.
+The derived root names the parent signed root, not an unsigned subject. Loading a
+replay recursively authenticates both lineages and validates the observations
+again.
+
+## Token accounting
+
+Normalized observations preserve provider-native counters separately:
 
 - input tokens;
-- cached input tokens;
+- cached input tokens (a subset of input);
 - output tokens;
-- reasoning tokens;
-- provider total tokens;
-- any harness-specific counters.
+- reasoning tokens (with their documented containment semantics);
+- provider-reported total when present.
 
-A normalized total must identify the non-overlapping components used. Missing and ambiguous are distinct from zero. Financial cost points to a separate immutable price-table object and never overwrites token fields.
+Missing is distinct from zero. Codex JSONL usage, provider body usage, provider
+header/model state, and raw trace must agree. Tokenbench does not add cached
+input twice or create a discounted “effective token” total. Pricing, exchange
+rates, and cost formulas are separate versioned derived inputs and are not part
+of capture/replay v1.
 
-## Atomic publication and integrity
+## Publication authority and signing order
 
-A planned writer should:
+`PublishRun` accepts only a `Run` sealed by a live publishable `Pair.Execute`.
+The seal snapshots and digests the run and carries a one-shot private state
+machine. Acquisition fails unless all of these remain true:
 
-1. stream each object to staging while hashing;
-2. verify length and digest;
-3. make the object visible idempotently;
-4. write and verify child manifests;
-5. publish the root manifest atomically last.
+- exact live run bytes equal the sealed snapshot;
+- the conformant executor has killed/removed all arm state and closed;
+- the Codex proxy/lifecycle has closed its listener, state, sessions, and
+  upstream credential;
+- the immutable snapshot authority has unmounted and closed every descriptor.
 
-Interrupted staging data is not a bundle. A validator walks every reference, rejects digest or media-type mismatch, checks schema versions/counts, and reruns strict arm/process parity from captured effective configuration. Execution cannot be reconstructed by trusting a decoded plan: the live runner must have reloaded/prepared the suite and preserved build-time and launch-time verification records. Corrupt source evidence is never repaired in place.
+The signing key is loaded only after that boundary. Publication consumes the
+authority exactly once; failed/incomplete publication cannot be retried with a
+mutated run object.
 
-## Replay contract
+`ReplayCapture` likewise authenticates its signer against the replay role before
+publication and signs only after the full parent/decoder checks. Signer seeds
+and trust policy are not CAS objects.
 
-Replay accepts a capture or prior derived bundle by digest. It must not access a live model, mutate the repository, depend on ambient user configuration, or overwrite its parent. It verifies all input digests, uses explicitly selected decoder/checker versions, and emits a new manifest even when derivation fails.
+## Sensitive data
 
-Determinism applies to the same input object set and producer versions. Presentation timestamps or local output paths should be excluded from canonical derived data.
+Never store:
 
-## Redaction and sensitive data
+- upstream API credentials or secret-source descriptors;
+- authorization/cookie headers;
+- signing seeds/private keys;
+- an ambient or unrestricted process environment;
+- unrelated user home/Codex configuration;
+- credential-bearing URLs or provenance.
 
-Do not collect credential values, authorization headers, unrestricted process environments, adapter commitment keys, or unrelated home-directory configuration. Prefer allowlisted fields and value digests. A secret-bearing external-adapter control environment is represented by the wrapper's keyed HMAC-SHA-256 commitment, not by its values or key. If task content requires deterministic redaction, redact before CAS insertion, record the redaction policy identity, and classify the bundle accordingly; do not rewrite a published object.
+Exact prompt, repository content, stdout/stderr, model answers, and sanitized
+tool traces may still be sensitive. Cryptographic integrity does not authorize
+publication; storage and disclosure must follow the repository/data owner’s
+policy.
 
-Repository content and model responses may still be sensitive. Storage and publication policy are separate from cryptographic integrity and must honor the repository's access controls.
+## Evolution and derived studies
 
-## Schema evolution
-
-Schemas carry explicit versions and reject unknown incompatible fields. Additive extensions require documented canonicalization. Incompatible changes receive a new version and migration decoder; historical object bytes remain untouched. Reports must disclose when bundles with different accounting or parity schema versions are compared.
+Schemas and media types are explicit and incompatible changes receive new
+versions. Historical object bytes and decoders remain immutable. Blinded quality
+results, paired statistics, cost tables, and rendered reports must be published
+as new typed descendants with their own policy/producer identities; they may
+reference a replay/capture lineage but must never edit it or hide failed pairs.

@@ -140,7 +140,7 @@ type AttestationStatement struct {
 // AttestationEnvelope is the only conformant public evidence root. Public key
 // material is deliberately absent: trust always comes from an out-of-band
 // Verifier, never from the evidence being verified.
-type AttestationEnvelope struct {
+type AttestationEnvelope struct { //nolint:govet,nolintlint // Field order defines canonical signed JSON.
 	SchemaVersion string               `json:"schema_version"`
 	Statement     AttestationStatement `json:"statement"`
 	Signature     string               `json:"signature"`
@@ -217,14 +217,14 @@ func (signer *Ed25519Signer) GoString() string { return signer.String() }
 // VerifiedEvidence is the typed result of authenticating one complete root.
 // Exactly one of Capture or Replay is non-nil.
 type VerifiedEvidence struct {
+	Capture           *Capture
+	Replay            *Replay
 	Root              cas.ObjectRef
 	Subject           cas.ObjectRef
 	BundleKind        BundleKind
 	KeyID             string
 	TrustPolicySHA256 string
 	Parents           []cas.ObjectRef
-	Capture           *Capture
-	Replay            *Replay
 }
 
 // VerifyEvidence authenticates the envelope with an out-of-band trust policy,
@@ -319,7 +319,7 @@ func loadVerifiedEnvelope(
 		)
 	}
 	if err := preflightObject(root, maxAttestationBytes, "attestation envelope"); err != nil {
-		return AttestationEnvelope{}, fmt.Errorf("%w: %v", ErrInvalidAttestation, err)
+		return AttestationEnvelope{}, fmt.Errorf("%w: %w", ErrInvalidAttestation, err)
 	}
 	raw, err := store.Read(ctx, root)
 	if err != nil {
@@ -327,7 +327,7 @@ func loadVerifiedEnvelope(
 	}
 	var envelope AttestationEnvelope
 	if err := decodeStrict(raw, &envelope); err != nil {
-		return AttestationEnvelope{}, fmt.Errorf("%w: decode envelope: %v", ErrInvalidAttestation, err)
+		return AttestationEnvelope{}, fmt.Errorf("%w: decode envelope: %w", ErrInvalidAttestation, err)
 	}
 	if envelope.SchemaVersion != AttestationSchemaVersion {
 		return AttestationEnvelope{}, fmt.Errorf("%w: unsupported envelope schema", ErrInvalidAttestation)
@@ -368,7 +368,7 @@ func validateAttestationStatement(statement AttestationStatement) error {
 		return fmt.Errorf("%w: statement parents must be a canonical array", ErrInvalidAttestation)
 	}
 	if err := statement.Subject.Validate(); err != nil {
-		return fmt.Errorf("%w: statement subject: %v", ErrInvalidAttestation, err)
+		return fmt.Errorf("%w: statement subject: %w", ErrInvalidAttestation, err)
 	}
 	switch statement.BundleKind {
 	case CaptureBundle:
@@ -393,7 +393,7 @@ func validateAttestationStatement(statement AttestationStatement) error {
 			return fmt.Errorf("%w: parent is not an attestation root", ErrInvalidAttestation)
 		}
 		if err := preflightObject(parent, maxAttestationBytes, "attestation parent"); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidAttestation, err)
+			return fmt.Errorf("%w: %w", ErrInvalidAttestation, err)
 		}
 	}
 	return nil
@@ -462,16 +462,6 @@ func putAttestation(
 		return cas.ObjectRef{}, err
 	}
 	return putJSON(ctx, transaction, attestationMediaType, envelope)
-}
-
-func validateAttestationSigner(signer AttestationSigner) error {
-	if signer == nil || isNilInterface(signer) {
-		return errors.New("attestation signer is required")
-	}
-	if len(signer.AttestationPublicKey()) != ed25519.PublicKeySize {
-		return errors.New("attestation signer public key is invalid")
-	}
-	return nil
 }
 
 type authorizedAttestationSigner struct {
@@ -636,11 +626,10 @@ func validAttestationKeyID(value string) bool {
 
 func isNilInterface(value any) bool {
 	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map,
-		reflect.Pointer, reflect.Slice:
+	kind := reflected.Kind()
+	if kind == reflect.Chan || kind == reflect.Func || kind == reflect.Interface ||
+		kind == reflect.Map || kind == reflect.Pointer || kind == reflect.Slice {
 		return reflected.IsNil()
-	default:
-		return false
 	}
+	return false
 }

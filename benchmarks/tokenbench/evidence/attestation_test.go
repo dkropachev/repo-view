@@ -46,9 +46,9 @@ func TestAttestationCanonicalGolden(t *testing.T) {
 	}
 	digest := sha256.Sum256(envelopeJSON)
 	const wantKeyID = "ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec"
-	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v1","project":"github.com/dkropachev/repo-view/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v2+json"},"parents":[]}`
-	const wantSignature = "anQAvQ4PpypC2VQhu1x9FkvZOdKjlkaanThlOLrLvPY4bjHdzhl_N53zKh_nymp_Rahl4MeyebNaBTvU5PoYDQ"
-	const wantRootDigest = "18f15750e2c3059b30e119bc75c6a178886a28298b022e55b3b49c0d95268f89"
+	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v1","project":"github.com/dkropachev/repo-view/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v3+json"},"parents":[]}`
+	const wantSignature = "_1c9FCsYn1oF9v5zFO5c3uF0Noj0bPzzG2R0XTX5tLOVdOYSokz5_Pz9y5WrnJa12O21xr4qFaMStnrdrf-VAQ"
+	const wantRootDigest = "70f6b098a24254c454eaeb1601baa04794cbbd12f150dfbe2c61d0ffe86bc2ed"
 	if envelope.Statement.KeyID != wantKeyID ||
 		string(statementJSON) != wantStatement ||
 		envelope.Signature != wantSignature ||
@@ -399,7 +399,7 @@ func TestReplayLineageDepthIsBoundedBeforeGraphExpansion(t *testing.T) {
 	}
 	manifest := loaded.Manifest
 	current := parent
-	for index := 0; index < maxLineageDepth+2; index++ {
+	for range maxLineageDepth + 2 {
 		manifest.Parent = current
 		current = putTestAttestedSubject(
 			t,
@@ -555,7 +555,11 @@ func TestPublicationRecoveryNeverTrustsRootBlobWithoutCompleteGraph(t *testing.T
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() {
+			if err := store.Close(); err != nil {
+				t.Errorf("close CAS store: %v", err)
+			}
+		}()
 		run := validRun(t)
 		signer, verifier := testSignerAndVerifier(
 			t, []BundleKind{CaptureBundle}, KeyActive,

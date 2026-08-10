@@ -16,6 +16,12 @@ const (
 	digestHexLen = 64
 )
 
+type transactionsActiveSentinel struct{}
+
+func (*transactionsActiveSentinel) Error() string {
+	return "CAS transactions are active"
+}
+
 var (
 	// ErrInvalidObjectRef means an ObjectRef is not in the canonical form
 	// accepted by this package.
@@ -47,7 +53,7 @@ var (
 
 	// ErrTransactionsActive means stale-transaction recovery was skipped
 	// because at least one process still holds a live transaction lease.
-	ErrTransactionsActive = errors.New("CAS transactions are active")
+	ErrTransactionsActive error = &transactionsActiveSentinel{}
 
 	// ErrRootPublished means Commit published, or verified an existing copy of,
 	// the designated root, but a later durability or staging-cleanup step
@@ -59,7 +65,7 @@ var (
 // ObjectRef identifies exact immutable bytes and carries their asserted media
 // type. Digest is always "sha256:" followed by 64 lowercase hexadecimal
 // characters. MediaType is a lowercase type/subtype without parameters.
-type ObjectRef struct {
+type ObjectRef struct { //nolint:govet,nolintlint // Field order defines canonical evidence JSON.
 	Digest    string `json:"digest"`
 	Size      int64  `json:"size"`
 	MediaType string `json:"media_type"`
@@ -92,9 +98,9 @@ type CommitResult struct {
 // boundary that failed during an idempotent maintenance operation. Callers can
 // recover it with errors.As without parsing an error string.
 type ObjectOperationError struct {
+	Err   error
 	Ref   ObjectRef
 	Stage string
-	Err   error
 }
 
 func (err *ObjectOperationError) Error() string {

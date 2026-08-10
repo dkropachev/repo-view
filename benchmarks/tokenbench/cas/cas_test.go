@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -92,7 +93,7 @@ func TestStoreAndTransactionHardBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < hardMaxTransactionPuts; index++ {
+	for index := range hardMaxTransactionPuts {
 		if _, err := transaction.Put(
 			context.Background(),
 			testMediaType,
@@ -383,6 +384,44 @@ func TestCleanupFailureAfterPublicationIsExplicit(t *testing.T) {
 	assertNoTransactions(t, root)
 }
 
+func TestLateCleanupFailureRemainsRetryable(t *testing.T) {
+	store, root := newTestStore(t, 1<<20)
+	transaction, err := store.Begin()
+	if err != nil {
+		t.Fatalf("Begin(): %v", err)
+	}
+	ref, err := transaction.Put(
+		context.Background(),
+		testMediaType,
+		bytes.NewReader([]byte("published before late cleanup fails")),
+	)
+	if err != nil {
+		t.Fatalf("Put(): %v", err)
+	}
+
+	lateErr := errors.New("simulated late cleanup failure")
+	attempts := 0
+	store.beforeCleanupClose = func() error {
+		attempts++
+		if attempts == 1 {
+			return lateErr
+		}
+		return nil
+	}
+	err = transaction.Commit(context.Background(), ref)
+	if !errors.Is(err, ErrRootPublished) || !errors.Is(err, ErrCleanupPending) ||
+		!errors.Is(err, lateErr) {
+		t.Fatalf("Commit() error = %v, want published, pending, and late errors", err)
+	}
+	if err := transaction.Abort(); err != nil {
+		t.Fatalf("Abort(retry late cleanup): %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("late cleanup attempts = %d, want 2", attempts)
+	}
+	assertNoTransactions(t, root)
+}
+
 func TestCleanupFailureBeforeRootDoesNotClaimPublication(t *testing.T) {
 	store, root := newTestStore(t, 1<<20)
 	transaction, err := store.Begin()
@@ -470,11 +509,13 @@ func TestReadRejectsFilesystemAndContentCorruption(t *testing.T) {
 	}
 	tests := []corruptionTest{
 		{"missing object", func(t *testing.T, _, object string, _ []byte) {
+			t.Helper()
 			if err := os.Remove(object); err != nil {
 				t.Fatalf("Remove(object): %v", err)
 			}
 		}},
 		{"bit-flipped object", func(t *testing.T, _, object string, content []byte) {
+			t.Helper()
 			flipped := append([]byte(nil), content...)
 			flipped[len(flipped)-1] ^= 0xff
 			if err := os.Chmod(object, stagedFileMode); err != nil {
@@ -488,11 +529,13 @@ func TestReadRejectsFilesystemAndContentCorruption(t *testing.T) {
 			}
 		}},
 		{"writable object", func(t *testing.T, _, object string, _ []byte) {
+			t.Helper()
 			if err := os.Chmod(object, stagedFileMode); err != nil {
 				t.Fatalf("Chmod(object): %v", err)
 			}
 		}},
 		{"object symlink", func(t *testing.T, root, object string, content []byte) {
+			t.Helper()
 			if err := os.Remove(object); err != nil {
 				t.Fatalf("Remove(object): %v", err)
 			}
@@ -505,6 +548,7 @@ func TestReadRejectsFilesystemAndContentCorruption(t *testing.T) {
 			}
 		}},
 		{"object hardlink", func(t *testing.T, root, object string, content []byte) {
+			t.Helper()
 			if err := os.Remove(object); err != nil {
 				t.Fatalf("Remove(object): %v", err)
 			}
@@ -517,6 +561,7 @@ func TestReadRejectsFilesystemAndContentCorruption(t *testing.T) {
 			}
 		}},
 		{"nonregular object", func(t *testing.T, _, object string, _ []byte) {
+			t.Helper()
 			if err := os.Remove(object); err != nil {
 				t.Fatalf("Remove(object): %v", err)
 			}
@@ -525,6 +570,7 @@ func TestReadRejectsFilesystemAndContentCorruption(t *testing.T) {
 			}
 		}},
 		{"symlink shard", func(t *testing.T, root, object string, content []byte) {
+			t.Helper()
 			shard := filepath.Dir(object)
 			if err := os.Remove(object); err != nil {
 				t.Fatalf("Remove(object): %v", err)
@@ -739,6 +785,45 @@ func TestFailedPutAndAbortCleanOnlyOwnedPaths(t *testing.T) {
 	})
 }
 
+func TestCommitRejectsSameContentReplacementOutsideOwnedInodePin(t *testing.T) {
+	store, root := newTestStore(t, 1<<20)
+	transaction, err := store.Begin()
+	if err != nil {
+		t.Fatalf("Begin(): %v", err)
+	}
+	content := []byte("same bytes must not substitute inode identity")
+	ref, err := transaction.Put(context.Background(), testMediaType, bytes.NewReader(content))
+	if err != nil {
+		t.Fatalf("Put(): %v", err)
+	}
+	stagedName := transaction.staged[ref.hexDigest()].name
+	stagedPath := filepath.Join(root, "staging", transaction.directory, stagedName)
+	if err := os.Remove(stagedPath); err != nil {
+		t.Fatalf("Remove(owned staged object): %v", err)
+	}
+	if err := os.WriteFile(stagedPath, content, objectFileMode); err != nil {
+		t.Fatalf("WriteFile(same-content replacement): %v", err)
+	}
+
+	if err := transaction.Commit(context.Background(), ref); !errors.Is(err, ErrIntegrity) {
+		t.Fatalf("Commit() error = %v, want ErrIntegrity", err)
+	}
+	got, err := os.ReadFile(stagedPath)
+	if err != nil || !bytes.Equal(got, content) {
+		t.Fatalf("foreign replacement changed: bytes=%q err=%v", got, err)
+	}
+	if err := store.Verify(context.Background(), ref); err == nil {
+		t.Fatal("same-content foreign inode was published")
+	}
+	if err := os.Remove(stagedPath); err != nil {
+		t.Fatalf("Remove(foreign replacement): %v", err)
+	}
+	if err := transaction.Abort(); err != nil {
+		t.Fatalf("Abort(retry cleanup): %v", err)
+	}
+	assertNoTransactions(t, root)
+}
+
 func TestAbortTreatsAlreadyRemovedTransactionAsCleaned(t *testing.T) {
 	store, root := newTestStore(t, 1<<20)
 	transaction, err := store.Begin()
@@ -799,6 +884,57 @@ func TestRecoverStaleRemovesAbandonedStagedObjects(t *testing.T) {
 		t.Fatalf("Verify(unpublished root) error = %v, want ErrIntegrity", err)
 	}
 	assertNoTransactions(t, root)
+}
+
+func TestStaleTransactionAbsenceNeverMasksIntegrity(t *testing.T) {
+	t.Parallel()
+	if !benignStaleTransactionAbsence(fs.ErrNotExist) {
+		t.Fatal("plain stale-transaction disappearance was not treated as benign")
+	}
+	for _, err := range []error{
+		nil,
+		ErrIntegrity,
+		errors.Join(ErrIntegrity, fs.ErrNotExist),
+		errors.New("other failure"),
+	} {
+		if benignStaleTransactionAbsence(err) {
+			t.Fatalf("integrity or non-absence error was treated as benign: %v", err)
+		}
+	}
+}
+
+func TestActiveTransactionSentinelDoesNotMaskCleanupErrors(t *testing.T) {
+	t.Parallel()
+	if !benignTransactionsActive(ErrTransactionsActive) {
+		t.Fatal("plain active-transaction sentinel was not treated as benign")
+	}
+	cleanupErr := errors.New("cleanup failed")
+	joined := errors.Join(ErrTransactionsActive, cleanupErr)
+	if benignTransactionsActive(joined) || !errors.Is(joined, ErrTransactionsActive) ||
+		!errors.Is(joined, cleanupErr) {
+		t.Fatalf("joined active/cleanup error classification = %v", joined)
+	}
+}
+
+func TestOpenSucceedsWhileAnotherStoreHasLiveTransaction(t *testing.T) {
+	store, root := newTestStore(t, 1<<20)
+	transaction, err := store.Begin()
+	if err != nil {
+		t.Fatalf("Begin(): %v", err)
+	}
+	t.Cleanup(func() {
+		if err := transaction.Abort(); err != nil {
+			t.Errorf("Abort(): %v", err)
+		}
+	})
+
+	concurrent, err := Open(root, Options{MaxObjectBytes: 1 << 20})
+	if err != nil {
+		t.Fatalf("Open(with live transaction): %v", err)
+	}
+	if err := concurrent.Close(); err != nil {
+		t.Fatalf("Close(concurrent store): %v", err)
+	}
 }
 
 func TestRecoverStaleValidatesAllEntriesBeforeDeleting(t *testing.T) {

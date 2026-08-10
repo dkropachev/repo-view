@@ -68,10 +68,10 @@ type publicationRecoveryRecord struct {
 }
 
 type publishedRootError struct {
-	Root         cas.ObjectRef
 	RootPath     string
 	RecoveryPath string
 	Cause        error
+	Root         cas.ObjectRef
 }
 
 func (failure *publishedRootError) Error() string {
@@ -110,9 +110,9 @@ func (failure *publishedRootError) Unwrap() error {
 }
 
 type publicationRecoveryError struct {
-	Result       evidence.PublicationResult
 	RecoveryPath string
 	Cause        error
+	Result       evidence.PublicationResult
 }
 
 func (failure *publicationRecoveryError) Error() string {
@@ -151,12 +151,14 @@ var (
 )
 
 type runPaths struct {
-	StateRoot      string
-	CAS            string
-	RootOutput     string
-	SigningKeyFile string
-	TrustPolicy    string
-	SourceRoot     string
+	StateRoot          string
+	SnapshotRoot       string
+	ArtifactBundleRoot string
+	CAS                string
+	RootOutput         string
+	SigningKeyFile     string
+	TrustPolicy        string
+	SourceRoot         string
 }
 
 type namedPath struct {
@@ -168,6 +170,15 @@ func resolveRunPaths(raw runPaths) (runPaths, error) {
 	var result runPaths
 	var err error
 	if result.StateRoot, err = requireAbsoluteClean(raw.StateRoot, "Codex state root"); err != nil {
+		return runPaths{}, err
+	}
+	if result.SnapshotRoot, err = requireAbsoluteClean(raw.SnapshotRoot, "execution snapshot root"); err != nil {
+		return runPaths{}, err
+	}
+	if result.ArtifactBundleRoot, err = requireAbsoluteClean(
+		raw.ArtifactBundleRoot,
+		"execution artifact bundle root",
+	); err != nil {
 		return runPaths{}, err
 	}
 	if result.CAS, err = requireAbsoluteClean(raw.CAS, "evidence CAS"); err != nil {
@@ -191,6 +202,8 @@ func resolveRunPaths(raw runPaths) (runPaths, error) {
 	}
 	named := []namedPath{
 		{"Codex state root", result.StateRoot},
+		{"execution snapshot root", result.SnapshotRoot},
+		{"execution artifact bundle root", result.ArtifactBundleRoot},
 		{"evidence CAS", result.CAS},
 		{"signed root output", result.RootOutput},
 		{"publication recovery output", recoveryPath},
@@ -216,7 +229,7 @@ func requireDisjointPaths(named []namedPath) error {
 			}
 		}
 	}
-	return nil
+	return requirePhysicallyDisjointPaths(named)
 }
 
 func canonicalCommandPaths(raw []namedPath) ([]namedPath, error) {
@@ -306,35 +319,34 @@ func loadCredentialFDWithin(descriptor int, pipeTimeout time.Duration) ([]byte, 
 		file = nil
 		return err
 	}
-	fail := func(raw []byte) ([]byte, error) {
-		clear(raw)
+	fail := func() error {
 		_ = closeSource()
-		return nil, errCredentialSource
+		return errCredentialSource
 	}
 	statusFlags, err := unix.FcntlInt(file.Fd(), unix.F_GETFL, 0)
 	if err != nil || statusFlags&unix.O_ACCMODE != unix.O_RDONLY {
-		return fail(nil)
+		return nil, fail()
 	}
 	descriptorFlags, err := unix.FcntlInt(file.Fd(), unix.F_GETFD, 0)
 	if err != nil {
-		return fail(nil)
+		return nil, fail()
 	}
 	if _, err := unix.FcntlInt(
 		file.Fd(),
 		unix.F_SETFD,
 		descriptorFlags|unix.FD_CLOEXEC,
 	); err != nil {
-		return fail(nil)
+		return nil, fail()
 	}
 	before, statErr := file.Stat()
 	if statErr != nil || !validCredentialDescriptorInfo(before) {
-		return fail(nil)
+		return nil, fail()
 	}
 	regular := before.Mode().IsRegular()
 	if regular {
 		offset, seekErr := file.Seek(0, io.SeekCurrent)
 		if seekErr != nil || offset != 0 {
-			return fail(nil)
+			return nil, fail()
 		}
 	}
 	var raw []byte
@@ -347,7 +359,7 @@ func loadCredentialFDWithin(descriptor int, pipeTimeout time.Duration) ([]byte, 
 			unix.F_SETFL,
 			statusFlags|unix.O_NONBLOCK,
 		); err != nil {
-			return fail(nil)
+			return nil, fail()
 		}
 		raw, readErr = readCredentialPipe(int(file.Fd()), pipeTimeout)
 	}
@@ -563,11 +575,12 @@ func finalizeCompletePublication(
 	var visibilityErr error
 	if !rootVisible {
 		observed, err := readCanonicalRoot(rootPath)
-		if err == nil && observed == root {
+		switch {
+		case err == nil && observed == root:
 			rootVisible = true
-		} else if err != nil {
+		case err != nil:
 			visibilityErr = fmt.Errorf("verify intended signed-root output: %w", err)
-		} else {
+		default:
 			visibilityErr = errors.New("intended signed-root output contains a different root")
 		}
 	}
@@ -759,11 +772,11 @@ func validateStableFileInfo(info fs.FileInfo, maximum int64, ownerOnly bool) err
 }
 
 type exclusiveOutput struct {
+	parent    *os.File
+	file      *os.File
 	path      string
 	name      string
 	staging   string
-	parent    *os.File
-	file      *os.File
 	mode      os.FileMode
 	published bool
 	complete  bool
@@ -814,7 +827,7 @@ func claimExclusiveOutput(
 	}
 	var staging string
 	descriptor := -1
-	for attempt := 0; attempt < 32; attempt++ {
+	for range 32 {
 		nonce := make([]byte, 16)
 		if _, err := rand.Read(nonce); err != nil {
 			parent.Close()

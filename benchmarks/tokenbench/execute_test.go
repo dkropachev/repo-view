@@ -14,6 +14,7 @@ import (
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
+	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
 )
 
 type recordingExecutor struct {
@@ -69,10 +70,12 @@ func (prepared *recordingPrepared) Execute(
 		}, errors.New("injected execution failure")
 	}
 	if executor.integrityArm == request.Arm {
-		return harness.RawExecution{}, runner.NewIntegrityError(
-			"fixture reset",
-			errors.New("injected integrity failure"),
-		)
+		return harness.RawExecution{Artifacts: []harness.Artifact{{
+				Name: "partial", MediaType: "application/octet-stream", Data: []byte("retained"),
+			}}}, runner.NewIntegrityError(
+				"fixture reset",
+				errors.New("injected integrity failure"),
+			)
 	}
 	toolCalls := []string{}
 	if request.Arm == CandidateArm {
@@ -389,8 +392,16 @@ func TestPairExecuteAbortsOnExecutorIntegrityFailure(t *testing.T) {
 	pair, _ := buildReadyPair(t, fake.Adapter{})
 	first := pair.executionOrder(0)[0]
 	executor := &recordingExecutor{integrityArm: first}
-	if _, err := pair.executeWithBackend(context.Background(), executor, 0); err == nil {
+	run, err := pair.executeWithBackend(context.Background(), executor, 0)
+	if err == nil {
 		t.Fatal("typed executor integrity failure was treated as ordinary")
+	}
+	failed := run.Baseline
+	if first == CandidateArm {
+		failed = run.Candidate
+	}
+	if len(failed.Raw.Artifacts) != 1 || string(failed.Raw.Artifacts[0].Data) != "retained" {
+		t.Fatalf("integrity failure dropped partial evidence: %+v", failed)
 	}
 	if len(executor.requests) != 1 {
 		t.Fatalf("other arm ran after integrity failure: %d requests", len(executor.requests))
@@ -417,5 +428,77 @@ func TestPairExecuteRejectsOpenRunnerConstruction(t *testing.T) {
 	}
 	if _, err := pair.Execute(context.Background(), nil, 0); err == nil {
 		t.Fatal("nil runner was accepted")
+	}
+}
+
+func TestExecutorPolicyMustExactlyMatchImmutableExecutionInputs(t *testing.T) {
+	pair := Pair{
+		executionInputs: executionsnapshot.ExecutionInputs{
+			ReadOnlyPaths:      []string{"/snapshot/source", "/snapshot/cache"},
+			ExecutablePaths:    []string{"/snapshot/bin/repo-view", "/snapshot/bin/runner"},
+			RepoViewExecutable: "/snapshot/bin/repo-view",
+		},
+		originInputs: executionsnapshot.OriginInputs{
+			RepoView: executionsnapshot.FileOrigin{SHA256: strings.Repeat("a", 64)},
+			Runner:   executionsnapshot.FileOrigin{SHA256: strings.Repeat("b", 64)},
+		},
+	}
+	want := runner.ConformancePolicyIdentity{
+		SchemaVersion: runner.ConformancePolicySchemaVersion,
+		ReadOnlyPaths: []string{
+			"/snapshot/cache",
+			"/snapshot/source",
+		},
+		ExecutablePaths: []string{
+			"/snapshot/bin/repo-view",
+			"/snapshot/bin/runner",
+		},
+		CommonMCPExecutable:       "/snapshot/bin/repo-view",
+		CommonMCPExecutableSHA256: strings.Repeat("a", 64),
+		ArmInitExecutableSHA256:   strings.Repeat("b", 64),
+	}
+	if err := pair.validateExecutorPolicyIdentity(want); err != nil {
+		t.Fatalf("exact policy rejected: %v", err)
+	}
+	if !reflect.DeepEqual(
+		pair.executionInputs.ReadOnlyPaths,
+		[]string{"/snapshot/source", "/snapshot/cache"},
+	) {
+		t.Fatal("policy validation mutated execution inputs while sorting")
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*runner.ConformancePolicyIdentity)
+	}{
+		{"schema", func(value *runner.ConformancePolicyIdentity) { value.SchemaVersion = "forged" }},
+		{"extra read root", func(value *runner.ConformancePolicyIdentity) {
+			value.ReadOnlyPaths = append(value.ReadOnlyPaths, "/host")
+		}},
+		{"missing read root", func(value *runner.ConformancePolicyIdentity) {
+			value.ReadOnlyPaths = value.ReadOnlyPaths[:1]
+		}},
+		{"extra executable", func(value *runner.ConformancePolicyIdentity) {
+			value.ExecutablePaths = append(value.ExecutablePaths, "/bin/sh")
+		}},
+		{"missing executable", func(value *runner.ConformancePolicyIdentity) {
+			value.ExecutablePaths = value.ExecutablePaths[:1]
+		}},
+		{"MCP path", func(value *runner.ConformancePolicyIdentity) { value.CommonMCPExecutable = "/other" }},
+		{"MCP digest", func(value *runner.ConformancePolicyIdentity) {
+			value.CommonMCPExecutableSHA256 = strings.Repeat("c", 64)
+		}},
+		{"arm-init digest", func(value *runner.ConformancePolicyIdentity) { value.ArmInitExecutableSHA256 = strings.Repeat("d", 64) }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			forged := want
+			forged.ReadOnlyPaths = append([]string(nil), want.ReadOnlyPaths...)
+			forged.ExecutablePaths = append([]string(nil), want.ExecutablePaths...)
+			test.mutate(&forged)
+			if err := pair.validateExecutorPolicyIdentity(forged); err == nil {
+				t.Fatal("mismatched runner policy was accepted")
+			}
+		})
 	}
 }

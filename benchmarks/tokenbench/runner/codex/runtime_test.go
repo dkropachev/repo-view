@@ -11,9 +11,11 @@ import (
 	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"reflect"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -136,7 +139,7 @@ func TestLifecycleCapturesAndComparesOfflinePair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("call inactive proxy: %v", err)
 	}
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if response.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated inactive proxy status = %d, want 401", response.StatusCode)
 	}
@@ -175,7 +178,7 @@ func TestLifecycleCommitsEveryResponsesRequest(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "first prompt", "command"))
-	first.Body.Close()
+	closeResponseBody(t, first)
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first proxy status = %d", first.StatusCode)
 	}
@@ -185,7 +188,7 @@ func TestLifecycleCommitsEveryResponsesRequest(t *testing.T) {
 		requestJSON(genericrunner.BaselineArm, "second prompt", "command"),
 		"fixture-sticky-turn-state",
 	)
-	second.Body.Close()
+	closeResponseBody(t, second)
 	if second.StatusCode != http.StatusOK {
 		t.Fatalf("second proxy status = %d", second.StatusCode)
 	}
@@ -201,10 +204,10 @@ func TestLifecycleCommitsEveryResponsesRequest(t *testing.T) {
 	if len(trace.Responses) != 2 {
 		t.Fatalf("response commitments = %d, want 2", len(trace.Responses))
 	}
-	if trace.Responses[0].RequestNonToolPayloadSHA256 != trace.FirstRequest.NonToolPayloadSHA256 {
+	if trace.Responses[0].RequestNonceNormalizedNonToolPayloadSHA256 != trace.FirstRequest.NonceNormalizedNonToolPayloadSHA256 {
 		t.Fatal("first response lost its first-request commitment")
 	}
-	if trace.Responses[1].RequestNonToolPayloadSHA256 == trace.Responses[0].RequestNonToolPayloadSHA256 {
+	if trace.Responses[1].RequestNonceNormalizedNonToolPayloadSHA256 == trace.Responses[0].RequestNonceNormalizedNonToolPayloadSHA256 {
 		t.Fatal("second response reused the first request commitment")
 	}
 	if trace.Responses[0].RequestToolsSHA256 == "" ||
@@ -261,6 +264,37 @@ func TestPinnedTreatmentSchemasMatchCodexV0144(t *testing.T) {
 	}
 }
 
+func TestResolveLimitsRejectsTraceV3EvidenceOverflow(t *testing.T) {
+	maximum := Config{
+		MaxResponseBytes: harnesscodex.MaxProviderResponseBodyBytes,
+		MaxRequests:      harnesscodex.MaxResponsesTraceRequests,
+		MaxEvents:        harnesscodex.MaxResponsesTraceSSEEvents,
+		MaxSSEEventBytes: harnesscodex.MaxResponsesSSEEventBytes,
+	}
+	if _, err := resolveLimits(maximum); err != nil {
+		t.Fatalf("resolveLimits rejected exact evidence bounds: %v", err)
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"response body", func(config *Config) { config.MaxResponseBytes++ }},
+		{"request count", func(config *Config) { config.MaxRequests++ }},
+		{"SSE event count", func(config *Config) { config.MaxEvents++ }},
+		{"SSE event bytes", func(config *Config) { config.MaxSSEEventBytes++ }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := maximum
+			test.mutate(&config)
+			if _, err := resolveLimits(config); err == nil ||
+				!strings.Contains(err.Error(), "trace v3 evidence bounds") {
+				t.Fatalf("resolveLimits() = %v, want evidence-bound rejection", err)
+			}
+		})
+	}
+}
+
 func TestLifecycleCapturesBoundedSSE(t *testing.T) {
 	completed, err := json.Marshal(map[string]any{
 		"type":     "response.completed",
@@ -271,9 +305,15 @@ func TestLifecycleCapturesBoundedSSE(t *testing.T) {
 	}
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		setSuccessfulResponseHeaders(writer, "text/event-stream")
-		fmt.Fprintf(writer, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n")
-		fmt.Fprintf(writer, "event: response.completed\ndata: %s\n\n", completed)
-		fmt.Fprint(writer, "data: [DONE]\n\n")
+		if _, err := fmt.Fprintf(writer, "event: response.created\ndata: {\"type\":\"response.created\"}\n\n"); err != nil {
+			t.Errorf("write response.created event: %v", err)
+		}
+		if _, err := fmt.Fprintf(writer, "event: response.completed\ndata: %s\n\n", completed); err != nil {
+			t.Errorf("write response.completed event: %v", err)
+		}
+		if _, err := fmt.Fprint(writer, "data: [DONE]\n\n"); err != nil {
+			t.Errorf("write response terminator: %v", err)
+		}
 	}))
 	defer upstream.Close()
 	lifecycle := newTestLifecycle(t, upstream.URL, Config{MaxEvents: 4, MaxSSEEventBytes: 4096})
@@ -289,6 +329,69 @@ func TestLifecycleCapturesBoundedSSE(t *testing.T) {
 	if err != nil || len(trace.Responses) != 1 {
 		t.Fatalf("SSE trace = %#v, error %v", trace, err)
 	}
+	wire := trace.Responses[0].Wire
+	if wire.MediaType != "text/event-stream" || len(wire.SSEEvents) != 3 ||
+		wire.CompletedEventSequence == nil || *wire.CompletedEventSequence != 1 ||
+		wire.SSEEvents[0].Mapping != harnesscodex.SSEMappingForwardedUnmapped ||
+		wire.SSEEvents[1].Mapping != harnesscodex.SSEMappingCompletedResponse ||
+		wire.SSEEvents[2].Mapping != harnesscodex.SSEMappingStreamDone {
+		t.Fatalf("ordered SSE wire evidence = %#v", wire)
+	}
+}
+
+func TestIntermediateSSEAndRequestHeadersChangeExactEvidence(t *testing.T) {
+	completed, err := json.Marshal(map[string]any{
+		"type":     "response.completed",
+		"response": responseObject(""),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, declarations, err := parseResponsesRequest(
+		requestJSON(genericrunner.BaselineArm, "same", "command"),
+		testRequest(RuntimeLayout{}, genericrunner.BaselineArm, 0),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parse := func(marker int) harnesscodex.ResponsesResponseTrace {
+		body := []byte(fmt.Sprintf(
+			"event: response.created\ndata: {\"type\":\"response.created\",\"marker\":%d}\n\n"+
+				"event: response.completed\ndata: %s\n\ndata: [DONE]\n\n",
+			marker, completed,
+		))
+		trace, err := parseResponsesBody(
+			body, "text/event-stream", request, "gpt-5.4-2026-03-05",
+			declarations, 4096, 4,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return trace
+	}
+	first, second := parse(1), parse(2)
+	if !reflect.DeepEqual(first.Outputs, second.Outputs) ||
+		first.Wire.ExactBodySHA256 == second.Wire.ExactBodySHA256 ||
+		first.Wire.SSEEvents[0].DataSHA256 == second.Wire.SSEEvents[0].DataSHA256 {
+		t.Fatal("intermediate SSE mutation did not alter exact ordered wire evidence")
+	}
+
+	base, err := providerRequestHeadersTrace(100, "application/json", true, "", false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptDrift, _ := providerRequestHeadersTrace(100, "text/event-stream", true, "", false, "")
+	betaDrift, _ := providerRequestHeadersTrace(100, "application/json", true, "responses=v2", true, "")
+	if base.ExactApplicationSHA256 == acceptDrift.ExactApplicationSHA256 ||
+		base.ParityProjectionSHA256 == acceptDrift.ParityProjectionSHA256 ||
+		base.ExactApplicationSHA256 == betaDrift.ExactApplicationSHA256 ||
+		base.ParityProjectionSHA256 == betaDrift.ParityProjectionSHA256 {
+		t.Fatal("Accept/OpenAI-Beta mutation did not alter request-header evidence")
+	}
+	duplicate := http.Header{"Accept": {"application/json", "text/event-stream"}}
+	if _, _, err := reviewedOptionalRequestHeader(duplicate, "Accept"); err == nil {
+		t.Fatal("duplicate forwarded Accept header was silently collapsed")
+	}
 }
 
 func TestProxyRejectsEndpointModelToolAndBodyDrift(t *testing.T) {
@@ -300,6 +403,7 @@ func TestProxyRejectsEndpointModelToolAndBodyDrift(t *testing.T) {
 		{
 			name: "endpoint",
 			issue: func(t *testing.T, layout RuntimeLayout) *http.Response {
+				t.Helper()
 				request, err := http.NewRequest(http.MethodPost, layout.ProxyURL+"/chat/completions", strings.NewReader("{}"))
 				if err != nil {
 					t.Fatal(err)
@@ -312,6 +416,7 @@ func TestProxyRejectsEndpointModelToolAndBodyDrift(t *testing.T) {
 		{
 			name: "model",
 			issue: func(t *testing.T, layout RuntimeLayout) *http.Response {
+				t.Helper()
 				body := requestJSON(genericrunner.BaselineArm, "drift", "command")
 				var object map[string]any
 				if err := json.Unmarshal(body, &object); err != nil {
@@ -326,12 +431,14 @@ func TestProxyRejectsEndpointModelToolAndBodyDrift(t *testing.T) {
 			name:   "request body limit",
 			config: Config{MaxRequestBytes: 32},
 			issue: func(t *testing.T, layout RuntimeLayout) *http.Response {
+				t.Helper()
 				return proxyPost(t, layout, bytes.Repeat([]byte("x"), 64))
 			},
 		},
 		{
 			name: "missing candidate tool",
 			issue: func(t *testing.T, layout RuntimeLayout) *http.Response {
+				t.Helper()
 				body := requestJSON(genericrunner.CandidateArm, "drift", "command")
 				var object map[string]any
 				if err := json.Unmarshal(body, &object); err != nil {
@@ -359,7 +466,7 @@ func TestProxyRejectsEndpointModelToolAndBodyDrift(t *testing.T) {
 				t.Fatalf("BeginArm(): %v", err)
 			}
 			response := test.issue(t, layout)
-			response.Body.Close()
+			closeResponseBody(t, response)
 			if response.StatusCode == http.StatusOK {
 				t.Fatalf("proxy accepted %s drift", test.name)
 			}
@@ -381,12 +488,12 @@ func TestProxyRejectsIntraArmToolDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "first", "command-v1"))
-	first.Body.Close()
+	closeResponseBody(t, first)
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first proxy status = %d", first.StatusCode)
 	}
 	second := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "second", "command-v2"))
-	second.Body.Close()
+	closeResponseBody(t, second)
 	if second.StatusCode == http.StatusOK {
 		t.Fatal("proxy accepted tool schema drift")
 	}
@@ -427,7 +534,7 @@ func TestPairComparisonRejectsPayloadAndConfigDrift(t *testing.T) {
 				layout,
 				requestJSON(genericrunner.CandidateArm, test.candidatePrompt, "command"),
 			)
-			response.Body.Close()
+			closeResponseBody(t, response)
 			if response.StatusCode != http.StatusOK {
 				t.Fatalf("proxy status = %d", response.StatusCode)
 			}
@@ -455,8 +562,17 @@ func TestWorkspaceMetadataRemainsInNonToolCommitment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if baseline.NonToolPayloadSHA256 != candidate.NonToolPayloadSHA256 {
+	if baseline.NonceNormalizedNonToolPayloadSHA256 != candidate.NonceNormalizedNonToolPayloadSHA256 {
 		t.Fatal("fresh request identifiers changed the non-tool commitment")
+	}
+	if baseline.ExactBodySHA256 == candidate.ExactBodySHA256 ||
+		reflect.DeepEqual(baseline.DynamicFields, candidate.DynamicFields) {
+		t.Fatal("exact provider identifiers were lost behind the nonce-normalized parity projection")
+	}
+	if field := candidate.DynamicFields[len(candidate.DynamicFields)-1]; field.JSONPointer != "/prompt_cache_key" ||
+		field.Classification != harnesscodex.DynamicFieldProviderCacheRouting ||
+		len(field.SHA256) != 64 {
+		t.Fatalf("prompt cache routing commitment = %#v", field)
 	}
 
 	for _, test := range []struct {
@@ -485,7 +601,7 @@ func TestWorkspaceMetadataRemainsInNonToolCommitment(t *testing.T) {
 			if err != nil {
 				t.Fatalf("valid workspace mutation was rejected: %v", err)
 			}
-			if trace.NonToolPayloadSHA256 == baseline.NonToolPayloadSHA256 {
+			if trace.NonceNormalizedNonToolPayloadSHA256 == baseline.NonceNormalizedNonToolPayloadSHA256 {
 				t.Fatal("workspace drift was normalized out of the non-tool commitment")
 			}
 		})
@@ -535,6 +651,7 @@ func TestEffectiveConfigEnvelopeAndRepoViewShapeAreExact(t *testing.T) {
 		{"extra repo field", candidateConfig + "unexpected = true\n", genericrunner.CandidateArm, &registration},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if _, _, err := normalizeEffectiveConfig(
 				[]byte(test.raw),
 				test.arm,
@@ -561,11 +678,13 @@ func TestCredentialIsProxyOnlyAndIdentityIsSecretIndependent(t *testing.T) {
 	}
 	layout := lifecycle.RuntimeLayout()
 	if values := layout.Environment(); values["CODEX_API_KEY"] != layout.LocalProxyCapability ||
+		values["PATH"] != layout.ToolboxRoot ||
 		strings.Contains(fmt.Sprint(values), fakeCredential) {
 		t.Fatalf("child environment contains the wrong credential: %#v", values)
 	}
 	resolved, err := resolveConfig(Config{
 		StateRoot:          filepath.Dir(layout.Home),
+		ToolboxRoot:        layout.ToolboxRoot,
 		ListenAddress:      "127.0.0.1:1",
 		UpstreamURL:        upstream.URL,
 		UpstreamCredential: "different-real-credential",
@@ -579,6 +698,112 @@ func TestCredentialIsProxyOnlyAndIdentityIsSecretIndependent(t *testing.T) {
 	}
 	if identity != lifecycle.Identity() {
 		t.Fatal("real credential changed lifecycle identity")
+	}
+	changedLayout := layout
+	changedLayout.ToolboxRoot = filepath.Join(t.TempDir(), "other-toolbox")
+	changedIdentity, err := lifecycleIdentity(changedLayout, resolved.upstreamURL, lifecycle.limits, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changedIdentity == lifecycle.Identity() {
+		t.Fatal("toolbox root was absent from lifecycle identity")
+	}
+}
+
+func TestConfigAndRequestsRequireExactToolboxPATH(t *testing.T) {
+	stateRoot := filepath.Join(t.TempDir(), "runtime")
+	toolboxRoot := filepath.Join(t.TempDir(), "toolbox")
+	base := Config{
+		StateRoot:          stateRoot,
+		ToolboxRoot:        toolboxRoot,
+		UpstreamURL:        "https://example.invalid",
+		UpstreamCredential: fakeCredential,
+	}
+	mutations := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing", func(config *Config) { config.ToolboxRoot = "" }},
+		{"relative", func(config *Config) { config.ToolboxRoot = "toolbox" }},
+		{"unclean", func(config *Config) { config.ToolboxRoot = toolboxRoot + "/../toolbox" }},
+		{"PATH list", func(config *Config) { config.ToolboxRoot = toolboxRoot + string(os.PathListSeparator) + "/usr/bin" }},
+		{"inside state", func(config *Config) { config.ToolboxRoot = filepath.Join(stateRoot, "toolbox") }},
+		{"contains state", func(config *Config) { config.ToolboxRoot = filepath.Dir(stateRoot) }},
+	}
+	for _, test := range mutations {
+		t.Run(test.name, func(t *testing.T) {
+			config := base
+			test.mutate(&config)
+			if _, err := resolveConfig(config); err == nil {
+				t.Fatal("resolveConfig accepted an invalid toolbox root")
+			}
+		})
+	}
+
+	upstream := newJSONUpstream(t, "")
+	defer upstream.Close()
+	t.Setenv("PATH", "/ambient/attacker-bin")
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	layout := lifecycle.RuntimeLayout()
+	if layout.Environment()["PATH"] != layout.ToolboxRoot ||
+		layout.Environment()["PATH"] == os.Getenv("PATH") {
+		t.Fatal("lifecycle inherited ambient PATH")
+	}
+	for _, mutate := range []func(*genericrunner.ExecutionRequest){
+		func(request *genericrunner.ExecutionRequest) {
+			request.Invocation.Environment["PATH"] = "/ambient/attacker-bin"
+		},
+		func(request *genericrunner.ExecutionRequest) {
+			request.Process.Environment["PATH"] = "/ambient/attacker-bin"
+		},
+	} {
+		request := testRequest(layout, genericrunner.BaselineArm, 90)
+		mutate(&request)
+		if _, err := lifecycle.BeginArm(context.Background(), request); err == nil {
+			t.Fatal("BeginArm accepted PATH that differs from the toolbox root")
+		}
+	}
+}
+
+func TestRuntimeLayoutToolboxContractMatchesAdapter(t *testing.T) {
+	layout := RuntimeLayout{
+		ProxyURL:             "http://127.0.0.1:43119/v1",
+		Home:                 "/tokenbench/home",
+		CodexHome:            "/tokenbench/codex-home",
+		Temp:                 "/tokenbench/tmp",
+		ConfigLock:           "/tokenbench/config-lock",
+		ToolboxRoot:          "/snapshot/toolbox",
+		LocalProxyCapability: harness.OfflineLocalProxyCapability,
+	}
+	adapterLayout := harnesscodex.RuntimeLayout{
+		ProxyURL:             layout.ProxyURL,
+		Home:                 layout.Home,
+		CodexHome:            layout.CodexHome,
+		Temp:                 layout.Temp,
+		ConfigLock:           layout.ConfigLock,
+		ToolboxRoot:          layout.ToolboxRoot,
+		LocalProxyCapability: layout.LocalProxyCapability,
+	}
+	if err := layout.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapterLayout.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(layout.Environment(), adapterLayout.Environment()) ||
+		!reflect.DeepEqual(layout.ConfigAssignments(), adapterLayout.ConfigAssignments()) {
+		t.Fatal("runner and adapter toolbox launch contracts diverged")
+	}
+	runnerCommitment, err := layout.Commitment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapterCommitment, err := adapterLayout.Commitment()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runnerCommitment != adapterCommitment {
+		t.Fatalf("layout commitments differ: runner=%s adapter=%s", runnerCommitment, adapterCommitment)
 	}
 }
 
@@ -601,6 +826,7 @@ func TestLifecycleUsesFreshCommonCapabilityAndExpiresItBeforePublication(t *test
 	}
 	if _, err := resolveConfig(Config{
 		StateRoot:          filepath.Dir(firstLayout.Home),
+		ToolboxRoot:        firstLayout.ToolboxRoot,
 		ListenAddress:      "127.0.0.1:1",
 		UpstreamURL:        upstream.URL,
 		UpstreamCredential: harness.OfflineLocalProxyCapability,
@@ -627,6 +853,368 @@ func TestLifecycleUsesFreshCommonCapabilityAndExpiresItBeforePublication(t *test
 	}
 }
 
+func TestLifecycleClosesReusedIdleUpstreamBeforePublicationBoundary(t *testing.T) {
+	const wantLifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v2"
+	if lifecycleVersion != wantLifecycleVersion ||
+		stateMarkerName != ".tokenbench-codex-runtime-v2" ||
+		stateMarkerData != wantLifecycleVersion+"\n" {
+		t.Fatalf(
+			"lifecycle version/marker = %q %q %q",
+			lifecycleVersion,
+			stateMarkerName,
+			stateMarkerData,
+		)
+	}
+	idleConnections := make(chan net.Conn, 2)
+	closedConnections := make(chan net.Conn, 1)
+	upstream := httptest.NewUnstartedServer(http.HandlerFunc(func(
+		writer http.ResponseWriter,
+		request *http.Request,
+	) {
+		if got := request.Header.Get("Authorization"); got != "Bearer "+fakeCredential {
+			t.Errorf("upstream Authorization = %q", got)
+		}
+		if got := request.UserAgent(); got != wantLifecycleVersion {
+			t.Errorf("upstream User-Agent = %q", got)
+		}
+		setSuccessfulResponseHeaders(writer, "application/json")
+		_, _ = writer.Write(responseJSON(""))
+	}))
+	upstream.Config.ConnState = func(connection net.Conn, state http.ConnState) {
+		switch state {
+		case http.StateIdle:
+			select {
+			case idleConnections <- connection:
+			default:
+			}
+		case http.StateClosed:
+			select {
+			case closedConnections <- connection:
+			default:
+			}
+		case http.StateNew, http.StateActive, http.StateHijacked:
+		}
+	}
+	upstream.Start()
+	defer upstream.Close()
+
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	if !strings.HasPrefix(lifecycle.Identity(), wantLifecycleVersion+"/sha256:") {
+		t.Fatalf("lifecycle identity = %q", lifecycle.Identity())
+	}
+	transport, ok := lifecycle.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("upstream transport type = %T, want *http.Transport", lifecycle.client.Transport)
+	}
+	clientSocketClosed := make(chan struct{}, 1)
+	releaseSocketClose := make(chan struct{})
+	released := false
+	release := func() {
+		if !released {
+			close(releaseSocketClose)
+			released = true
+		}
+	}
+	defer release()
+	dialer := &net.Dialer{}
+	transport.DialContext = func(
+		ctx context.Context,
+		network string,
+		address string,
+	) (net.Conn, error) {
+		connection, err := dialer.DialContext(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		return &boundaryObservedConn{
+			Conn:    connection,
+			closed:  clientSocketClosed,
+			release: releaseSocketClose,
+		}, nil
+	}
+
+	layout := lifecycle.RuntimeLayout()
+	request := testRequest(layout, genericrunner.BaselineArm, 33)
+	if _, err := lifecycle.BeginArm(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	firstResponse := proxyPost(
+		t,
+		layout,
+		requestJSON(genericrunner.BaselineArm, "first", "command"),
+	)
+	closeResponseBody(t, firstResponse)
+	if firstResponse.StatusCode != http.StatusOK {
+		t.Fatalf("first proxy status = %d", firstResponse.StatusCode)
+	}
+	firstIdle := waitForUpstreamConnection(t, idleConnections, "first idle connection")
+
+	secondResponse := proxyPostWithTurnState(
+		t,
+		layout,
+		requestJSON(genericrunner.BaselineArm, "second", "command"),
+		"fixture-sticky-turn-state",
+	)
+	closeResponseBody(t, secondResponse)
+	if secondResponse.StatusCode != http.StatusOK {
+		t.Fatalf("second proxy status = %d", secondResponse.StatusCode)
+	}
+	secondIdle := waitForUpstreamConnection(t, idleConnections, "second idle connection")
+	if firstIdle != secondIdle {
+		t.Fatal("upstream transport did not reuse its idle connection")
+	}
+	select {
+	case <-clientSocketClosed:
+		t.Fatal("upstream transport closed the reusable socket before lifecycle Close")
+	default:
+	}
+
+	closeResult := make(chan error, 1)
+	go func() {
+		closeResult <- lifecycle.Close(context.Background())
+	}()
+	select {
+	case <-clientSocketClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("lifecycle Close did not close the idle upstream socket")
+	}
+	closedUpstream := waitForUpstreamConnection(t, closedConnections, "closed connection")
+	if closedUpstream != firstIdle {
+		t.Fatal("lifecycle closed a different upstream connection")
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("publication boundary closed before upstream socket cleanup completed")
+	}
+	release()
+	if err := <-closeResult; err != nil {
+		t.Fatalf("Close(): %v", err)
+	}
+	if !lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("publication boundary remained open after upstream socket cleanup")
+	}
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if lifecycle.client != nil {
+		t.Fatal("lifecycle retained ownership of its closed upstream client")
+	}
+}
+
+func TestLifecycleCloseRetriesAfterActiveHandlerOutlivesContext(t *testing.T) {
+	upstreamEntered := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	released := false
+	release := func() {
+		if !released {
+			close(releaseUpstream)
+			released = true
+		}
+	}
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		upstreamEntered <- struct{}{}
+		<-releaseUpstream
+		setSuccessfulResponseHeaders(writer, "application/json")
+		_, _ = writer.Write(responseJSON(""))
+	}))
+	defer upstream.Close()
+
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	layout := lifecycle.RuntimeLayout()
+	sessionValue, err := lifecycle.BeginArm(
+		context.Background(),
+		testRequest(layout, genericrunner.BaselineArm, 34),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionValue.(*ArmSession)
+	proxyResult := startAsyncProxyPost(
+		t,
+		layout,
+		requestJSON(genericrunner.BaselineArm, "blocked", "command"),
+	)
+	waitForSignal(t, upstreamEntered, "blocked upstream request")
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := lifecycle.Close(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("first Close() = %v, want context cancellation", err)
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("failed Close opened the publication boundary")
+	}
+	lifecycle.mu.Lock()
+	retainedAuthority := lifecycle.client != nil &&
+		lifecycle.credential == fakeCredential &&
+		lifecycle.finalizing == session && lifecycle.active == nil
+	lifecycle.mu.Unlock()
+	if !retainedAuthority {
+		t.Fatal("failed Close discarded provider authority or its closing session")
+	}
+
+	release()
+	result := waitForAsyncHTTPResult(t, proxyResult)
+	if result.err != nil {
+		t.Fatalf("proxy request after failed Close: %v", result.err)
+	}
+	closeResponseBody(t, result.response)
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+	if err := lifecycle.Close(closeCtx); err != nil {
+		t.Fatalf("retry Close(): %v", err)
+	}
+	if !lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("retry did not close the publication boundary")
+	}
+}
+
+func TestLifecycleCloseWaitsForFinishAndReadsPairsAfterDrain(t *testing.T) {
+	var upstreamRequests atomic.Int32
+	upstreamEntered := make(chan struct{}, 1)
+	releaseUpstream := make(chan struct{})
+	released := false
+	release := func() {
+		if !released {
+			close(releaseUpstream)
+			released = true
+		}
+	}
+	defer release()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if upstreamRequests.Add(1) == 2 {
+			upstreamEntered <- struct{}{}
+			<-releaseUpstream
+		}
+		setSuccessfulResponseHeaders(writer, "application/json")
+		_, _ = writer.Write(responseJSON(""))
+	}))
+	defer upstream.Close()
+
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	layout := lifecycle.RuntimeLayout()
+	executeArm(
+		t,
+		lifecycle,
+		testRequest(layout, genericrunner.CandidateArm, 35),
+		requestJSON(genericrunner.CandidateArm, "same", "command"),
+		[]byte(candidateConfig),
+	)
+	request := testRequest(layout, genericrunner.BaselineArm, 35)
+	sessionValue, err := lifecycle.BeginArm(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionValue.(*ArmSession)
+	proxyResult := startAsyncProxyPost(
+		t,
+		layout,
+		requestJSON(genericrunner.BaselineArm, "same", "command"),
+	)
+	waitForSignal(t, upstreamEntered, "second upstream request")
+	writeConfigLock(t, layout, []byte(baselineConfig))
+	finishResult := make(chan error, 1)
+	go func() {
+		_, finishErr := session.Finish(context.Background(), request, harness.RawExecution{})
+		finishResult <- finishErr
+	}()
+	waitForFinalizingSession(t, lifecycle, session, sessionFinishing)
+
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := lifecycle.Close(cancelled); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Close during Finish = %v, want context cancellation", err)
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("Close published while Finish was still registered")
+	}
+	lifecycle.mu.Lock()
+	authorityRetained := lifecycle.client != nil &&
+		lifecycle.credential == fakeCredential && lifecycle.finalizing == session
+	lifecycle.mu.Unlock()
+	if !authorityRetained {
+		t.Fatal("Close discarded authority while Finish was still running")
+	}
+
+	release()
+	result := waitForAsyncHTTPResult(t, proxyResult)
+	if result.err != nil {
+		t.Fatalf("proxy request during Finish: %v", result.err)
+	}
+	closeResponseBody(t, result.response)
+	if result.response.StatusCode != http.StatusOK {
+		t.Fatalf("proxy status during Finish = %d", result.response.StatusCode)
+	}
+	select {
+	case err := <-finishResult:
+		if err != nil {
+			t.Fatalf("Finish(): %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for Finish")
+	}
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer closeCancel()
+	if err := lifecycle.Close(closeCtx); err != nil {
+		t.Fatalf("retry Close(): %v", err)
+	}
+	if !lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("retry Close did not observe the reconciled pair")
+	}
+}
+
+func TestLifecycleCloseRejectsRetainedTerminalActiveSession(t *testing.T) {
+	upstream := newJSONUpstream(t, "")
+	defer upstream.Close()
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	sessionValue, err := lifecycle.BeginArm(
+		context.Background(),
+		testRequest(lifecycle.RuntimeLayout(), genericrunner.BaselineArm, 36),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	session := sessionValue.(*ArmSession)
+	lifecycle.mu.Lock()
+	session.mu.Lock()
+	session.state = sessionAborted
+	session.mu.Unlock()
+	lifecycle.mu.Unlock()
+	if err := lifecycle.Close(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "retained an active or finalizing arm") {
+		t.Fatalf("Close() = %v, want retained-session rejection", err)
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("retained terminal session acquired publication authority")
+	}
+	lifecycle.mu.Lock()
+	lifecycle.active = nil
+	lifecycle.mu.Unlock()
+	if err := lifecycle.Close(context.Background()); err != nil {
+		t.Fatalf("Close() after invariant repair: %v", err)
+	}
+}
+
+func TestLifecycleClosePersistsUnexpectedServeFailure(t *testing.T) {
+	upstream := newJSONUpstream(t, "")
+	defer upstream.Close()
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	serveFailure := errors.New("fixture unexpected Serve failure")
+	lifecycle.mu.Lock()
+	lifecycle.serveErr = serveFailure
+	lifecycle.mu.Unlock()
+	if err := lifecycle.Close(context.Background()); !errors.Is(err, serveFailure) {
+		t.Fatalf("Close() = %v, want persisted Serve failure", err)
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("unexpected Serve failure acquired publication authority")
+	}
+	lifecycle.mu.Lock()
+	defer lifecycle.mu.Unlock()
+	if lifecycle.client != nil || lifecycle.credential != "" {
+		t.Fatal("Serve integrity failure prevented otherwise-safe resource cleanup")
+	}
+}
+
 func TestUnauthenticatedLoopbackTrafficCannotPoisonAnArm(t *testing.T) {
 	upstream := newJSONUpstream(t, "")
 	defer upstream.Close()
@@ -647,7 +1235,7 @@ func TestUnauthenticatedLoopbackTrafficCannotPoisonAnArm(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	unauthenticated.Body.Close()
+	closeResponseBody(t, unauthenticated)
 	if unauthenticated.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("unauthenticated status = %d", unauthenticated.StatusCode)
 	}
@@ -662,7 +1250,7 @@ func TestUnauthenticatedLoopbackTrafficCannotPoisonAnArm(t *testing.T) {
 	wrongRoute.Header.Set("Authorization", "Bearer "+layout.LocalProxyCapability)
 	wrongRoute.Header.Set("Content-Type", "application/json")
 	wrongRouteResponse := doRequest(t, wrongRoute)
-	wrongRouteResponse.Body.Close()
+	closeResponseBody(t, wrongRouteResponse)
 	if wrongRouteResponse.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("wrong-route status = %d", wrongRouteResponse.StatusCode)
 	}
@@ -674,7 +1262,7 @@ func TestUnauthenticatedLoopbackTrafficCannotPoisonAnArm(t *testing.T) {
 		t.Fatalf("host traffic reached arm state: fatal=%v requests=%d", fatal, requestCount)
 	}
 	valid := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "valid", "command"))
-	valid.Body.Close()
+	closeResponseBody(t, valid)
 	if valid.StatusCode != http.StatusOK {
 		t.Fatalf("valid request status = %d", valid.StatusCode)
 	}
@@ -769,17 +1357,11 @@ func TestProductionTLSStateCommitsExactVerifiedDERChains(t *testing.T) {
 
 func TestProductionConstructionPinsRouteAuthority(t *testing.T) {
 	for _, name := range productionNetworkOverrideEnvironment {
-		value, existed := os.LookupEnv(name)
+		value := os.Getenv(name)
+		t.Setenv(name, value)
 		if err := os.Unsetenv(name); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() {
-			if existed {
-				_ = os.Setenv(name, value)
-			} else {
-				_ = os.Unsetenv(name)
-			}
-		})
 	}
 	root := filepath.Join(t.TempDir(), "production-runtime")
 	if err := os.Mkdir(root, 0o700); err != nil {
@@ -787,6 +1369,7 @@ func TestProductionConstructionPinsRouteAuthority(t *testing.T) {
 	}
 	lifecycle, err := NewProduction(ProductionConfig{
 		StateRoot:          root,
+		ToolboxRoot:        filepath.Join(t.TempDir(), "production-toolbox"),
 		UpstreamCredential: fakeCredential,
 		UpstreamTimeout:    42 * time.Second,
 	})
@@ -796,6 +1379,18 @@ func TestProductionConstructionPinsRouteAuthority(t *testing.T) {
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		lifecycle.mu.Lock()
+		alreadyClosed := lifecycle.closed
+		lifecycle.mu.Unlock()
+		if alreadyClosed {
+			return
+		}
+		// Most focused lifecycle tests intentionally exercise one arm. Explicit
+		// Close reconciliation behavior has dedicated tests below; discard those
+		// test-only snapshots before generic resource cleanup.
+		lifecycle.mu.Lock()
+		lifecycle.pairs = make(map[int]map[genericrunner.Arm]armSnapshot)
+		lifecycle.mu.Unlock()
 		if err := lifecycle.Close(ctx); err != nil {
 			t.Errorf("Close(): %v", err)
 		}
@@ -837,6 +1432,7 @@ func TestProductionConstructionPinsRouteAuthority(t *testing.T) {
 	}
 	nonProduction, err := New(Config{
 		StateRoot:          nonProductionRoot,
+		ToolboxRoot:        filepath.Join(t.TempDir(), "generic-toolbox"),
 		UpstreamURL:        productionUpstreamOrigin,
 		UpstreamCredential: fakeCredential,
 	})
@@ -889,7 +1485,7 @@ func TestProductionConstructionPinsRouteAuthority(t *testing.T) {
 			t.Fatalf("production trust snapshot changed: before=%q after=%q", before, after)
 		}
 		pinned := lifecycle.client.Transport.(*http.Transport).TLSClientConfig.RootCAs
-		if pinned == nil || len(pinned.Subjects()) == 0 {
+		if pinned == nil || pinned.Equal(x509.NewCertPool()) {
 			t.Fatal("production transport lost its pinned root pool")
 		}
 	})
@@ -925,7 +1521,7 @@ func TestProxyRejectsReflectedCredential(t *testing.T) {
 	}
 	response := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "secret", "command"))
 	body, _ := io.ReadAll(response.Body)
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if response.StatusCode == http.StatusOK || bytes.Contains(body, []byte(fakeCredential)) {
 		t.Fatalf("proxy emitted reflected credential: status=%d body=%q", response.StatusCode, body)
 	}
@@ -994,11 +1590,12 @@ func TestFinishDefersOrdinaryProcessTerminationToRunner(t *testing.T) {
 			); err != nil {
 				t.Fatal(err)
 			}
+			writeConfigLock(t, layout, []byte(baselineConfig))
 			artifacts, err := session.Finish(context.Background(), request, test.raw)
 			if err != nil {
 				t.Fatalf("Finish(): %v", err)
 			}
-			if len(artifacts) != 1 ||
+			if len(artifacts) != 2 ||
 				artifacts[0].Name != harnesscodex.PartialResponsesTraceArtifactName ||
 				artifacts[0].MediaType != harnesscodex.PartialResponsesTraceMediaType {
 				t.Fatalf("terminal partial artifacts = %#v", artifacts)
@@ -1032,16 +1629,17 @@ func TestFinishPreservesCompletedProviderProgressOnOrdinaryFailure(t *testing.T)
 		layout,
 		requestJSON(genericrunner.BaselineArm, "partial", "command"),
 	)
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if response.StatusCode != http.StatusOK {
 		t.Fatalf("proxy status = %d", response.StatusCode)
 	}
+	writeConfigLock(t, layout, []byte(baselineConfig))
 	artifacts, err := session.Finish(
 		context.Background(),
 		request,
 		harness.RawExecution{ExitCode: 7},
 	)
-	if err != nil || len(artifacts) != 1 {
+	if err != nil || len(artifacts) != 2 {
 		t.Fatalf("Finish() partial artifacts = %#v, %v", artifacts, err)
 	}
 	partial, err := harnesscodex.ParsePartialResponsesTrace(artifacts[0].Data)
@@ -1066,16 +1664,22 @@ func TestFinishTerminalExecutionStillFailsClosedOnProxyIntegrityError(t *testing
 		t.Fatal(err)
 	}
 	response := proxyPost(t, layout, []byte(`{}`))
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if response.StatusCode == http.StatusOK {
 		t.Fatal("proxy accepted an invalid provider request")
 	}
-	if artifacts, err := session.Finish(
+	writeConfigLock(t, layout, []byte(baselineConfig))
+	artifacts, err := session.Finish(
 		context.Background(),
 		request,
 		harness.RawExecution{ExitCode: 1},
-	); err == nil || artifacts != nil {
-		t.Fatalf("Finish() terminal proxy failure = (%#v, %v), want fail closed", artifacts, err)
+	)
+	if err != nil || len(artifacts) != 2 {
+		t.Fatalf("Finish() terminal proxy failure = (%#v, %v), want retained evidence", artifacts, err)
+	}
+	partial, parseErr := harnesscodex.ParsePartialResponsesTrace(artifacts[0].Data)
+	if parseErr != nil || len(partial.CaptureErrorSHA256) != 64 {
+		t.Fatalf("terminal proxy failure evidence = (%#v, %v)", partial, parseErr)
 	}
 	assertEmptyTemplate(t, layout)
 }
@@ -1090,14 +1694,267 @@ func TestFinishCleanExitStillRequiresCompleteProviderEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeConfigLock(t, layout, []byte(baselineConfig))
 	if artifacts, err := session.Finish(
 		context.Background(),
 		request,
 		harness.RawExecution{},
-	); err == nil || artifacts != nil {
+	); err == nil || len(artifacts) != 2 {
 		t.Fatalf("Finish() clean incomplete capture = (%#v, %v), want fail closed", artifacts, err)
 	}
 	assertEmptyTemplate(t, layout)
+}
+
+func TestFailureSnapshotsReconcileAndRejectAsymmetry(t *testing.T) {
+	tests := []struct {
+		name      string
+		firstArm  genericrunner.Arm
+		firstRaw  harness.RawExecution
+		secondRaw harness.RawExecution
+	}{
+		{"baseline failure then candidate success", genericrunner.BaselineArm, harness.RawExecution{ExitCode: 7}, harness.RawExecution{}},
+		{"candidate failure then baseline success", genericrunner.CandidateArm, harness.RawExecution{ExitCode: 7}, harness.RawExecution{}},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := newJSONUpstream(t, "")
+			defer upstream.Close()
+			lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+			layout := lifecycle.RuntimeLayout()
+			secondArm := genericrunner.CandidateArm
+			if test.firstArm == genericrunner.CandidateArm {
+				secondArm = genericrunner.BaselineArm
+			}
+			finish := func(arm genericrunner.Arm, raw harness.RawExecution) ([]harness.Artifact, error) {
+				request := testRequest(layout, arm, 300+index)
+				session, err := lifecycle.BeginArm(context.Background(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				response := proxyPost(t, layout, requestJSON(arm, "same", "command"))
+				closeResponseBody(t, response)
+				if response.StatusCode != http.StatusOK {
+					t.Fatalf("proxy status = %d", response.StatusCode)
+				}
+				config := []byte(baselineConfig)
+				if arm == genericrunner.CandidateArm {
+					config = []byte(candidateConfig)
+				}
+				writeConfigLock(t, layout, config)
+				return session.Finish(context.Background(), request, raw)
+			}
+			firstArtifacts, err := finish(test.firstArm, test.firstRaw)
+			if err != nil || len(firstArtifacts) != 2 {
+				t.Fatalf("first Finish() = (%d artifacts, %v)", len(firstArtifacts), err)
+			}
+			secondArtifacts, err := finish(secondArm, test.secondRaw)
+			if err == nil || len(secondArtifacts) != 2 ||
+				!strings.Contains(err.Error(), "terminal states are asymmetric") {
+				t.Fatalf("second Finish() = (%d artifacts, %v), want asymmetric rejection", len(secondArtifacts), err)
+			}
+		})
+	}
+}
+
+func TestFailureSnapshotsRejectProviderRequestAndConfigDrift(t *testing.T) {
+	tests := []struct {
+		name            string
+		issueCandidate  bool
+		candidateConfig string
+	}{
+		{"request count", true, candidateConfig},
+		{"effective config", false, strings.Replace(candidateConfig, `model = "gpt-5.4"`, `model = "gpt-5.6"`, 1)},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			upstream := newJSONUpstream(t, "")
+			defer upstream.Close()
+			lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+			layout := lifecycle.RuntimeLayout()
+			finish := func(arm genericrunner.Arm, issue bool, config string) ([]harness.Artifact, error) {
+				request := testRequest(layout, arm, 320+index)
+				session, err := lifecycle.BeginArm(context.Background(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if issue {
+					response := proxyPost(t, layout, requestJSON(arm, "same", "command"))
+					if err := response.Body.Close(); err != nil {
+						t.Fatalf("close response body: %v", err)
+					}
+				}
+				writeConfigLock(t, layout, []byte(config))
+				return session.Finish(context.Background(), request, harness.RawExecution{ExitCode: 7})
+			}
+			if _, err := finish(genericrunner.BaselineArm, false, baselineConfig); err != nil {
+				t.Fatal(err)
+			}
+			artifacts, err := finish(genericrunner.CandidateArm, test.issueCandidate, test.candidateConfig)
+			if err == nil || len(artifacts) != 2 {
+				t.Fatalf("candidate failure reconciliation = (%d artifacts, %v)", len(artifacts), err)
+			}
+		})
+	}
+}
+
+func TestLifecycleCloseRejectsUnmatchedFailureSnapshot(t *testing.T) {
+	upstream := newJSONUpstream(t, "")
+	defer upstream.Close()
+	lifecycle := newTestLifecycle(t, upstream.URL, Config{})
+	layout := lifecycle.RuntimeLayout()
+	request := testRequest(layout, genericrunner.BaselineArm, 340)
+	session, err := lifecycle.BeginArm(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeConfigLock(t, layout, []byte(baselineConfig))
+	if _, err := session.Finish(
+		context.Background(), request, harness.RawExecution{ExitCode: 7},
+	); err != nil {
+		t.Fatal(err)
+	}
+	idleCloseAttempted := make(chan struct{}, 1)
+	lifecycle.client.Transport = &closeIdleObservedTransport{
+		RoundTripper: lifecycle.client.Transport,
+		closed:       idleCloseAttempted,
+	}
+	if err := lifecycle.Close(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "unmatched repetition snapshot") {
+		t.Fatalf("Close() = %v, want unmatched snapshot rejection", err)
+	}
+	select {
+	case <-idleCloseAttempted:
+	default:
+		t.Fatal("Close did not attempt upstream idle cleanup after an earlier error")
+	}
+	lifecycle.mu.Lock()
+	clientRetained := lifecycle.client != nil
+	lifecycle.mu.Unlock()
+	if clientRetained {
+		t.Fatal("failed Close retained ownership of its upstream client")
+	}
+	if lifecycle.PublicationBoundaryClosed() {
+		t.Fatal("failed Close opened the publication boundary")
+	}
+	if err := lifecycle.Close(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "unmatched repetition snapshot") {
+		t.Fatalf("second Close() = %v, want persistent unmatched snapshot rejection", err)
+	}
+}
+
+func TestPartialTraceCommitsEveryProviderResponseAttemptOutcome(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     Config
+		upstream   func(*testing.T) (*httptest.Server, string)
+		wantStage  string
+		wantStatus int
+		wantBytes  int
+		complete   bool
+	}{
+		{
+			name: "non-200",
+			upstream: func(t *testing.T) (*httptest.Server, string) {
+				t.Helper()
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Content-Type", "application/json")
+					writer.Header().Set("X-Codex-Turn-State", "rejected-state")
+					writer.WriteHeader(http.StatusTooManyRequests)
+					_, _ = io.WriteString(writer, "rate limited")
+				}))
+				return server, server.URL
+			},
+			wantStage:  harnesscodex.ResponseAttemptResponseStatus,
+			wantStatus: http.StatusTooManyRequests,
+			wantBytes:  len("rate limited"),
+			complete:   true,
+		},
+		{
+			name: "transport",
+			upstream: func(t *testing.T) (*httptest.Server, string) {
+				t.Helper()
+				server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+				url := server.URL
+				server.Close()
+				return server, url
+			},
+			wantStage: harnesscodex.ResponseAttemptTransport,
+		},
+		{
+			name: "redirect rejection retains response envelope",
+			upstream: func(t *testing.T) (*httptest.Server, string) {
+				t.Helper()
+				var server *httptest.Server
+				server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					writer.Header().Set("Location", server.URL+"/redirected")
+					writer.WriteHeader(http.StatusFound)
+				}))
+				return server, server.URL
+			},
+			wantStage:  harnesscodex.ResponseAttemptTransport,
+			wantStatus: http.StatusFound,
+		},
+		{
+			name:   "bounded body prefix",
+			config: Config{MaxResponseBytes: 8},
+			upstream: func(t *testing.T) (*httptest.Server, string) {
+				t.Helper()
+				server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+					setSuccessfulResponseHeaders(writer, "application/json")
+					_, _ = io.WriteString(writer, "0123456789abcdef")
+				}))
+				return server, server.URL
+			},
+			wantStage:  harnesscodex.ResponseAttemptResponseBody,
+			wantStatus: http.StatusOK,
+			wantBytes:  9,
+			complete:   false,
+		},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server, upstreamURL := test.upstream(t)
+			if server != nil {
+				defer server.Close()
+			}
+			lifecycle := newTestLifecycle(t, upstreamURL, test.config)
+			layout := lifecycle.RuntimeLayout()
+			request := testRequest(layout, genericrunner.BaselineArm, 360+index)
+			session, err := lifecycle.BeginArm(context.Background(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "attempt", "command"))
+			closeResponseBody(t, response)
+			if response.StatusCode == http.StatusOK {
+				t.Fatal("proxy unexpectedly accepted failed provider attempt")
+			}
+			writeConfigLock(t, layout, []byte(baselineConfig))
+			artifacts, err := session.Finish(
+				context.Background(), request, harness.RawExecution{ExitCode: 1},
+			)
+			if err != nil || len(artifacts) != 2 {
+				t.Fatalf("Finish() = (%d artifacts, %v)", len(artifacts), err)
+			}
+			partial, err := harnesscodex.ParsePartialResponsesTrace(artifacts[0].Data)
+			if err != nil || len(partial.ResponseAttempts) != 1 {
+				t.Fatalf("partial response attempts = %#v, %v", partial.ResponseAttempts, err)
+			}
+			attempt := partial.ResponseAttempts[0]
+			if attempt.Stage != test.wantStage || attempt.StatusCode != test.wantStatus ||
+				attempt.BodyBytes != test.wantBytes || attempt.BodyComplete != test.complete ||
+				attempt.ErrorClass != test.wantStage+"_failure" {
+				t.Fatalf("provider attempt = %#v", attempt)
+			}
+			if attempt.StatusPresent != (test.wantStatus != 0) ||
+				attempt.HeadersPresent != (test.wantStatus != 0) {
+				t.Fatalf("provider response envelope presence = %#v", attempt)
+			}
+			if test.wantBytes != 0 && len(attempt.BodySHA256) != 64 {
+				t.Fatal("provider attempt omitted exact body/prefix commitment")
+			}
+		})
+	}
 }
 
 func TestEffectiveConfigRejectsSymlinkHardlinkAndMultiplicity(t *testing.T) {
@@ -1108,6 +1965,7 @@ func TestEffectiveConfigRejectsSymlinkHardlinkAndMultiplicity(t *testing.T) {
 		{
 			"symlink",
 			func(t *testing.T, layout RuntimeLayout) {
+				t.Helper()
 				target := filepath.Join(filepath.Dir(filepath.Dir(layout.ConfigLock)), "outside-config")
 				if err := os.WriteFile(target, []byte(baselineConfig), 0o600); err != nil {
 					t.Fatal(err)
@@ -1120,6 +1978,7 @@ func TestEffectiveConfigRejectsSymlinkHardlinkAndMultiplicity(t *testing.T) {
 		{
 			"hardlink",
 			func(t *testing.T, layout RuntimeLayout) {
+				t.Helper()
 				target := filepath.Join(filepath.Dir(filepath.Dir(layout.ConfigLock)), "outside-config")
 				if err := os.WriteFile(target, []byte(baselineConfig), 0o600); err != nil {
 					t.Fatal(err)
@@ -1132,6 +1991,7 @@ func TestEffectiveConfigRejectsSymlinkHardlinkAndMultiplicity(t *testing.T) {
 		{
 			"multiple files",
 			func(t *testing.T, layout RuntimeLayout) {
+				t.Helper()
 				if err := os.WriteFile(filepath.Join(layout.ConfigLock, "one.toml"), []byte(baselineConfig), 0o600); err != nil {
 					t.Fatal(err)
 				}
@@ -1153,7 +2013,7 @@ func TestEffectiveConfigRejectsSymlinkHardlinkAndMultiplicity(t *testing.T) {
 				t.Fatal(err)
 			}
 			response := proxyPost(t, layout, requestJSON(genericrunner.BaselineArm, "config", "command"))
-			response.Body.Close()
+			closeResponseBody(t, response)
 			if response.StatusCode != http.StatusOK {
 				t.Fatalf("proxy status = %d", response.StatusCode)
 			}
@@ -1195,6 +2055,9 @@ func newTestLifecycle(t *testing.T, upstreamURL string, override Config) *Lifecy
 	}
 	config := override
 	config.StateRoot = root
+	if config.ToolboxRoot == "" {
+		config.ToolboxRoot = filepath.Join(t.TempDir(), "toolbox")
+	}
 	config.UpstreamURL = upstreamURL
 	config.UpstreamCredential = fakeCredential
 	lifecycle, err := New(config)
@@ -1204,6 +2067,13 @@ func newTestLifecycle(t *testing.T, upstreamURL string, override Config) *Lifecy
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		lifecycle.mu.Lock()
+		if lifecycle.closed {
+			lifecycle.mu.Unlock()
+			return
+		}
+		lifecycle.pairs = make(map[int]map[genericrunner.Arm]armSnapshot)
+		lifecycle.mu.Unlock()
 		if err := lifecycle.Close(ctx); err != nil {
 			t.Errorf("Close(): %v", err)
 		}
@@ -1224,9 +2094,9 @@ func newJSONUpstream(t *testing.T, toolCall string) *httptest.Server {
 
 func setSuccessfulResponseHeaders(writer http.ResponseWriter, contentType string) {
 	writer.Header().Set("Content-Type", contentType)
-	writer.Header().Set(openAIModelHeader, "gpt-5.4-2026-03-05")
-	writer.Header().Set(turnStateHeader, "fixture-sticky-turn-state")
-	writer.Header().Set(reasoningIncludedHeader, "true")
+	writer.Header()[openAIModelHeader] = []string{"gpt-5.4-2026-03-05"}
+	writer.Header()[turnStateHeader] = []string{"fixture-sticky-turn-state"}
+	writer.Header()[reasoningIncludedHeader] = []string{"true"}
 }
 
 func executeArm(
@@ -1243,7 +2113,7 @@ func executeArm(
 	}
 	response := proxyPost(t, lifecycle.RuntimeLayout(), body)
 	responseBody, err := io.ReadAll(response.Body)
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if err != nil {
 		t.Fatalf("read proxy response: %v", err)
 	}
@@ -1259,6 +2129,7 @@ func executeArm(
 }
 
 func proxyPost(t *testing.T, layout RuntimeLayout, body []byte) *http.Response {
+	t.Helper()
 	return proxyPostWithTurnState(t, layout, body, "")
 }
 
@@ -1281,7 +2152,7 @@ func proxyPostWithTurnState(
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Accept", "application/json")
 	if turnState != "" {
-		request.Header.Set(turnStateHeader, turnState)
+		request.Header[turnStateHeader] = []string{turnState}
 	}
 	return doRequest(t, request)
 }
@@ -1294,6 +2165,151 @@ func doRequest(t *testing.T, request *http.Request) *http.Response {
 		t.Fatalf("proxy request: %v", err)
 	}
 	return response
+}
+
+func closeResponseBody(t *testing.T, response *http.Response) {
+	t.Helper()
+	if err := response.Body.Close(); err != nil {
+		t.Fatalf("close response body: %v", err)
+	}
+}
+
+type asyncHTTPResult struct {
+	response *http.Response
+	err      error
+}
+
+func startAsyncProxyPost(
+	t *testing.T,
+	layout RuntimeLayout,
+	body []byte,
+) <-chan asyncHTTPResult {
+	t.Helper()
+	request, err := http.NewRequest(
+		http.MethodPost,
+		layout.ProxyURL+"/responses",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Authorization", "Bearer "+layout.LocalProxyCapability)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json")
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:             nil,
+		DisableKeepAlives: true,
+	}}
+	result := make(chan asyncHTTPResult, 1)
+	go func() {
+		// The receiving test owns and closes every non-nil response body.
+		response, requestErr := client.Do(request) //nolint:bodyclose
+		result <- asyncHTTPResult{response: response, err: requestErr}
+	}()
+	return result
+}
+
+func waitForAsyncHTTPResult(
+	t *testing.T,
+	result <-chan asyncHTTPResult,
+) asyncHTTPResult {
+	t.Helper()
+	select {
+	case observed := <-result:
+		return observed
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for asynchronous proxy request")
+		return asyncHTTPResult{}
+	}
+}
+
+func waitForSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
+}
+
+func waitForFinalizingSession(
+	t *testing.T,
+	lifecycle *Lifecycle,
+	session *ArmSession,
+	wantState sessionState,
+) {
+	t.Helper()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		lifecycle.mu.Lock()
+		finalizing := lifecycle.finalizing
+		session.mu.Lock()
+		state := session.state
+		session.mu.Unlock()
+		lifecycle.mu.Unlock()
+		if finalizing == session && state == wantState {
+			return
+		}
+		select {
+		case <-ticker.C:
+		case <-timeout.C:
+			t.Fatalf(
+				"timed out waiting for finalizing session state %d; got finalizer=%p state=%d",
+				wantState,
+				finalizing,
+				state,
+			)
+		}
+	}
+}
+
+type boundaryObservedConn struct {
+	net.Conn
+	closed  chan<- struct{}
+	release <-chan struct{}
+}
+
+type closeIdleObservedTransport struct {
+	http.RoundTripper
+	closed chan<- struct{}
+}
+
+func (transport *closeIdleObservedTransport) CloseIdleConnections() {
+	if underlying, ok := transport.RoundTripper.(interface{ CloseIdleConnections() }); ok {
+		underlying.CloseIdleConnections()
+	}
+	select {
+	case transport.closed <- struct{}{}:
+	default:
+	}
+}
+
+func (connection *boundaryObservedConn) Close() error {
+	err := connection.Conn.Close()
+	select {
+	case connection.closed <- struct{}{}:
+	default:
+	}
+	<-connection.release
+	return err
+}
+
+func waitForUpstreamConnection(
+	t *testing.T,
+	connections <-chan net.Conn,
+	description string,
+) net.Conn {
+	t.Helper()
+	select {
+	case connection := <-connections:
+		return connection
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+		return nil
+	}
 }
 
 func requestJSON(arm genericrunner.Arm, prompt, commandDescription string) []byte {
@@ -1562,7 +2578,7 @@ func assertProxyCaptureFailure(
 		t.Fatal(err)
 	}
 	response := proxyPost(t, layout, requestJSON(arm, "limit", "command"))
-	response.Body.Close()
+	closeResponseBody(t, response)
 	if response.StatusCode == http.StatusOK {
 		t.Fatal("proxy accepted bounded capture overflow")
 	}

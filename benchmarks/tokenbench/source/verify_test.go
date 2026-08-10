@@ -401,7 +401,11 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runner.close()
+	defer func() {
+		if err := runner.close(); err != nil {
+			t.Errorf("close Git runner: %v", err)
+		}
+	}()
 	t.Setenv("PATH", replacementPath)
 	output, err := runner.output(
 		context.Background(),
@@ -438,7 +442,11 @@ func TestGitRunnerRejectsExecutableMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runner.close()
+	defer func() {
+		if err := runner.close(); err != nil {
+			t.Errorf("close Git runner: %v", err)
+		}
+	}()
 	content[len(content)/2] ^= 0xff
 	if err := os.WriteFile(gitCopy, content, 0o700); err != nil {
 		t.Fatal(err)
@@ -711,7 +719,11 @@ func expectedSource(
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer git.close()
+	defer func() {
+		if err := git.close(); err != nil {
+			t.Errorf("close Git runner: %v", err)
+		}
+	}()
 	return Expected{
 		Root:                root,
 		Revision:            revision,

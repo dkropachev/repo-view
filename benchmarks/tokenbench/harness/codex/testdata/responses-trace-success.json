@@ -1,8 +1,29 @@
 {
-  "schema_version": "tokenbench.codex.responses-trace/v1",
+  "schema_version": "tokenbench.codex.responses-trace/v3",
+  "production_tls_required": false,
   "first_request": {
     "model": "gpt-5.4",
-    "non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "exact_body_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+    "nonce_normalized_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "headers": {
+      "reviewed_semantic_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
+      "parity_projection_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
+      "content_type_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "user_agent_sha256": "2323232323232323232323232323232323232323232323232323232323232323",
+      "accept_present": false,
+      "accept_sha256": "",
+      "openai_beta_present": false,
+      "openai_beta_sha256": "",
+      "turn_state_present": false,
+      "turn_state_sha256": "",
+      "authorization_class": "bearer_credential_secret"
+    },
+    "dynamic_fields": [
+      {"json_pointer":"/client_metadata/session_id","present":true,"sha256":"2424242424242424242424242424242424242424242424242424242424242424","classification":"fresh_process_nonce"},
+      {"json_pointer":"/client_metadata/x-codex-turn-metadata/turn_started_at_unix_ms","present":true,"sha256":"2525252525252525252525252525252525252525252525252525252525252525","classification":"clock_nonce"},
+      {"json_pointer":"/input/0/internal_chat_message_metadata_passthrough/turn_id","present":true,"sha256":"2626262626262626262626262626262626262626262626262626262626262626","classification":"fresh_process_nonce"},
+      {"json_pointer":"/prompt_cache_key","present":true,"sha256":"2727272727272727272727272727272727272727272727272727272727272727","classification":"provider_cache_routing_identifier"}
+    ],
     "tools": [
       {
         "kind": "command",
@@ -70,10 +91,120 @@
       }
     ]
   },
+  "requests": [
+    {
+      "sequence": 0,
+      "model": "gpt-5.4",
+      "exact_body_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+      "nonce_normalized_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "headers": {
+        "reviewed_semantic_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
+        "parity_projection_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
+        "content_type_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "user_agent_sha256": "2323232323232323232323232323232323232323232323232323232323232323",
+        "accept_present": false,
+        "accept_sha256": "",
+        "openai_beta_present": false,
+        "openai_beta_sha256": "",
+        "turn_state_present": false,
+        "turn_state_sha256": "",
+        "authorization_class": "bearer_credential_secret"
+      },
+      "dynamic_fields": [
+        {"json_pointer":"/client_metadata/session_id","present":true,"sha256":"2424242424242424242424242424242424242424242424242424242424242424","classification":"fresh_process_nonce"},
+        {"json_pointer":"/client_metadata/x-codex-turn-metadata/turn_started_at_unix_ms","present":true,"sha256":"2525252525252525252525252525252525252525252525252525252525252525","classification":"clock_nonce"},
+        {"json_pointer":"/input/0/internal_chat_message_metadata_passthrough/turn_id","present":true,"sha256":"2626262626262626262626262626262626262626262626262626262626262626","classification":"fresh_process_nonce"},
+        {"json_pointer":"/prompt_cache_key","present":true,"sha256":"2727272727272727272727272727272727272727272727272727272727272727","classification":"provider_cache_routing_identifier"}
+      ]
+    },
+    {
+      "sequence": 1,
+      "model": "gpt-5.4",
+      "exact_body_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
+      "nonce_normalized_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "headers": {
+        "reviewed_semantic_sha256": "3131313131313131313131313131313131313131313131313131313131313131",
+        "parity_projection_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
+        "content_type_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "user_agent_sha256": "2323232323232323232323232323232323232323232323232323232323232323",
+        "accept_present": false,
+        "accept_sha256": "",
+        "openai_beta_present": false,
+        "openai_beta_sha256": "",
+        "turn_state_present": true,
+        "turn_state_sha256": "3232323232323232323232323232323232323232323232323232323232323232",
+        "authorization_class": "bearer_credential_secret"
+      },
+      "dynamic_fields": [
+        {"json_pointer":"/client_metadata/session_id","present":true,"sha256":"2424242424242424242424242424242424242424242424242424242424242424","classification":"fresh_process_nonce"},
+        {"json_pointer":"/client_metadata/x-codex-turn-metadata/turn_started_at_unix_ms","present":true,"sha256":"2525252525252525252525252525252525252525252525252525252525252525","classification":"clock_nonce"},
+        {"json_pointer":"/input/0/internal_chat_message_metadata_passthrough/turn_id","present":true,"sha256":"2626262626262626262626262626262626262626262626262626262626262626","classification":"fresh_process_nonce"},
+        {"json_pointer":"/prompt_cache_key","present":true,"sha256":"2727272727272727272727272727272727272727272727272727272727272727","classification":"provider_cache_routing_identifier"}
+      ]
+    }
+  ],
+  "response_attempts": [
+    {
+      "sequence": 0,
+      "stage": "completed",
+      "error_class": "",
+      "status_present": true,
+      "status_code": 200,
+      "headers_present": true,
+      "headers": {
+        "reviewed_semantic_sha256": "4040404040404040404040404040404040404040404040404040404040404040",
+        "content_type_present": true,
+        "content_type_sha256": "05da1bb712f64e93ebe4ff0a6575a240427bf14bd4b172cc7e7a38fb8d85b674",
+        "content_encoding_present": false,
+        "content_encoding_sha256": "",
+        "provider_model_present": true,
+        "provider_model_sha256": "644c066befbf35647b1f56f85aa087e92000c2a42ea4c9bd7f071e84cdd46c28",
+        "turn_state_present": true,
+        "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+        "reasoning_included_present": true,
+        "reasoning_included_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "tls_connections": [],
+      "body_captured": true,
+      "body_complete": true,
+      "body_bytes": 1,
+      "body_sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    },
+    {
+      "sequence": 1,
+      "stage": "completed",
+      "error_class": "",
+      "status_present": true,
+      "status_code": 200,
+      "headers_present": true,
+      "headers": {
+        "reviewed_semantic_sha256": "4545454545454545454545454545454545454545454545454545454545454545",
+        "content_type_present": true,
+        "content_type_sha256": "05da1bb712f64e93ebe4ff0a6575a240427bf14bd4b172cc7e7a38fb8d85b674",
+        "content_encoding_present": false,
+        "content_encoding_sha256": "",
+        "provider_model_present": true,
+        "provider_model_sha256": "644c066befbf35647b1f56f85aa087e92000c2a42ea4c9bd7f071e84cdd46c28",
+        "turn_state_present": true,
+        "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+        "reasoning_included_present": true,
+        "reasoning_included_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      "tls_connections": [],
+      "body_captured": true,
+      "body_complete": true,
+      "body_bytes": 1,
+      "body_sha256": "3535353535353535353535353535353535353535353535353535353535353535"
+    }
+  ],
   "responses": [
     {
       "request_model": "gpt-5.4",
-      "request_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "request_exact_body_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
+      "request_nonce_normalized_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "request_headers_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
       "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
       "response_model": "gpt-5.4-2026-03-05",
       "provider_model_header": "gpt-5.4-2026-03-05",
@@ -101,11 +232,23 @@
         "output_tokens": 3,
         "reasoning_tokens": 1
       },
-      "reasoning_included": true
+      "reasoning_included": true,
+      "wire": {
+        "status_code": 200,
+        "raw_content_type": "application/json",
+        "media_type": "application/json",
+        "body_bytes": 1,
+        "exact_body_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "canonical_response_sha256": "3434343434343434343434343434343434343434343434343434343434343434",
+        "sse_events": [],
+        "completed_event_sequence": null
+      }
     },
     {
       "request_model": "gpt-5.4",
-      "request_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "request_exact_body_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
+      "request_nonce_normalized_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "request_headers_sha256": "3131313131313131313131313131313131313131313131313131313131313131",
       "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
       "response_model": "gpt-5.4-2026-03-05",
       "provider_model_header": "gpt-5.4-2026-03-05",
@@ -133,7 +276,17 @@
         "output_tokens": 2,
         "reasoning_tokens": 0
       },
-      "reasoning_included": true
+      "reasoning_included": true,
+      "wire": {
+        "status_code": 200,
+        "raw_content_type": "application/json",
+        "media_type": "application/json",
+        "body_bytes": 1,
+        "exact_body_sha256": "3535353535353535353535353535353535353535353535353535353535353535",
+        "canonical_response_sha256": "3636363636363636363636363636363636363636363636363636363636363636",
+        "sse_events": [],
+        "completed_event_sequence": null
+      }
     }
   ]
 }

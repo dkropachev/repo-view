@@ -37,27 +37,19 @@ type renameNoReplaceFunc func(*os.File, string, *os.File, string) error
 // Its methods are safe for concurrent use, except that callers must keep the
 // store open until all transactions have finished.
 type Store struct {
-	root           *os.Root
-	path           string
-	rootInfo       os.FileInfo
-	maxObjectBytes int64
-
-	stateMu sync.RWMutex
-	closed  bool
-
-	publishMu sync.Mutex
-
-	// afterPublish is an internal deterministic fault-injection point used by
-	// tests. Production stores leave it nil.
-	afterPublish func(ObjectRef)
-
-	// afterAtomicPublish, beforeCleanup, and afterCleanupRemove are internal
-	// deterministic fault-injection points used by tests. Production stores
-	// leave them nil.
+	rootInfo           os.FileInfo
+	root               *os.Root
+	afterPublish       func(ObjectRef)
 	afterAtomicPublish func(ObjectRef) error
 	beforeCleanup      func() error
 	afterCleanupRemove func() error
+	beforeCleanupClose func() error
 	publicationRename  renameNoReplaceFunc
+	path               string
+	maxObjectBytes     int64
+	stateMu            sync.RWMutex
+	publishMu          sync.Mutex
+	closed             bool
 }
 
 // Open opens an existing, absolute, clean directory as a store, creates its
@@ -97,18 +89,27 @@ func Open(path string, options Options) (*Store, error) {
 	}
 	opened, err := root.Stat(".")
 	if err != nil {
-		root.Close()
-		return nil, fmt.Errorf("stat opened CAS root: %w", err)
+		return nil, joinCloseError(
+			fmt.Errorf("stat opened CAS root: %w", err),
+			"close CAS root after stat failure",
+			root,
+		)
 	}
 	if !opened.IsDir() || !os.SameFile(before, opened) {
-		root.Close()
-		return nil, errors.New("CAS root changed while it was opened")
+		return nil, joinCloseError(
+			errors.New("CAS root changed while it was opened"),
+			"close changed CAS root",
+			root,
+		)
 	}
 	current, err := os.Lstat(path)
 	if err != nil || current.Mode()&os.ModeSymlink != 0 ||
 		!current.IsDir() || !os.SameFile(opened, current) {
-		root.Close()
-		return nil, errors.New("CAS root changed while it was opened")
+		return nil, joinCloseError(
+			errors.Join(errors.New("CAS root changed while it was opened"), err),
+			"close changed CAS root",
+			root,
+		)
 	}
 
 	store := &Store{
@@ -118,22 +119,32 @@ func Open(path string, options Options) (*Store, error) {
 		maxObjectBytes: options.MaxObjectBytes,
 	}
 	if err := store.ensureLayout(); err != nil {
-		root.Close()
-		return nil, err
+		return nil, joinCloseError(err, "close CAS root after layout failure", root)
 	}
-	if err := store.RecoverStale(); err != nil && !errors.Is(err, ErrTransactionsActive) {
-		root.Close()
-		return nil, fmt.Errorf("recover stale CAS transactions: %w", err)
+	if err := store.RecoverStale(); err != nil && !benignTransactionsActive(err) {
+		return nil, joinCloseError(
+			fmt.Errorf("recover stale CAS transactions: %w", err),
+			"close CAS root after recovery failure",
+			root,
+		)
 	}
 	if err := store.probeAtomicNoReplace(); err != nil {
-		root.Close()
-		return nil, fmt.Errorf("probe CAS atomic no-replace publication: %w", err)
+		return nil, joinCloseError(
+			fmt.Errorf("probe CAS atomic no-replace publication: %w", err),
+			"close CAS root after publication probe failure",
+			root,
+		)
 	}
 	if err := store.validateRootBinding(); err != nil {
-		root.Close()
-		return nil, err
+		return nil, joinCloseError(err, "close invalid CAS root binding", root)
 	}
 	return store, nil
+}
+
+func benignTransactionsActive(err error) bool {
+	//nolint:errorlint // Only the exact top-level sentinel is benign; wrapped cleanup errors must fail Open.
+	_, ok := err.(*transactionsActiveSentinel)
+	return ok
 }
 
 // Close releases the store's rooted directory descriptor. It does not delete
@@ -163,74 +174,98 @@ func (store *Store) Begin() (*Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer staging.Close()
 	algorithm, algorithmInfo, err := store.openAlgorithmDirectory()
 	if err != nil {
-		return nil, err
+		return nil, joinCloseError(err, "close CAS staging after algorithm open failure", staging)
 	}
-	defer algorithm.Close()
 	if !sameFilesystem(stagingInfo, algorithmInfo) {
-		return nil, errors.New("CAS staging and object directories are not on the same filesystem")
+		return nil, errors.Join(
+			errors.New("CAS staging and object directories are not on the same filesystem"),
+			wrapError("close CAS algorithm directory", algorithm.Close()),
+			wrapError("close CAS staging directory", staging.Close()),
+		)
+	}
+	if err := algorithm.Close(); err != nil {
+		return nil, joinCloseError(
+			fmt.Errorf("close CAS algorithm directory: %w", err),
+			"close CAS staging after algorithm close failure",
+			staging,
+		)
 	}
 	lease, leaseInfo, err := openTransactionLock(staging)
 	if err != nil {
-		return nil, err
+		return nil, joinCloseError(err, "close CAS staging after lock open failure", staging)
 	}
 	if !sameFilesystem(stagingInfo, leaseInfo) {
-		lease.Close()
-		return nil, errors.New("CAS transaction lock is not on the staging filesystem")
+		return nil, errors.Join(
+			errors.New("CAS transaction lock is not on the staging filesystem"),
+			wrapError("close misplaced CAS transaction lock", lease.Close()),
+			wrapError("close CAS staging directory", staging.Close()),
+		)
 	}
 	if err := lockTransactionShared(lease); err != nil {
-		lease.Close()
-		return nil, fmt.Errorf("lock live CAS transaction: %w", err)
+		return nil, errors.Join(
+			fmt.Errorf("lock live CAS transaction: %w", err),
+			wrapError("close CAS transaction lock after lock failure", lease.Close()),
+			wrapError("close CAS staging directory", staging.Close()),
+		)
+	}
+	releaseLease := func(primary error) error {
+		return errors.Join(
+			primary,
+			wrapError("unlock live CAS transaction", unlockTransaction(lease)),
+			wrapError("close live CAS transaction lock", lease.Close()),
+			wrapError("close CAS staging directory", staging.Close()),
+		)
 	}
 	if err := validateCanonicalTransactionLock(staging, leaseInfo); err != nil {
-		unlockTransaction(lease)
-		lease.Close()
-		return nil, err
+		return nil, releaseLease(err)
 	}
-	releaseLease := true
-	defer func() {
-		if releaseLease {
-			unlockTransaction(lease)
-			lease.Close()
-		}
-	}()
 
-	for attempt := 0; attempt < 32; attempt++ {
+	for range 32 {
 		name, nameErr := randomEntryName("tx-")
 		if nameErr != nil {
-			return nil, nameErr
+			return nil, releaseLease(nameErr)
 		}
 		if err := staging.Mkdir(name, privateDirectoryMode); err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				continue
 			}
-			return nil, fmt.Errorf("create transaction staging directory: %w", err)
+			return nil, releaseLease(fmt.Errorf("create transaction staging directory: %w", err))
 		}
 		if err := staging.Chmod(name, privateDirectoryMode); err != nil {
-			return nil, fmt.Errorf("set transaction staging directory mode: %w", err)
+			return nil, releaseLease(fmt.Errorf("set transaction staging directory mode: %w", err))
 		}
 		createdInfo, err := staging.Lstat(name)
 		if err != nil {
-			return nil, fmt.Errorf("lstat new transaction staging directory: %w", err)
+			return nil, releaseLease(fmt.Errorf("lstat new transaction staging directory: %w", err))
 		}
 		if err := validatePrivateDirectoryInfo(name, createdInfo); err != nil {
-			return nil, err
+			return nil, releaseLease(err)
 		}
 		transactionRoot, transactionInfo, err := openPrivateDirectory(staging, name)
 		if err != nil {
-			return nil, errors.Join(err, removeDirectoryIfSame(staging, name, createdInfo))
+			return nil, releaseLease(errors.Join(
+				err,
+				removeDirectoryIfSame(staging, name, createdInfo),
+			))
 		}
 		if err := syncRoot(staging); err != nil {
-			transactionRoot.Close()
 			cleanupErr := removeDirectoryIfSame(staging, name, transactionInfo)
-			return nil, errors.Join(
+			return nil, releaseLease(errors.Join(
 				fmt.Errorf("sync transaction staging parent: %w", err),
+				wrapError("close transaction root after parent sync failure", transactionRoot.Close()),
 				cleanupErr,
+			))
+		}
+		if err := staging.Close(); err != nil {
+			return nil, errors.Join(
+				fmt.Errorf("close CAS staging before returning transaction: %w", err),
+				wrapError("close transaction root after staging close failure", transactionRoot.Close()),
+				wrapError("unlock transaction after staging close failure", unlockTransaction(lease)),
+				wrapError("close transaction lock after staging close failure", lease.Close()),
 			)
 		}
-		releaseLease = false
 		return &Transaction{
 			store:     store,
 			directory: name,
@@ -239,9 +274,10 @@ func (store *Store) Begin() (*Transaction, error) {
 			lease:     lease,
 			staged:    make(map[string]*stagedObject),
 			owned:     make(map[string]os.FileInfo),
+			ownedPins: make(map[string]*os.File),
 		}, nil
 	}
-	return nil, errors.New("could not allocate a unique CAS transaction directory")
+	return nil, releaseLease(errors.New("could not allocate a unique CAS transaction directory"))
 }
 
 func removeDirectoryIfSame(parent *os.Root, name string, expected os.FileInfo) error {
@@ -388,22 +424,32 @@ func (store *Store) EnsureDurable(ctx context.Context, refs []ObjectRef) error {
 	return nil
 }
 
-func (store *Store) ensureLayout() error {
+func (store *Store) ensureLayout() (resultErr error) {
 	objects, _, err := ensurePrivateDirectory(store.root, "objects")
 	if err != nil {
 		return err
 	}
 	algorithm, algorithmInfo, err := ensurePrivateDirectory(objects, "sha256")
-	objects.Close()
+	objectsCloseErr := objects.Close()
 	if err != nil {
-		return err
+		return errors.Join(err, wrapError("close CAS objects directory", objectsCloseErr))
 	}
-	defer algorithm.Close()
+	if objectsCloseErr != nil {
+		return errors.Join(
+			fmt.Errorf("close CAS objects directory: %w", objectsCloseErr),
+			wrapError("close CAS algorithm directory after parent close failure", algorithm.Close()),
+		)
+	}
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close CAS algorithm directory", algorithm)
+	}()
 	staging, stagingInfo, err := ensurePrivateDirectory(store.root, "staging")
 	if err != nil {
 		return err
 	}
-	defer staging.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close CAS staging directory", staging)
+	}()
 	if !sameFilesystem(algorithmInfo, stagingInfo) {
 		return errors.New("CAS staging and object directories are not on the same filesystem")
 	}
@@ -411,7 +457,9 @@ func (store *Store) ensureLayout() error {
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close CAS transaction lock", lock)
+	}()
 	if !sameFilesystem(stagingInfo, lockInfo) {
 		return errors.New("CAS transaction lock is not on the staging filesystem")
 	}
@@ -423,8 +471,21 @@ func (store *Store) openAlgorithmDirectory() (*os.Root, os.FileInfo, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	defer objects.Close()
-	return openPrivateDirectory(objects, "sha256")
+	algorithm, info, openErr := openPrivateDirectory(objects, "sha256")
+	closeErr := objects.Close()
+	if openErr != nil || closeErr != nil {
+		if algorithm != nil {
+			closeErr = errors.Join(
+				closeErr,
+				wrapError("close CAS algorithm directory after parent failure", algorithm.Close()),
+			)
+		}
+		return nil, nil, errors.Join(
+			openErr,
+			wrapError("close CAS objects directory", closeErr),
+		)
+	}
+	return algorithm, info, nil
 }
 
 func (store *Store) openShard(hexDigest string, create bool) (*os.Root, os.FileInfo, error) {
@@ -432,11 +493,27 @@ func (store *Store) openShard(hexDigest string, create bool) (*os.Root, os.FileI
 	if err != nil {
 		return nil, nil, err
 	}
-	defer algorithm.Close()
+	var shard *os.Root
+	var info os.FileInfo
 	if create {
-		return ensurePrivateDirectory(algorithm, hexDigest[:2])
+		shard, info, err = ensurePrivateDirectory(algorithm, hexDigest[:2])
+	} else {
+		shard, info, err = openPrivateDirectory(algorithm, hexDigest[:2])
 	}
-	return openPrivateDirectory(algorithm, hexDigest[:2])
+	closeErr := algorithm.Close()
+	if err != nil || closeErr != nil {
+		if shard != nil {
+			closeErr = errors.Join(
+				closeErr,
+				wrapError("close CAS shard after algorithm failure", shard.Close()),
+			)
+		}
+		return nil, nil, errors.Join(
+			err,
+			wrapError("close CAS algorithm directory", closeErr),
+		)
+	}
+	return shard, info, nil
 }
 
 func (store *Store) validateRef(ref ObjectRef) error {

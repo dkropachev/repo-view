@@ -42,7 +42,7 @@ func parseResponsesRequest(
 	}
 	if model != execution.Invocation.Model {
 		return harnesscodex.ResponsesRequestTrace{}, nil, fmt.Errorf(
-			"Responses request model %q differs from approved model %q",
+			"responses request model %q differs from approved model %q",
 			model,
 			execution.Invocation.Model,
 		)
@@ -59,11 +59,11 @@ func parseResponsesRequest(
 	for index, value := range tools {
 		tool, ok := value.(map[string]any)
 		if !ok || tool == nil {
-			return harnesscodex.ResponsesRequestTrace{}, nil, fmt.Errorf("Responses tool %d is not an object", index)
+			return harnesscodex.ResponsesRequestTrace{}, nil, fmt.Errorf("responses tool %d is not an object", index)
 		}
 		declaration, err := parseToolDeclaration(tool)
 		if err != nil {
-			return harnesscodex.ResponsesRequestTrace{}, nil, fmt.Errorf("Responses tool %d: %w", index, err)
+			return harnesscodex.ResponsesRequestTrace{}, nil, fmt.Errorf("responses tool %d: %w", index, err)
 		}
 		key := declaration.Kind + "\x00" + declaration.Name
 		if _, duplicate := seen[key]; duplicate {
@@ -84,12 +84,17 @@ func parseResponsesRequest(
 		declarations = append(declarations, declaration)
 	}
 	if commandCount == 0 {
-		return harnesscodex.ResponsesRequestTrace{}, nil, errors.New("Responses request omitted the command tool surface")
+		return harnesscodex.ResponsesRequestTrace{}, nil, errors.New("responses request omitted the command tool surface")
 	}
 	if err := validateArmMCPDeclarations(execution.Arm, mcpNames, mcpSupportNames); err != nil {
 		return harnesscodex.ResponsesRequestTrace{}, nil, err
 	}
 
+	exactBodyDigest := bytesDigest(raw)
+	dynamicFields, err := captureRequestDynamicFields(request)
+	if err != nil {
+		return harnesscodex.ResponsesRequestTrace{}, nil, err
+	}
 	delete(request, "tools")
 	if err := normalizeRequestMetadata(request, execution); err != nil {
 		return harnesscodex.ResponsesRequestTrace{}, nil, err
@@ -99,9 +104,11 @@ func parseResponsesRequest(
 		return harnesscodex.ResponsesRequestTrace{}, nil, err
 	}
 	trace := harnesscodex.ResponsesRequestTrace{
-		Model:                model,
-		NonToolPayloadSHA256: nonToolDigest,
-		Tools:                append([]harnesscodex.ResponsesToolDeclaration(nil), declarations...),
+		Model:                               model,
+		ExactBodySHA256:                     exactBodyDigest,
+		NonceNormalizedNonToolPayloadSHA256: nonToolDigest,
+		DynamicFields:                       cloneDynamicFields(dynamicFields),
+		Tools:                               append([]harnesscodex.ResponsesToolDeclaration(nil), declarations...),
 	}
 	return trace, declarations, nil
 }
@@ -157,7 +164,7 @@ func parseToolDeclaration(tool map[string]any) (harnesscodex.ResponsesToolDeclar
 	if kind == harnesscodex.ToolKindMCPSupport {
 		if typeName != "function" || strictValue == nil || *strictValue {
 			return harnesscodex.ResponsesToolDeclaration{}, errors.New(
-				"Codex MCP support tools must use the pinned non-strict function shape",
+				"codex MCP support tools must use the pinned non-strict function shape",
 			)
 		}
 	}
@@ -317,10 +324,10 @@ func codexVisibleSchema(schema map[string]any) (map[string]any, error) {
 }
 
 type pinnedTreatmentSpec struct {
+	schema      map[string]any
 	kind        string
 	name        string
 	description string
-	schema      map[string]any
 }
 
 func pinnedTreatmentSpecs() []pinnedTreatmentSpec {
@@ -465,6 +472,118 @@ func validateArmMCPDeclarations(
 	return nil
 }
 
+func captureRequestDynamicFields(
+	request map[string]any,
+) ([]harnesscodex.ProviderRequestDynamicFieldTrace, error) {
+	client, err := requiredObject(request, "client_metadata")
+	if err != nil {
+		return nil, err
+	}
+	metadataRaw, err := requiredString(client, "x-codex-turn-metadata")
+	if err != nil {
+		return nil, err
+	}
+	metadata, err := decodeJSONObject([]byte(metadataRaw))
+	if err != nil {
+		return nil, fmt.Errorf("decode x-codex-turn-metadata for exact commitments: %w", err)
+	}
+	type fieldSpec struct {
+		path           string
+		value          any
+		classification string
+	}
+	specs := make([]fieldSpec, 0, 16)
+	appendField := func(path string, object map[string]any, key, classification string) error {
+		value, present := object[key]
+		if !present {
+			return fmt.Errorf("dynamic provider field %s is absent", path)
+		}
+		specs = append(specs, fieldSpec{path, value, classification})
+		return nil
+	}
+	if err := appendField(
+		"/prompt_cache_key", request, "prompt_cache_key",
+		harnesscodex.DynamicFieldProviderCacheRouting,
+	); err != nil {
+		return nil, err
+	}
+	for _, field := range []struct{ key, path string }{
+		{"x-codex-installation-id", "/client_metadata/x-codex-installation-id"},
+		{"session_id", "/client_metadata/session_id"},
+		{"thread_id", "/client_metadata/thread_id"},
+		{"x-codex-window-id", "/client_metadata/x-codex-window-id"},
+		{"turn_id", "/client_metadata/turn_id"},
+	} {
+		if err := appendField(field.path, client, field.key, harnesscodex.DynamicFieldFreshProcessNonce); err != nil {
+			return nil, err
+		}
+	}
+	for _, field := range []struct{ key, path, classification string }{
+		{"installation_id", "/client_metadata/x-codex-turn-metadata/installation_id", harnesscodex.DynamicFieldFreshProcessNonce},
+		{"session_id", "/client_metadata/x-codex-turn-metadata/session_id", harnesscodex.DynamicFieldFreshProcessNonce},
+		{"thread_id", "/client_metadata/x-codex-turn-metadata/thread_id", harnesscodex.DynamicFieldFreshProcessNonce},
+		{"turn_id", "/client_metadata/x-codex-turn-metadata/turn_id", harnesscodex.DynamicFieldFreshProcessNonce},
+		{"window_id", "/client_metadata/x-codex-turn-metadata/window_id", harnesscodex.DynamicFieldFreshProcessNonce},
+		{"turn_started_at_unix_ms", "/client_metadata/x-codex-turn-metadata/turn_started_at_unix_ms", harnesscodex.DynamicFieldClockNonce},
+	} {
+		if err := appendField(field.path, metadata, field.key, field.classification); err != nil {
+			return nil, err
+		}
+	}
+	input, err := requiredArray(request, "input")
+	if err != nil {
+		return nil, err
+	}
+	for index, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok || item == nil {
+			return nil, fmt.Errorf("responses input item %d is not an object", index)
+		}
+		rawPassthrough, present := item["internal_chat_message_metadata_passthrough"]
+		if !present {
+			continue
+		}
+		passthrough, ok := rawPassthrough.(map[string]any)
+		if !ok || passthrough == nil {
+			return nil, fmt.Errorf("responses input item %d turn metadata is not an object", index)
+		}
+		if err := appendField(
+			fmt.Sprintf("/input/%d/internal_chat_message_metadata_passthrough/turn_id", index),
+			passthrough,
+			"turn_id",
+			harnesscodex.DynamicFieldFreshProcessNonce,
+		); err != nil {
+			return nil, err
+		}
+	}
+	fields := make([]harnesscodex.ProviderRequestDynamicFieldTrace, len(specs))
+	for index, spec := range specs {
+		digest, err := canonicalJSONDigest(spec.value)
+		if err != nil {
+			return nil, fmt.Errorf("commit dynamic provider field %s: %w", spec.path, err)
+		}
+		fields[index] = harnesscodex.ProviderRequestDynamicFieldTrace{
+			JSONPointer:    spec.path,
+			Present:        true,
+			SHA256:         digest,
+			Classification: spec.classification,
+		}
+	}
+	sort.Slice(fields, func(left, right int) bool {
+		return fields[left].JSONPointer < fields[right].JSONPointer
+	})
+	return fields, nil
+}
+
+func cloneDynamicFields(
+	fields []harnesscodex.ProviderRequestDynamicFieldTrace,
+) []harnesscodex.ProviderRequestDynamicFieldTrace {
+	return append(
+		make([]harnesscodex.ProviderRequestDynamicFieldTrace, 0, len(fields)),
+		fields...,
+	)
+}
+
 // normalizeRequestMetadata validates the exact dynamic identity envelope
 // emitted by Codex v0.144.0 for a root exec turn, then replaces only those
 // fresh-process identifiers with a schema marker before parity hashing.
@@ -489,7 +608,7 @@ func normalizeRequestMetadata(
 		"turn_id",
 		"x-codex-turn-metadata",
 	); err != nil {
-		return fmt.Errorf("Codex client_metadata: %w", err)
+		return fmt.Errorf("codex client_metadata: %w", err)
 	}
 	installationID, err := requiredString(client, "x-codex-installation-id")
 	if err != nil {
@@ -517,10 +636,10 @@ func normalizeRequestMetadata(
 	}
 	if !validCanonicalUUID(installationID, '4') || !validCanonicalUUID(threadID, '7') ||
 		!validCanonicalUUID(turnID, '7') {
-		return errors.New("Codex client_metadata contains a noncanonical request identifier")
+		return errors.New("codex client_metadata contains a noncanonical request identifier")
 	}
 	if sessionID != threadID || promptCacheKey != threadID || windowID != threadID+":0" {
-		return errors.New("Codex request identity fields are internally inconsistent")
+		return errors.New("codex request identity fields are internally inconsistent")
 	}
 
 	metadata, err := decodeJSONObject([]byte(metadataJSON))
@@ -561,7 +680,7 @@ func normalizeRequestMetadata(
 			return fmt.Errorf("x-codex-turn-metadata field %q is inconsistent", key)
 		}
 	}
-	started, err := nonnegativeInteger(metadata, "turn_started_at_unix_ms", true)
+	started, err := nonnegativeInteger(metadata, "turn_started_at_unix_ms")
 	if err != nil || started == 0 {
 		if err == nil {
 			err = errors.New("timestamp must be positive")
@@ -624,7 +743,7 @@ func normalizeInputTurnMetadata(request map[string]any, turnID, normalizedTurnID
 	for index, value := range input {
 		item, ok := value.(map[string]any)
 		if !ok || item == nil {
-			return fmt.Errorf("Responses input item %d is not an object", index)
+			return fmt.Errorf("responses input item %d is not an object", index)
 		}
 		value, exists := item["internal_chat_message_metadata_passthrough"]
 		if !exists {
@@ -632,14 +751,14 @@ func normalizeInputTurnMetadata(request map[string]any, turnID, normalizedTurnID
 		}
 		passthrough, ok := value.(map[string]any)
 		if !ok || passthrough == nil {
-			return fmt.Errorf("Responses input item %d turn metadata is not an object", index)
+			return fmt.Errorf("responses input item %d turn metadata is not an object", index)
 		}
 		if err := exactKeys(passthrough, "turn_id"); err != nil {
-			return fmt.Errorf("Responses input item %d turn metadata: %w", index, err)
+			return fmt.Errorf("responses input item %d turn metadata: %w", index, err)
 		}
 		observed, err := requiredString(passthrough, "turn_id")
 		if err != nil || observed != turnID {
-			return fmt.Errorf("Responses input item %d turn ID is inconsistent", index)
+			return fmt.Errorf("responses input item %d turn ID is inconsistent", index)
 		}
 		item["internal_chat_message_metadata_passthrough"] = map[string]any{
 			"turn_id": normalizedTurnID,
@@ -647,7 +766,7 @@ func normalizeInputTurnMetadata(request map[string]any, turnID, normalizedTurnID
 		found++
 	}
 	if found == 0 {
-		return errors.New("Responses input omitted Codex turn metadata passthrough")
+		return errors.New("responses input omitted Codex turn metadata passthrough")
 	}
 	return nil
 }
@@ -724,19 +843,41 @@ func parseResponsesBody(
 	maxEvents int,
 ) (harnesscodex.ResponsesResponseTrace, error) {
 	var response map[string]any
+	var events []harnesscodex.ResponsesSSEEventTrace
+	var completedSequence *int
 	var err error
 	switch mediaType {
 	case "application/json":
 		response, err = decodeJSONObject(body)
+		events = []harnesscodex.ResponsesSSEEventTrace{}
 	case "text/event-stream":
-		response, err = completedSSEResponse(body, maxEventBytes, maxEvents)
+		response, events, completedSequence, err = completedSSEResponse(
+			body, maxEventBytes, maxEvents,
+		)
 	default:
 		return harnesscodex.ResponsesResponseTrace{}, fmt.Errorf("unsupported upstream media type %q", mediaType)
 	}
 	if err != nil {
 		return harnesscodex.ResponsesResponseTrace{}, err
 	}
-	return parseCompletedResponse(response, request, expectedProvider, declarations)
+	canonicalResponseSHA256, err := canonicalJSONDigest(response)
+	if err != nil {
+		return harnesscodex.ResponsesResponseTrace{}, err
+	}
+	parsed, err := parseCompletedResponse(response, request, expectedProvider, declarations)
+	if err != nil {
+		return harnesscodex.ResponsesResponseTrace{}, err
+	}
+	parsed.Wire = harnesscodex.ProviderResponseWireTrace{
+		StatusCode:              200,
+		MediaType:               mediaType,
+		BodyBytes:               len(body),
+		ExactBodySHA256:         bytesDigest(body),
+		CanonicalResponseSHA256: canonicalResponseSHA256,
+		SSEEvents:               events,
+		CompletedEventSequence:  completedSequence,
+	}
+	return parsed, nil
 }
 
 func parseCompletedResponse(
@@ -801,13 +942,15 @@ func parseCompletedResponse(
 		return harnesscodex.ResponsesResponseTrace{}, err
 	}
 	return harnesscodex.ResponsesResponseTrace{
-		RequestModel:                request.Model,
-		RequestNonToolPayloadSHA256: request.NonToolPayloadSHA256,
-		RequestToolsSHA256:          requestToolsSHA256,
-		ResponseModel:               model,
-		Outputs:                     outputsTrace,
-		Usage:                       &usage,
-		ProviderTotalTokens:         providerTotalTokens,
+		RequestModel:           request.Model,
+		RequestExactBodySHA256: request.ExactBodySHA256,
+		RequestNonceNormalizedNonToolPayloadSHA256: request.NonceNormalizedNonToolPayloadSHA256,
+		RequestHeadersSHA256:                       request.Headers.ReviewedSemanticSHA256,
+		RequestToolsSHA256:                         requestToolsSHA256,
+		ResponseModel:                              model,
+		Outputs:                                    outputsTrace,
+		Usage:                                      &usage,
+		ProviderTotalTokens:                        providerTotalTokens,
 	}, nil
 }
 
@@ -1006,11 +1149,11 @@ func parseUsage(object map[string]any) (harness.Usage, *int64, error) {
 	); err != nil {
 		return harness.Usage{}, nil, err
 	}
-	input, err := nonnegativeInteger(object, "input_tokens", true)
+	input, err := nonnegativeInteger(object, "input_tokens")
 	if err != nil {
 		return harness.Usage{}, nil, err
 	}
-	output, err := nonnegativeInteger(object, "output_tokens", true)
+	output, err := nonnegativeInteger(object, "output_tokens")
 	if err != nil {
 		return harness.Usage{}, nil, err
 	}
@@ -1023,7 +1166,7 @@ func parseUsage(object map[string]any) (harness.Usage, *int64, error) {
 		if err := exactKeys(details, "cached_tokens"); err != nil {
 			return harness.Usage{}, nil, err
 		}
-		cached, err = nonnegativeInteger(details, "cached_tokens", true)
+		cached, err = nonnegativeInteger(details, "cached_tokens")
 		if err != nil {
 			return harness.Usage{}, nil, err
 		}
@@ -1037,7 +1180,7 @@ func parseUsage(object map[string]any) (harness.Usage, *int64, error) {
 		if err := exactKeys(details, "reasoning_tokens"); err != nil {
 			return harness.Usage{}, nil, err
 		}
-		reasoning, err = nonnegativeInteger(details, "reasoning_tokens", true)
+		reasoning, err = nonnegativeInteger(details, "reasoning_tokens")
 		if err != nil {
 			return harness.Usage{}, nil, err
 		}
@@ -1066,13 +1209,13 @@ func parseUsage(object map[string]any) (harness.Usage, *int64, error) {
 	return usage, providerTotalTokens, nil
 }
 
-func nonnegativeInteger(object map[string]any, key string, required bool) (int64, error) {
+func nonnegativeInteger(object map[string]any, key string) (int64, error) {
 	value, present, err := optionalNonnegativeInteger(object, key)
 	if err != nil {
 		return 0, err
 	}
-	if required && !present {
-		return 0, fmt.Errorf("JSON field %q is required", key)
+	if !present {
+		return 0, fmt.Errorf("json field %q is required", key)
 	}
 	return value, nil
 }
@@ -1084,21 +1227,32 @@ func optionalNonnegativeInteger(object map[string]any, key string) (int64, bool,
 	}
 	number, ok := value.(json.Number)
 	if !ok {
-		return 0, false, fmt.Errorf("JSON field %q must be an integer", key)
+		return 0, false, fmt.Errorf("json field %q must be an integer", key)
 	}
 	parsed, err := strconv.ParseInt(string(number), 10, 64)
 	if err != nil || parsed < 0 {
-		return 0, false, fmt.Errorf("JSON field %q must be a nonnegative integer", key)
+		return 0, false, fmt.Errorf("json field %q must be a nonnegative integer", key)
 	}
 	return parsed, true, nil
 }
 
-func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string]any, error) {
+func completedSSEResponse(
+	body []byte,
+	maxEventBytes int,
+	maxEvents int,
+) (
+	map[string]any,
+	[]harnesscodex.ResponsesSSEEventTrace,
+	*int,
+	error,
+) {
 	scanner := bufio.NewScanner(bytes.NewReader(body))
 	scanner.Buffer(make([]byte, 64<<10), maxEventBytes+1)
 	var data strings.Builder
 	var eventName string
 	var completed map[string]any
+	var completedSequence *int
+	traces := make([]harnesscodex.ResponsesSSEEventTrace, 0)
 	events := 0
 	done := false
 	dispatch := func() error {
@@ -1116,6 +1270,15 @@ func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string
 			return errors.New("upstream SSE event exceeds its byte limit")
 		}
 		if payload == "[DONE]" {
+			if eventName != "" {
+				return errors.New("upstream SSE [DONE] unexpectedly has an event field")
+			}
+			traces = append(traces, harnesscodex.ResponsesSSEEventTrace{
+				Sequence:   len(traces),
+				Type:       "[DONE]",
+				DataSHA256: bytesDigest([]byte(payload)),
+				Mapping:    harnesscodex.SSEMappingStreamDone,
+			})
 			done = true
 			eventName = ""
 			return nil
@@ -1131,8 +1294,24 @@ func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string
 		if err != nil {
 			return err
 		}
+		if len(typeName) > 256 || len(eventName) > 256 {
+			return errors.New("upstream SSE event identity exceeds its byte limit")
+		}
 		if eventName != "" && eventName != typeName {
 			return errors.New("upstream SSE event field differs from JSON event type")
+		}
+		canonicalEventSHA256, err := canonicalJSONDigest(event)
+		if err != nil {
+			return err
+		}
+		trace := harnesscodex.ResponsesSSEEventTrace{
+			Sequence:            len(traces),
+			EventPresent:        eventName != "",
+			Event:               eventName,
+			Type:                typeName,
+			DataSHA256:          bytesDigest([]byte(payload)),
+			CanonicalJSONSHA256: canonicalEventSHA256,
+			Mapping:             harnesscodex.SSEMappingForwardedUnmapped,
 		}
 		switch typeName {
 		case "response.completed":
@@ -1143,9 +1322,18 @@ func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string
 			if err != nil {
 				return err
 			}
+			mappedSHA256, err := canonicalJSONDigest(completed)
+			if err != nil {
+				return err
+			}
+			trace.Mapping = harnesscodex.SSEMappingCompletedResponse
+			trace.MappedResponseSHA256 = mappedSHA256
+			sequence := trace.Sequence
+			completedSequence = &sequence
 		case "response.failed", "response.incomplete", "error":
 			return fmt.Errorf("upstream SSE ended with %s", typeName)
 		}
+		traces = append(traces, trace)
 		eventName = ""
 		return nil
 	}
@@ -1153,7 +1341,7 @@ func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string
 		line := strings.TrimSuffix(scanner.Text(), "\r")
 		if line == "" {
 			if err := dispatch(); err != nil {
-				return nil, err
+				return nil, nil, nil, err
 			}
 			continue
 		}
@@ -1167,32 +1355,50 @@ func completedSSEResponse(body []byte, maxEventBytes, maxEvents int) (map[string
 		switch field {
 		case "event":
 			if eventName != "" {
-				return nil, errors.New("upstream SSE event has duplicate event fields")
+				return nil, nil, nil, errors.New("upstream SSE event has duplicate event fields")
 			}
 			eventName = value
 		case "data":
 			if data.Len()+len(value)+1 > maxEventBytes {
-				return nil, errors.New("upstream SSE event exceeds its byte limit")
+				return nil, nil, nil, errors.New("upstream SSE event exceeds its byte limit")
 			}
 			data.WriteString(value)
 			data.WriteByte('\n')
 		default:
-			return nil, fmt.Errorf("unsupported upstream SSE field %q", field)
+			return nil, nil, nil, fmt.Errorf("unsupported upstream SSE field %q", field)
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan upstream SSE: %w", err)
+		return nil, nil, nil, fmt.Errorf("scan upstream SSE: %w", err)
 	}
 	if err := dispatch(); err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	if completed == nil {
-		return nil, errors.New("upstream SSE omitted response.completed")
+		return nil, nil, nil, errors.New("upstream SSE omitted response.completed")
 	}
-	return completed, nil
+	return completed, traces, completedSequence, nil
 }
 
 func comparePairSnapshots(baseline, candidate armSnapshot) error {
+	if baseline.ordinary != candidate.ordinary {
+		return errors.New("paired Codex terminal states are asymmetric")
+	}
+	if baseline.requestCount != candidate.requestCount {
+		return errors.New("paired Codex provider request counts drifted")
+	}
+	if baseline.trace.TLSRequired != candidate.trace.TLSRequired {
+		return errors.New("paired Codex production TLS modes drifted")
+	}
+	if baseline.captureError != "" || candidate.captureError != "" {
+		return errors.New("paired Codex capture contains an integrity failure")
+	}
+	if baseline.requestCount == 0 {
+		if baseline.trace.FirstRequest != nil || candidate.trace.FirstRequest != nil {
+			return errors.New("paired Codex empty request snapshots are inconsistent")
+		}
+		return compareEffectiveConfigs(baseline, candidate)
+	}
 	if baseline.trace.FirstRequest == nil || candidate.trace.FirstRequest == nil {
 		return errors.New("paired Codex trace omitted first request")
 	}
@@ -1201,8 +1407,24 @@ func comparePairSnapshots(baseline, candidate armSnapshot) error {
 	if baselineFirst.Model != candidateFirst.Model {
 		return errors.New("paired Codex request model drifted")
 	}
-	if baselineFirst.NonToolPayloadSHA256 != candidateFirst.NonToolPayloadSHA256 {
-		return errors.New("paired Codex non-tool request payload drifted")
+	if baselineFirst.NonceNormalizedNonToolPayloadSHA256 != candidateFirst.NonceNormalizedNonToolPayloadSHA256 {
+		return errors.New("paired Codex nonce-normalized request parity projection drifted")
+	}
+	if len(baseline.trace.Requests) != baseline.requestCount ||
+		len(candidate.trace.Requests) != candidate.requestCount {
+		return errors.New("paired Codex ordered request snapshots are incomplete")
+	}
+	for index := range baseline.requestCount {
+		left := baseline.trace.Requests[index]
+		right := candidate.trace.Requests[index]
+		if left.Sequence != right.Sequence || left.Model != right.Model ||
+			left.NonceNormalizedNonToolPayloadSHA256 != right.NonceNormalizedNonToolPayloadSHA256 ||
+			left.Headers.ParityProjectionSHA256 != right.Headers.ParityProjectionSHA256 {
+			return fmt.Errorf("paired Codex request %d reviewed parity projection drifted", index)
+		}
+		if !sameDynamicFieldClassifications(left.DynamicFields, right.DynamicFields) {
+			return fmt.Errorf("paired Codex request %d dynamic-field classifications drifted", index)
+		}
 	}
 	baselineTLS, err := tlsIdentitySet(baseline.trace)
 	if err != nil {
@@ -1252,15 +1474,42 @@ func comparePairSnapshots(baseline, candidate armSnapshot) error {
 	return compareEffectiveConfigs(baseline, candidate)
 }
 
+func sameDynamicFieldClassifications(
+	left, right []harnesscodex.ProviderRequestDynamicFieldTrace,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].JSONPointer != right[index].JSONPointer ||
+			left[index].Present != right[index].Present ||
+			left[index].Classification != right[index].Classification {
+			return false
+		}
+	}
+	return true
+}
+
 func tlsIdentitySet(trace harnesscodex.ResponsesTrace) ([]string, error) {
 	identities := make(map[string]struct{})
-	for _, response := range trace.Responses {
-		for _, connection := range response.TLSConnections {
+	commit := func(connections []harnesscodex.TLSConnectionTrace) error {
+		for _, connection := range connections {
 			raw, err := json.Marshal(connection)
 			if err != nil {
-				return nil, errors.New("encode production TLS connection identity")
+				return errors.New("encode production TLS connection identity")
 			}
 			identities[bytesDigest(raw)] = struct{}{}
+		}
+		return nil
+	}
+	for _, attempt := range trace.ResponseAttempts {
+		if err := commit(attempt.TLSConnections); err != nil {
+			return nil, err
+		}
+	}
+	for _, response := range trace.Responses {
+		if err := commit(response.TLSConnections); err != nil {
+			return nil, err
 		}
 	}
 	result := make([]string, 0, len(identities))

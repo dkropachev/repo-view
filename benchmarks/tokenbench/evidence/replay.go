@@ -45,7 +45,7 @@ type CodexDecoder struct {
 // used by the capture's runtime layout.
 func NewCodexDecoder(adapter *harnesscodex.Adapter) (*CodexDecoder, error) {
 	if adapter == nil {
-		return nil, errors.New("Codex replay adapter is required")
+		return nil, errors.New("codex replay adapter is required")
 	}
 	if _, err := adapter.RuntimeLayout(); err != nil {
 		return nil, fmt.Errorf("validate Codex replay adapter: %w", err)
@@ -73,13 +73,13 @@ type ReplayManifest struct {
 
 // Replay is a recursively verified derived result.
 type Replay struct {
-	Root        cas.ObjectRef
-	Subject     cas.ObjectRef
-	Attestation AttestationEnvelope
-	Manifest    ReplayManifest
-	Capture     Capture
 	Baseline    *harness.Observation
 	Candidate   *harness.Observation
+	Manifest    ReplayManifest
+	Attestation AttestationEnvelope
+	Root        cas.ObjectRef
+	Subject     cas.ObjectRef
+	Capture     Capture
 }
 
 // ReplayCapture loads and authenticates parent, invokes only the supplied
@@ -271,7 +271,7 @@ func (decoder *CodexDecoder) identity(
 	capture Capture,
 ) (DecoderIdentity, error) {
 	if decoder == nil || decoder.adapter == nil {
-		return DecoderIdentity{}, errors.New("Codex replay decoder is not configured")
+		return DecoderIdentity{}, errors.New("codex replay decoder is not configured")
 	}
 	invocation := capture.Run.Plan.Baseline
 	if invocation.HarnessIdentity.Kind != "codex" ||

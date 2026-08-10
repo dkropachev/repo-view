@@ -12,10 +12,10 @@ import (
 // break, so every -c assignment remains exactly one argv element.
 func tomlString(value string) (string, error) {
 	if !utf8.ValidString(value) {
-		return "", errors.New("TOML string must be valid UTF-8")
+		return "", errors.New("toml string must be valid UTF-8")
 	}
 	if strings.ContainsRune(value, '\x00') {
-		return "", errors.New("TOML string must not contain NUL")
+		return "", errors.New("toml string must not contain NUL")
 	}
 	var result strings.Builder
 	result.Grow(len(value) + 2)
@@ -50,13 +50,13 @@ func tomlString(value string) (string, error) {
 
 func tomlStringArray(values []string) (string, error) {
 	if values == nil {
-		return "", errors.New("TOML array must be canonical, not nil")
+		return "", errors.New("toml array must be canonical, not nil")
 	}
 	encoded := make([]string, len(values))
 	for index, value := range values {
 		item, err := tomlString(value)
 		if err != nil {
-			return "", fmt.Errorf("TOML array element %d: %w", index, err)
+			return "", fmt.Errorf("toml array element %d: %w", index, err)
 		}
 		encoded[index] = item
 	}
@@ -65,7 +65,7 @@ func tomlStringArray(values []string) (string, error) {
 
 func tomlStringMap(values map[string]string) (string, error) {
 	if values == nil {
-		return "", errors.New("TOML map must be canonical, not nil")
+		return "", errors.New("toml map must be canonical, not nil")
 	}
 	keys := make([]string, 0, len(values))
 	for key := range values {
@@ -79,7 +79,7 @@ func tomlStringMap(values map[string]string) (string, error) {
 	for _, key := range keys {
 		value, err := tomlString(values[key])
 		if err != nil {
-			return "", fmt.Errorf("TOML map value for %q: %w", key, err)
+			return "", fmt.Errorf("toml map value for %q: %w", key, err)
 		}
 		encoded = append(encoded, key+"="+value)
 	}

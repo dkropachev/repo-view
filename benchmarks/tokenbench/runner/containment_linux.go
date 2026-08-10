@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	cgroupContainmentVersion = "tokenbench.cgroup-v2/v1"
+	cgroupContainmentVersion = "tokenbench.cgroup-v2/v2"
 	cgroupMountPath          = "/sys/fs/cgroup"
 	hostCgroupName           = "tokenbench-host-v1"
 	pairCgroupName           = "tokenbench-pair-v1"
@@ -45,40 +45,40 @@ var requiredControllers = []string{"cpu", "memory", "pids"}
 // recreates the same direct pair child for every arm. This gives every launch
 // fresh kernel accounting without exposing arm/order metadata in membership.
 type cgroupManager struct {
-	root              *os.Root
-	lease             *os.File
-	delegatedPath     string
-	delegatedRelative string
-	pairPath          string
-	ancestorPIDs      uint64
-	ancestorMemory    uint64
-	inheritedControls []cgroupControlObservation
-	resourceKeys      cgroupResourceCounterKeys
-	requireBounded    bool
-	cleanupTimeout    time.Duration
-
+	root               *os.Root
+	lease              *os.File
+	removeArm          func(string) error
+	removeHost         func(string) error
+	active             map[string]struct{}
+	delegatedPath      string
+	delegatedRelative  string
+	pairPath           string
+	resourceKeys       cgroupResourceCounterKeys
+	inheritedControls  []cgroupControlObservation
+	cleanupTimeout     time.Duration
+	ancestorMemory     uint64
+	ancestorPIDs       uint64
 	mu                 sync.Mutex
+	requireBounded     bool
 	closed             bool
 	controllersEnabled bool
 	hostCreated        bool
 	movedToHost        bool
-	active             map[string]struct{}
-	removeHost         func(string) error
 }
 
 type armCgroup struct {
-	manager   *cgroupManager
-	name      string
-	directory *os.File
-
-	mu        sync.Mutex
-	cleanupMu sync.Mutex
-	launched  bool
-	cleaned   bool
-	resources *harness.ResourceOutcome
+	manager       *cgroupManager
+	directory     *os.File
+	networkPolicy *cgroupConnectPolicy
+	resources     *harness.ResourceOutcome
+	name          string
+	mu            sync.Mutex
+	cleanupMu     sync.Mutex
+	launched      bool
+	cleaned       bool
 }
 
-type cgroupIdentity struct {
+type cgroupIdentity struct { //nolint:govet,nolintlint // Field order is the versioned containment identity wire order.
 	Version                 string                     `json:"version"`
 	AtomicCloneIntoCgroup   bool                       `json:"atomic_clone_into_cgroup"`
 	KillEntireSubtree       bool                       `json:"kill_entire_subtree"`
@@ -103,7 +103,7 @@ type cgroupIdentity struct {
 	ResourceCounterKeys     cgroupResourceCounterKeys  `json:"resource_counter_keys"`
 }
 
-type cgroupControlObservation struct {
+type cgroupControlObservation struct { //nolint:govet,nolintlint // Field order is part of cgroupIdentity's canonical JSON.
 	Scope   string `json:"scope"`
 	Name    string `json:"name"`
 	Present bool   `json:"present"`
@@ -190,6 +190,7 @@ func discoverCgroupManager(cleanup time.Duration, requireBounded bool) (_ *cgrou
 		active:            make(map[string]struct{}),
 	}
 	manager.removeHost = manager.root.Remove
+	manager.removeArm = manager.root.Remove
 	valid := false
 	defer func() {
 		if !valid {
@@ -306,7 +307,10 @@ func waitForOwnCgroup(want string, timeout time.Duration) error {
 			return nil
 		}
 		if !time.Now().Before(end) {
-			return fmt.Errorf("runner cgroup membership did not become %q (last %q: %v)", want, got, err)
+			if err != nil {
+				return fmt.Errorf("runner cgroup membership did not become %q (last %q): %w", want, got, err)
+			}
+			return fmt.Errorf("runner cgroup membership did not become %q (last %q)", want, got)
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
@@ -580,16 +584,20 @@ func (manager *cgroupManager) verifyPolicy() error {
 	return nil
 }
 
-func (manager *cgroupManager) captureInheritedControls() ([]cgroupControlObservation, error) {
+func (manager *cgroupManager) captureInheritedControls() (_ []cgroupControlObservation, resultErr error) {
 	host, err := manager.root.OpenRoot(hostCgroupName)
 	if err != nil {
 		return nil, fmt.Errorf("open runner host cgroup controls: %w", err)
 	}
-	defer host.Close()
+	defer func() {
+		if err := host.Close(); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close runner host cgroup controls: %w", err))
+		}
+	}()
 	result := make([]cgroupControlObservation, 0, len(inheritedControlNames)*2)
 	for _, scoped := range []struct {
-		name string
 		root *os.Root
+		name string
 	}{
 		{name: "delegated", root: manager.root},
 		{name: "host", root: host},
@@ -843,17 +851,14 @@ func (arm *armCgroup) killAndRemove(deadline time.Duration) error {
 	arm.mu.Lock()
 	arm.resources = harness.CloneResourceOutcome(resources)
 	arm.mu.Unlock()
-	arm.mu.Lock()
-	if arm.directory != nil {
-		if err := arm.directory.Close(); err != nil {
-			arm.mu.Unlock()
-			return fmt.Errorf("close arm cgroup: %w", err)
-		}
-		arm.directory = nil
+	if err := arm.cleanupConnectPolicy(); err != nil {
+		return fmt.Errorf("detach and verify arm cgroup connect policy: %w", err)
 	}
-	arm.mu.Unlock()
+	// Keep the exact directory inode pinned while removal is retryable. Closing
+	// it first makes a transient rmdir failure unrecoverable because a retry can
+	// no longer prove that the canonical path still names this arm.
 	for {
-		err := arm.manager.root.Remove(arm.name)
+		err := arm.manager.removeArm(arm.name)
 		if err == nil {
 			break
 		}
@@ -866,8 +871,15 @@ func (arm *armCgroup) killAndRemove(deadline time.Duration) error {
 	delete(arm.manager.active, arm.name)
 	arm.manager.mu.Unlock()
 	arm.mu.Lock()
+	directory := arm.directory
+	arm.directory = nil
 	arm.cleaned = true
 	arm.mu.Unlock()
+	if directory != nil {
+		if err := directory.Close(); err != nil {
+			return fmt.Errorf("close removed arm cgroup: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -1188,7 +1200,11 @@ func cleanupCommandGroup(command *exec.Cmd) {
 	}
 }
 
-func configureContainedCommand(command *exec.Cmd, arm *armCgroup) error {
+func configureContainedCommand(
+	command *exec.Cmd,
+	arm *armCgroup,
+	usePIDNamespace bool,
+) error {
 	if arm == nil {
 		return errors.New("arm cgroup is required")
 	}
@@ -1208,6 +1224,9 @@ func configureContainedCommand(command *exec.Cmd, arm *armCgroup) error {
 		Pdeathsig:   syscall.SIGKILL,
 		UseCgroupFD: true,
 		CgroupFD:    int(arm.directory.Fd()),
+	}
+	if usePIDNamespace {
+		command.SysProcAttr.Cloneflags = unix.CLONE_NEWPID
 	}
 	command.Cancel = func() error {
 		if command.Process == nil {

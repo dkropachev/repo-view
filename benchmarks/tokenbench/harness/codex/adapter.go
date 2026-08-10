@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -23,11 +24,11 @@ import (
 
 const (
 	adapterKind       = "codex"
-	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v1"
+	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v2"
 	executableVersion = "codex-cli 0.144.0"
-	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v1"
-	configSchema      = "tokenbench.codex-config/v0.144.0/v1"
-	layoutSchema      = "tokenbench.codex-runtime-layout/v2"
+	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v3"
+	configSchema      = "tokenbench.codex-config/v0.144.0/v2"
+	layoutSchema      = "tokenbench.codex-runtime-layout/v3"
 	productionAdapter = "tokenbench.codex-production-adapter/v1"
 
 	// OfflineLocalProxyCapability is the inert capability marker used for
@@ -179,15 +180,18 @@ func reasoningEfforts(values ...string) map[string]struct{} {
 }
 
 // RuntimeLayout mirrors the runner-owned immutable layout without introducing
-// a package cycle. All paths and the loopback proxy are public, committed
-// process inputs. LocalProxyCapability is identical in both arms and never an
-// upstream credential. For live evidence it is expired before signing.
+// a package cycle. ToolboxRoot is the sole PATH directory and is disjoint from
+// every writable runtime directory. All paths and the loopback proxy are
+// public, committed process inputs. LocalProxyCapability is identical in both
+// arms and never an upstream credential. For live evidence it is expired before
+// signing.
 type RuntimeLayout struct {
 	ProxyURL             string `json:"proxy_url"`
 	Home                 string `json:"home"`
 	CodexHome            string `json:"codex_home"`
 	Temp                 string `json:"temp"`
 	ConfigLock           string `json:"config_lock"`
+	ToolboxRoot          string `json:"toolbox_root"`
 	LocalProxyCapability string `json:"local_proxy_capability"`
 }
 
@@ -207,10 +211,12 @@ func (layout RuntimeLayout) Environment() map[string]string {
 func (layout RuntimeLayout) ConfigAssignments() []string {
 	proxyURL, _ := tomlString(layout.ProxyURL)
 	configLock, _ := tomlString(layout.ConfigLock)
+	toolboxRoot, _ := tomlString(layout.ToolboxRoot)
 	return []string{
 		"openai_base_url=" + proxyURL,
 		"debug.config_lockfile.export_dir=" + configLock,
 		"debug.config_lockfile.save_fields_resolved_from_model_catalog=true",
+		"shell_environment_policy.set={PATH=" + toolboxRoot + "}",
 	}
 }
 
@@ -290,7 +296,7 @@ func BuiltInProductionIdentity(adapter harness.Adapter) (string, bool) {
 
 func validateRuntimeLayout(layout RuntimeLayout) error {
 	if !harness.ValidLocalProxyCapability(layout.LocalProxyCapability) {
-		return errors.New("Codex runtime layout must use one canonical local proxy capability")
+		return errors.New("codex runtime layout must use one canonical local proxy capability")
 	}
 	parsed, err := url.Parse(layout.ProxyURL)
 	if err != nil {
@@ -302,7 +308,7 @@ func validateRuntimeLayout(layout RuntimeLayout) error {
 		parsed.Host != "127.0.0.1:"+strconv.Itoa(port) || parsed.Path != "/v1" ||
 		parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		parsed.User != nil || parsed.Opaque != "" || parsed.String() != layout.ProxyURL {
-		return errors.New("Codex proxy URL must be canonical http://127.0.0.1:PORT/v1")
+		return errors.New("codex proxy URL must be canonical http://127.0.0.1:PORT/v1")
 	}
 	directories := []struct {
 		name  string
@@ -312,18 +318,22 @@ func validateRuntimeLayout(layout RuntimeLayout) error {
 		{"Codex home", layout.CodexHome},
 		{"temporary", layout.Temp},
 		{"config-lock", layout.ConfigLock},
+		{"PATH toolbox", layout.ToolboxRoot},
 	}
 	for _, directory := range directories {
 		if !validText(directory.value) || !filepath.IsAbs(directory.value) ||
 			filepath.Clean(directory.value) != directory.value || isFilesystemRoot(directory.value) {
-			return fmt.Errorf("Codex runtime %s directory must be absolute, canonical, and non-root", directory.name)
+			return fmt.Errorf("codex runtime %s directory must be absolute, canonical, and non-root", directory.name)
 		}
+	}
+	if strings.ContainsRune(layout.ToolboxRoot, os.PathListSeparator) {
+		return errors.New("codex runtime PATH toolbox must be exactly one directory")
 	}
 	for left := range directories {
 		for right := left + 1; right < len(directories); right++ {
 			if pathsOverlap(directories[left].value, directories[right].value) {
 				return fmt.Errorf(
-					"Codex runtime %s and %s directories must be disjoint",
+					"codex runtime %s and %s directories must be disjoint",
 					directories[left].name,
 					directories[right].name,
 				)
@@ -331,7 +341,7 @@ func validateRuntimeLayout(layout RuntimeLayout) error {
 		}
 	}
 	if err := harness.ValidatePublishableEnvironment(runtimeEnvironment(layout)); err != nil {
-		return fmt.Errorf("Codex runtime environment: %w", err)
+		return fmt.Errorf("codex runtime environment: %w", err)
 	}
 	return nil
 }
@@ -360,26 +370,27 @@ func runtimeEnvironment(layout RuntimeLayout) map[string]string {
 		"CODEX_HOME":        layout.CodexHome,
 		"CODEX_SQLITE_HOME": filepath.Join(layout.CodexHome, "sqlite"),
 		"TMPDIR":            layout.Temp,
+		"PATH":              layout.ToolboxRoot,
 		"CODEX_API_KEY":     layout.LocalProxyCapability,
 	}
 }
 
 func controlConfigSHA256(layout RuntimeLayout) (string, error) {
 	manifest := struct {
-		Schema                  string                         `json:"schema"`
+		ReasoningEfforts        map[string]map[string]struct{} `json:"reasoning_efforts"`
+		CommonEnvironment       map[string]string              `json:"common_environment"`
+		RuntimeLayout           RuntimeLayout                  `json:"runtime_layout"`
 		AdapterVersion          string                         `json:"adapter_version"`
 		ExecutableVersion       string                         `json:"executable_version"`
 		DecoderSchema           string                         `json:"decoder_schema"`
 		ResponsesTraceArtifact  string                         `json:"responses_trace_artifact"`
 		EffectiveConfigArtifact string                         `json:"effective_config_artifact"`
+		Schema                  string                         `json:"schema"`
 		Snapshots               []Snapshot                     `json:"snapshots"`
-		DisabledFeatures        []string                       `json:"disabled_features"`
-		EnabledFeatures         []string                       `json:"enabled_features"`
-		MCPTools                []string                       `json:"mcp_tools"`
 		ExecutableSHA256        []string                       `json:"executable_sha256_allowlist"`
-		RuntimeLayout           RuntimeLayout                  `json:"runtime_layout"`
-		CommonEnvironment       map[string]string              `json:"common_environment"`
-		ReasoningEfforts        map[string]map[string]struct{} `json:"reasoning_efforts"`
+		MCPTools                []string                       `json:"mcp_tools"`
+		EnabledFeatures         []string                       `json:"enabled_features"`
+		DisabledFeatures        []string                       `json:"disabled_features"`
 	}{
 		Schema:                  configSchema,
 		AdapterVersion:          adapterVersion,
@@ -405,17 +416,17 @@ func controlConfigSHA256(layout RuntimeLayout) (string, error) {
 
 func (adapter *Adapter) validateConfigured() error {
 	if adapter == nil {
-		return errors.New("Codex adapter is nil")
+		return errors.New("codex adapter is nil")
 	}
 	if err := validateRuntimeLayout(adapter.layout); err != nil {
-		return fmt.Errorf("Codex adapter runtime layout: %w", err)
+		return fmt.Errorf("codex adapter runtime layout: %w", err)
 	}
 	expected, err := controlConfigSHA256(adapter.layout)
 	if err != nil {
 		return err
 	}
 	if adapter.controlSHA256 != expected {
-		return errors.New("Codex adapter control configuration is invalid")
+		return errors.New("codex adapter control configuration is invalid")
 	}
 	return nil
 }
@@ -471,7 +482,7 @@ func (adapter *Adapter) CommonEnvironment(
 		return nil, err
 	}
 	if request.Environment == nil || len(request.Environment) != 0 {
-		return nil, errors.New("Codex common environment resolution requires an empty input environment")
+		return nil, errors.New("codex common environment resolution requires an empty input environment")
 	}
 	environment := adapter.commonEnvironment()
 	request.Environment = cloneMap(environment)
@@ -535,17 +546,17 @@ func (adapter *Adapter) Build(
 	}
 	if len(invocation.MCPServers) != 0 {
 		return harness.ProcessSpec{}, errors.New(
-			"Codex Build accepts only the common invocation; use MCPArguments for registration",
+			"codex Build accepts only the common invocation; use MCPArguments for registration",
 		)
 	}
 	if len(invocation.Arguments) != 0 {
-		return harness.ProcessSpec{}, errors.New("Codex invocation arguments must be empty")
+		return harness.ProcessSpec{}, errors.New("codex invocation arguments must be empty")
 	}
 	if len(invocation.Prompt) == 0 {
-		return harness.ProcessSpec{}, errors.New("Codex prompt must not be empty")
+		return harness.ProcessSpec{}, errors.New("codex prompt must not be empty")
 	}
 	if !utf8.Valid(invocation.Prompt) {
-		return harness.ProcessSpec{}, errors.New("Codex prompt must be valid UTF-8")
+		return harness.ProcessSpec{}, errors.New("codex prompt must be valid UTF-8")
 	}
 	if invocation.Model != invocation.RequestedModel {
 		return harness.ProcessSpec{}, errors.New(
@@ -601,7 +612,7 @@ func AdapterForCanonicalProcess(
 	observed harness.ProcessSpec,
 ) (*Adapter, error) {
 	if len(invocation.MCPServers) != 0 {
-		return nil, errors.New("Codex common invocation contains MCP servers")
+		return nil, errors.New("codex common invocation contains MCP servers")
 	}
 	layout, err := runtimeLayoutFromProcess(observed)
 	if err != nil {
@@ -616,7 +627,7 @@ func AdapterForCanonicalProcess(
 		return nil, fmt.Errorf("rederive Codex common process: %w", err)
 	}
 	if !reflect.DeepEqual(observed, expected) {
-		return nil, errors.New("Codex common process differs from its code-owned encoding")
+		return nil, errors.New("codex common process differs from its code-owned encoding")
 	}
 	return adapter, nil
 }
@@ -639,6 +650,7 @@ func runtimeLayoutFromProcess(process harness.ProcessSpec) (RuntimeLayout, error
 		CodexHome:            process.Environment["CODEX_HOME"],
 		Temp:                 process.Environment["TMPDIR"],
 		ConfigLock:           configLock,
+		ToolboxRoot:          process.Environment["PATH"],
 		LocalProxyCapability: process.Environment["CODEX_API_KEY"],
 	}, nil
 }
@@ -651,7 +663,7 @@ func exactQuotedConfigValue(arguments []string, prefix string) (string, error) {
 			continue
 		}
 		if index+1 == len(arguments) {
-			return "", errors.New("Codex common argv ends with a bare -c")
+			return "", errors.New("codex common argv ends with a bare -c")
 		}
 		assignment := arguments[index+1]
 		if strings.HasPrefix(assignment, prefix) {
@@ -661,7 +673,7 @@ func exactQuotedConfigValue(arguments []string, prefix string) (string, error) {
 		index++
 	}
 	if count != 1 {
-		return "", fmt.Errorf("Codex common argv contains %d %s assignments", count, prefix)
+		return "", fmt.Errorf("codex common argv contains %d %s assignments", count, prefix)
 	}
 	var value string
 	if err := json.Unmarshal([]byte(encoded), &value); err != nil {
@@ -669,7 +681,7 @@ func exactQuotedConfigValue(arguments []string, prefix string) (string, error) {
 	}
 	canonical, err := tomlString(value)
 	if err != nil || canonical != encoded {
-		return "", fmt.Errorf("Codex %s assignment is not canonical", prefix)
+		return "", fmt.Errorf("codex %s assignment is not canonical", prefix)
 	}
 	return value, nil
 }
@@ -770,7 +782,6 @@ func (adapter *Adapter) baseArguments(request harness.ResolveRequest) ([]string,
 		"shell_environment_policy.inherit=\"none\"",
 		"shell_environment_policy.ignore_default_excludes=false",
 		"shell_environment_policy.experimental_use_profile=false",
-		"shell_environment_policy.set={}",
 		"project_doc_max_bytes=0",
 		"project_doc_fallback_filenames=[]",
 		"skills.bundled.enabled=false",
@@ -804,10 +815,13 @@ func configArguments(assignments []string) []string {
 
 func (adapter *Adapter) validateResolveRequest(request harness.ResolveRequest) error {
 	if err := harness.ValidatePublishableEnvironment(request.Environment); err != nil {
-		return fmt.Errorf("Codex environment: %w", err)
+		return fmt.Errorf("codex environment: %w", err)
 	}
 	if !equalStringMap(request.Environment, adapter.commonEnvironment()) {
-		return errors.New("Codex environment does not match the pinned runtime layout")
+		return errors.New("codex environment does not match the pinned runtime layout")
+	}
+	if request.Environment["PATH"] != adapter.layout.ToolboxRoot {
+		return errors.New("codex PATH differs from the immutable toolbox root")
 	}
 	efforts, modelKnown := allowedReasoningEfforts[request.Model]
 	if _, ok := efforts[request.ReasoningEffort]; !modelKnown || !ok {
@@ -820,10 +834,10 @@ func (adapter *Adapter) validateResolveRequest(request harness.ResolveRequest) e
 		)
 	}
 	if request.PermissionProfile != "read-only" {
-		return errors.New("Codex permission profile must be read-only")
+		return errors.New("codex permission profile must be read-only")
 	}
 	if !validText(request.DeveloperInstructions) {
-		return errors.New("Codex developer instructions contain invalid text")
+		return errors.New("codex developer instructions contain invalid text")
 	}
 	paths := []struct {
 		name  string
@@ -837,7 +851,7 @@ func (adapter *Adapter) validateResolveRequest(request harness.ResolveRequest) e
 	for _, path := range paths {
 		if !validText(path.value) || !filepath.IsAbs(path.value) ||
 			filepath.Clean(path.value) != path.value {
-			return fmt.Errorf("Codex %s must be an absolute canonical path", path.name)
+			return fmt.Errorf("codex %s must be an absolute canonical path", path.name)
 		}
 	}
 	digests := []struct {
@@ -852,20 +866,20 @@ func (adapter *Adapter) validateResolveRequest(request harness.ResolveRequest) e
 	}
 	for _, digest := range digests {
 		if !validSHA256(digest.value) {
-			return fmt.Errorf("Codex %s digest is invalid", digest.name)
+			return fmt.Errorf("codex %s digest is invalid", digest.name)
 		}
 	}
 	if !containsString(executableSHA256Allowlist, request.ExecutableSHA256) {
-		return errors.New("Codex executable digest is not in the v0.144.0 allowlist")
+		return errors.New("codex executable digest is not in the v0.144.0 allowlist")
 	}
 	if !validGitObjectID(request.SourceRevision) {
-		return errors.New("Codex source revision is invalid")
+		return errors.New("codex source revision is invalid")
 	}
 	if !validGitObjectID(request.SourceBaseRevision) {
-		return errors.New("Codex source base revision is invalid")
+		return errors.New("codex source base revision is invalid")
 	}
 	if request.TimeoutMillis <= 0 {
-		return errors.New("Codex timeout must be positive")
+		return errors.New("codex timeout must be positive")
 	}
 	return nil
 }
@@ -887,12 +901,10 @@ func validateMCPServer(server harness.MCPServer) error {
 	if server.Environment == nil || len(server.Environment) != 0 {
 		return errors.New("repo_view MCP environment must be a canonical empty object")
 	}
-	if len(server.Arguments) != 9 ||
+	if len(server.Arguments) != 9 && len(server.Arguments) != 11 ||
 		server.Arguments[0] != "mcp" ||
 		server.Arguments[1] != "--root" ||
-		server.Arguments[3] != "--base" ||
-		server.Arguments[5] != "--git" ||
-		server.Arguments[7] != "--git-sha256" {
+		server.Arguments[3] != "--base" {
 		return errors.New("repo_view MCP arguments do not match the canonical registration")
 	}
 	if !validText(server.Arguments[2]) ||
@@ -903,13 +915,35 @@ func validateMCPServer(server harness.MCPServer) error {
 	if !validGitObjectID(server.Arguments[4]) {
 		return errors.New("repo_view MCP base revision is invalid")
 	}
-	if !validText(server.Arguments[6]) ||
-		!filepath.IsAbs(server.Arguments[6]) ||
-		filepath.Clean(server.Arguments[6]) != server.Arguments[6] {
-		return errors.New("repo_view MCP Git executable must be an absolute canonical path")
+	if len(server.Arguments) == 9 {
+		if server.Arguments[5] != "--git" || server.Arguments[7] != "--git-sha256" {
+			return errors.New("repo_view MCP Git arguments are not canonical")
+		}
+		if !validText(server.Arguments[6]) ||
+			!filepath.IsAbs(server.Arguments[6]) ||
+			filepath.Clean(server.Arguments[6]) != server.Arguments[6] {
+			return errors.New("repo_view MCP Git executable must be an absolute canonical path")
+		}
+		if !validSHA256(server.Arguments[8]) {
+			return errors.New("repo_view MCP Git executable digest is invalid")
+		}
+		return nil
 	}
-	if !validSHA256(server.Arguments[8]) {
-		return errors.New("repo_view MCP Git executable digest is invalid")
+	if server.Arguments[5] != "--head" ||
+		server.Arguments[7] != "--changed-state-cache" ||
+		server.Arguments[9] != "--changed-state-cache-sha256" {
+		return errors.New("repo_view MCP cache arguments are not canonical")
+	}
+	if !validGitObjectID(server.Arguments[6]) {
+		return errors.New("repo_view MCP cache head revision is invalid")
+	}
+	if !validText(server.Arguments[8]) ||
+		!filepath.IsAbs(server.Arguments[8]) ||
+		filepath.Clean(server.Arguments[8]) != server.Arguments[8] {
+		return errors.New("repo_view MCP cache must be an absolute canonical path")
+	}
+	if !validSHA256(server.Arguments[10]) {
+		return errors.New("repo_view MCP cache digest is invalid")
 	}
 	return nil
 }
@@ -1058,7 +1092,7 @@ func contextError(ctx context.Context) error {
 		return errors.New("context is required")
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("Codex adapter context: %w", err)
+		return fmt.Errorf("codex adapter context: %w", err)
 	}
 	return nil
 }

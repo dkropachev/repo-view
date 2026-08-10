@@ -35,7 +35,7 @@ type TrustPolicy struct {
 
 // TrustedKeyPolicy contains one raw Ed25519 public key in canonical unpadded
 // base64url and the bundle roles it may attest.
-type TrustedKeyPolicy struct {
+type TrustedKeyPolicy struct { //nolint:govet,nolintlint // Field order defines canonical trust-policy JSON.
 	KeyID     string       `json:"key_id"`
 	PublicKey string       `json:"public_key"`
 	Roles     []BundleKind `json:"roles"`
@@ -43,9 +43,9 @@ type TrustedKeyPolicy struct {
 }
 
 type trustedKey struct {
-	publicKey ed25519.PublicKey
 	roles     map[BundleKind]struct{}
 	status    KeyStatus
+	publicKey ed25519.PublicKey
 }
 
 // Verifier is an immutable snapshot of one strictly decoded trust policy.
@@ -68,7 +68,7 @@ func DecodeTrustPolicy(raw []byte) (*Verifier, error) {
 		policy.Project != AttestationProject {
 		return nil, errors.New("trust policy context is invalid")
 	}
-	if policy.Keys == nil || len(policy.Keys) == 0 || len(policy.Keys) > maxTrustedKeys {
+	if len(policy.Keys) == 0 || len(policy.Keys) > maxTrustedKeys {
 		return nil, errors.New("trust policy key count is invalid")
 	}
 	keys := make(map[string]trustedKey, len(policy.Keys))
@@ -91,7 +91,7 @@ func DecodeTrustPolicy(raw []byte) (*Verifier, error) {
 			configured.Status != KeyRevoked {
 			return nil, errors.New("trust policy key status is invalid")
 		}
-		if configured.Roles == nil || len(configured.Roles) == 0 || len(configured.Roles) > 2 {
+		if len(configured.Roles) == 0 || len(configured.Roles) > 2 {
 			return nil, errors.New("trust policy key roles are invalid")
 		}
 		roles := make(map[BundleKind]struct{}, len(configured.Roles))

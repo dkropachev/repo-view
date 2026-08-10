@@ -12,7 +12,7 @@ func filesystemID(info os.FileInfo) (uint64, bool) {
 	if !ok {
 		return 0, false
 	}
-	return uint64(stat.Dev), true
+	return uint64(stat.Dev), true //nolint:unconvert // Stat_t.Dev varies across Unix targets.
 }
 
 func multipleLinks(info os.FileInfo) bool {

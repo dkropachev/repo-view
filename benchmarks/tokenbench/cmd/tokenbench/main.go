@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -39,7 +40,11 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if err != nil {
-		if err != flag.ErrHelp {
+		var delegated *delegatedRunResult
+		if errors.As(err, &delegated) {
+			return delegated.exitCode
+		}
+		if !errors.Is(err, flag.ErrHelp) {
 			fmt.Fprintf(stderr, "tokenbench: %v\n", err)
 		}
 		return 1

@@ -184,7 +184,7 @@ type Artifact struct {
 // RawExecution is the exact output and sanitized runner evidence made
 // available to a decoder. Limit flags are distinct from timeout/cancellation so
 // failed attempts remain classifiable instead of looking like model output.
-type RawExecution struct {
+type RawExecution struct { //nolint:govet,nolintlint // Field order is the stable capture wire order.
 	Stdout          []byte           `json:"stdout"`
 	Stderr          []byte           `json:"stderr"`
 	Artifacts       []Artifact       `json:"artifacts"`
@@ -263,7 +263,7 @@ func ValidateResourceOutcome(outcome *ResourceOutcome) error {
 }
 
 func validateResourceCounters(name string, counters []ResourceCounter, required []string) error {
-	if counters == nil || len(counters) == 0 || len(counters) > 64 {
+	if len(counters) == 0 || len(counters) > 64 {
 		return fmt.Errorf("%s counter set is empty or oversized", name)
 	}
 	for index, counter := range counters {
@@ -470,7 +470,7 @@ func ValidatePublishableEnvironment(environment map[string]string) error {
 			}
 		case "TZ":
 			if value != "UTC" {
-				return errors.New("TZ must be UTC")
+				return errors.New("tz must be UTC")
 			}
 		case "USER", "LOGNAME":
 			if value != "tokenbench" {
@@ -490,7 +490,7 @@ func ValidatePublishableEnvironment(environment map[string]string) error {
 			}
 		case "GIT_CONFIG_NOSYSTEM":
 			if value != "1" {
-				return errors.New("GIT_CONFIG_NOSYSTEM must be 1")
+				return errors.New("git_config_nosystem must be 1")
 			}
 		case "CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY":
 			if !ValidLocalProxyCapability(value) {
@@ -509,15 +509,15 @@ func canonicalAbsolutePath(value string) bool {
 
 func validatePathList(value string) error {
 	if value == "" {
-		return errors.New("PATH must not be empty")
+		return errors.New("path must not be empty")
 	}
 	for _, entry := range filepath.SplitList(value) {
 		if entry == "" || !canonicalAbsolutePath(entry) {
-			return fmt.Errorf("PATH entry %q is not an absolute canonical path", entry)
+			return fmt.Errorf("path entry %q is not an absolute canonical path", entry)
 		}
 	}
 	if strings.Contains(value, string(os.PathListSeparator)+string(os.PathListSeparator)) {
-		return errors.New("PATH contains an empty entry")
+		return errors.New("path contains an empty entry")
 	}
 	return nil
 }

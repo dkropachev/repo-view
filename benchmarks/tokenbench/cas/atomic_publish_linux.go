@@ -52,6 +52,7 @@ func (store *Store) probeAtomicNoReplace() (resultErr error) {
 	}
 	firstStaged := transaction.staged[first.hexDigest()]
 	firstInfo := transaction.owned[firstStaged.name]
+	firstPin := transaction.ownedPins[firstStaged.name]
 	destinationName, err := randomEntryName("object-")
 	if err != nil {
 		return err
@@ -74,7 +75,9 @@ func (store *Store) probeAtomicNoReplace() (resultErr error) {
 		)
 	}
 	delete(transaction.owned, firstStaged.name)
+	delete(transaction.ownedPins, firstStaged.name)
 	transaction.owned[destinationName] = firstInfo
+	transaction.ownedPins[destinationName] = firstPin
 	firstStaged.name = destinationName
 
 	second, err := transaction.Put(
@@ -105,7 +108,7 @@ func (store *Store) probeAtomicNoReplace() (resultErr error) {
 	closeErr = directory.Close()
 	if !errors.Is(renameErr, fs.ErrExist) || closeErr != nil {
 		return errors.Join(
-			fmt.Errorf("probe collision returned %v, want destination-exists", renameErr),
+			fmt.Errorf("probe collision returned %w, want destination-exists", renameErr),
 			closeErr,
 		)
 	}

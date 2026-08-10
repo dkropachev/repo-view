@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"time"
 
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
@@ -18,6 +19,7 @@ import (
 	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
 	runnercodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner/codex"
+	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
 )
 
 const (
@@ -137,7 +139,16 @@ func runCommand(
 	flags := flag.NewFlagSet("run", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	suitePath := flags.String("suite", "", "path to the authored built-in Codex suite")
-	repoViewPath := flags.String("repo-view-mcp", "", "absolute repo-view MCP executable path")
+	artifactBundleRoot := flags.String(
+		"artifact-bundle",
+		"",
+		"absolute root of the suite/binary-pinned static execution artifact bundle",
+	)
+	snapshotRoot := flags.String(
+		"snapshot-root",
+		"",
+		"absent path for the immutable fs-verity execution snapshot",
+	)
 	stateRoot := flags.String("state-root", "", "new exclusive private Codex runtime directory")
 	casPath := flags.String("cas", "", "new exclusive evidence CAS directory")
 	rootOutput := flags.String("root-out", "", "new exclusive canonical signed-root file")
@@ -146,14 +157,19 @@ func runCommand(
 	signingKeyPath := flags.String("signing-key-file", "", "owner-only file containing one canonical Ed25519 seed")
 	trustPath := flags.String("trust-policy", "", "explicit policy authorizing the capture signer")
 	repetition := flags.Int("repetition", -1, "one explicit zero-based suite repetition to execute")
+	privateMountChild := flags.Bool(
+		"private-mount-child",
+		false,
+		"internal: continue only inside tokenbench's private mount namespace",
+	)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *suitePath == "" || *repoViewPath == "" || *stateRoot == "" ||
+	if *suitePath == "" || *artifactBundleRoot == "" || *snapshotRoot == "" || *stateRoot == "" ||
 		*casPath == "" || *rootOutput == "" || !credentialFD.set ||
 		*signingKeyPath == "" || *trustPath == "" || *repetition < 0 || flags.NArg() != 0 {
 		return errors.New(
-			"run requires --suite, --repo-view-mcp, --state-root, --cas, " +
+			"run requires --suite, --artifact-bundle, --snapshot-root, --state-root, --cas, " +
 				"--root-out, --credential-fd, --signing-key-file, --trust-policy, and an explicit " +
 				"nonnegative --repetition",
 		)
@@ -179,15 +195,52 @@ func runCommand(
 		)
 	}
 	paths, err := resolveRunPaths(runPaths{
-		StateRoot:      *stateRoot,
-		CAS:            *casPath,
-		RootOutput:     *rootOutput,
-		SigningKeyFile: *signingKeyPath,
-		TrustPolicy:    *trustPath,
-		SourceRoot:     suite.SourceRoot,
+		StateRoot:          *stateRoot,
+		SnapshotRoot:       *snapshotRoot,
+		ArtifactBundleRoot: *artifactBundleRoot,
+		CAS:                *casPath,
+		RootOutput:         *rootOutput,
+		SigningKeyFile:     *signingKeyPath,
+		TrustPolicy:        *trustPath,
+		SourceRoot:         suite.SourceRoot,
 	})
 	if err != nil {
 		return err
+	}
+	if !*privateMountChild {
+		return reexecRunInPrivateMountNamespace(
+			ctx,
+			args,
+			credentialFD.value,
+			stdout,
+			stderr,
+		)
+	}
+	if err := enterPrivateMountNamespaceChild(); err != nil {
+		return err
+	}
+	bundle, err := tokenbench.LoadArtifactBundle(paths.ArtifactBundleRoot, loaded)
+	if err != nil {
+		return fmt.Errorf("load trusted execution artifact bundle: %w", err)
+	}
+	origins, err := tokenbench.PrepareOrigins(ctx, loaded, bundle)
+	if err != nil {
+		return fmt.Errorf("prepare immutable execution origins: %w", err)
+	}
+	preparedExecution, err := tokenbench.BuildExecutionSnapshot(
+		ctx,
+		origins,
+		paths.SnapshotRoot,
+	)
+	if err != nil {
+		return fmt.Errorf("build immutable execution snapshot: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, preparedExecution.Close())
+	}()
+	executionInputs, err := preparedExecution.Inputs(ctx)
+	if err != nil {
+		return fmt.Errorf("read immutable execution inputs: %w", err)
 	}
 	credential, err := loadCredentialFD(credentialFD.value)
 	if err != nil {
@@ -223,7 +276,8 @@ func runCommand(
 			return executeCodexPair(
 				ctx,
 				loaded,
-				*repoViewPath,
+				&preparedExecution,
+				executionInputs,
 				paths.StateRoot,
 				credential,
 				*repetition,
@@ -509,6 +563,7 @@ func offlineCodexAdapter(stateRoot string) (*harnesscodex.Adapter, error) {
 		CodexHome:            filepath.Join(root, "codex-home"),
 		Temp:                 filepath.Join(root, "tmp"),
 		ConfigLock:           filepath.Join(root, "config-lock"),
+		ToolboxRoot:          root + "-toolbox",
 		LocalProxyCapability: harnesscodex.OfflineLocalProxyCapability,
 	})
 }
@@ -542,19 +597,30 @@ func prepareCodexPair(
 func executeCodexPair(
 	ctx context.Context,
 	loaded tokenbench.LoadedSuite,
-	repoViewPath, stateRoot string,
+	prepared *tokenbench.PreparedExecution,
+	executionInputs executionsnapshot.ExecutionInputs,
+	stateRoot string,
 	credential []byte,
 	repetition int,
 ) (tokenbench.Run, error) {
+	if prepared == nil {
+		return tokenbench.Run{}, errors.New("live immutable execution preparation is required")
+	}
+	liveInputs, err := prepared.Inputs(ctx)
+	if err != nil || !reflect.DeepEqual(liveInputs, executionInputs) {
+		return tokenbench.Run{}, errors.Join(
+			errors.New("immutable execution inputs changed before lifecycle construction"),
+			err,
+		)
+	}
 	suite := loaded.Suite()
-	credentialText := string(credential)
-	clear(credential)
 	lifecycle, err := runnercodex.NewProduction(runnercodex.ProductionConfig{
 		StateRoot:          stateRoot,
-		UpstreamCredential: credentialText,
+		ToolboxRoot:        executionInputs.ToolboxRoot,
+		UpstreamCredential: string(credential),
 		UpstreamTimeout:    time.Duration(suite.TimeoutMillis) * time.Millisecond,
 	})
-	credentialText = ""
+	clear(credential)
 	if err != nil {
 		return tokenbench.Run{}, err
 	}
@@ -568,34 +634,43 @@ func executeCodexPair(
 		CodexHome:            layout.CodexHome,
 		Temp:                 layout.Temp,
 		ConfigLock:           layout.ConfigLock,
+		ToolboxRoot:          layout.ToolboxRoot,
 		LocalProxyCapability: layout.LocalProxyCapability,
 	})
 	if err != nil {
 		return closeLifecycleOnError(err)
 	}
-	pair, err := prepareCodexPair(ctx, loaded, adapter, repoViewPath)
+	pair, err := tokenbench.BindAdapter(ctx, prepared, adapter)
 	if err != nil {
 		return closeLifecycleOnError(err)
 	}
-	repoViewAbsolute, err := filepath.Abs(repoViewPath)
-	if err != nil {
-		return closeLifecycleOnError(fmt.Errorf("resolve common repo-view executable: %w", err))
+	closePairOnError := func(cause error) (tokenbench.Run, error) {
+		return tokenbench.Run{}, errors.Join(
+			cause,
+			closeOne(lifecycle.Close),
+			pair.CloseExecutionSnapshot(),
+		)
 	}
-	repoViewAbsolute = filepath.Clean(repoViewAbsolute)
-	repoViewSHA256, err := tokenbench.FileSHA256(repoViewAbsolute)
+	repoViewSHA256, err := tokenbench.FileSHA256(executionInputs.RepoViewExecutable)
 	if err != nil {
-		return closeLifecycleOnError(fmt.Errorf("pin common repo-view executable: %w", err))
+		return closePairOnError(fmt.Errorf("pin common repo-view executable: %w", err))
 	}
 	executor, err := runner.NewConformant(runner.Config{
 		Lifecycle:                 lifecycle,
-		CommonMCPExecutable:       repoViewAbsolute,
+		ReadOnlyPaths:             executionInputs.ReadOnlyPaths,
+		ExecutablePaths:           executionInputs.ExecutablePaths,
+		CommonMCPExecutable:       executionInputs.RepoViewExecutable,
 		CommonMCPExecutableSHA256: repoViewSHA256,
 	})
 	if err != nil {
-		return closeLifecycleOnError(err)
+		return closePairOnError(err)
 	}
 	run, executionErr := pair.Execute(ctx, executor, repetition)
-	cleanupErr := closeExecutionBoundary(executor.Close, lifecycle.Close)
+	cleanupErr := closeExecutionBoundary(
+		executor.Close,
+		lifecycle.Close,
+		pair.CloseExecutionSnapshot,
+	)
 	if err := errors.Join(executionErr, cleanupErr); err != nil {
 		return run, err
 	}
@@ -603,6 +678,7 @@ func executeCodexPair(
 }
 
 type closeFunction func(context.Context) error
+type snapshotCloseFunction func() error
 
 func afterClosedCodexExecution(
 	execute func() (tokenbench.Run, error),
@@ -615,22 +691,30 @@ func afterClosedCodexExecution(
 	return loadSignerAndPublish(run)
 }
 
-func closeExecutionBoundary(executorClose, lifecycleClose closeFunction) error {
+func closeExecutionBoundary(
+	executorClose, lifecycleClose closeFunction,
+	snapshotClose snapshotCloseFunction,
+) error {
 	// Ordering is security-sensitive: contained model descendants first, then
-	// the lifecycle-owned proxy/listener/state. Both are attempted and signing
-	// is gated on a nil joined result.
+	// the lifecycle-owned proxy/listener/state, and finally the immutable mount
+	// and inode pins. Every close is attempted and signing is gated on a nil
+	// joined result plus the live publication-boundary predicates.
 	executorErr := closeOne(executorClose)
 	lifecycleErr := closeOne(lifecycleClose)
-	return errors.Join(executorErr, lifecycleErr)
+	var snapshotErr error
+	if snapshotClose != nil {
+		snapshotErr = snapshotClose()
+	}
+	return errors.Join(executorErr, lifecycleErr, snapshotErr)
 }
 
-func closeOne(close closeFunction) error {
-	if close == nil {
+func closeOne(closeFn closeFunction) error {
+	if closeFn == nil {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), closeTimeout)
 	defer cancel()
-	return close(ctx)
+	return closeFn(ctx)
 }
 
 func writeJSONFileExclusive(path string, value any, mode os.FileMode, label string) error {

@@ -15,30 +15,30 @@ import (
 )
 
 type stagedObject struct {
+	refs map[ObjectRef]struct{}
 	name string
 	size int64
-	refs map[ObjectRef]struct{}
 }
 
 // Transaction stages complete immutable objects and publishes one designated
 // root after every other staged object. A transaction is consumed by Commit,
 // whether Commit succeeds or fails.
 type Transaction struct {
-	mu sync.Mutex
-
-	store            *Store
-	directory        string
-	root             *os.Root
 	rootInfo         os.FileInfo
-	lease            *os.File
 	staged           map[string]*stagedObject
+	ownedPins        map[string]*os.File
+	root             *os.Root
+	store            *Store
+	lease            *os.File
 	owned            map[string]os.FileInfo
+	directory        string
+	putCount         int
+	stagedBytes      int64
+	mu               sync.Mutex
 	consumed         bool
 	cleanupComplete  bool
 	directoryRemoved bool
 	rootPublished    bool
-	putCount         int
-	stagedBytes      int64
 }
 
 // Put streams one object into private staging, enforcing the store's byte
@@ -90,7 +90,34 @@ func (transaction *Transaction) Put(
 			removeErr,
 		)
 	}
+	// Duplicate the descriptor returned by O_CREATE|O_EXCL instead of opening
+	// the pathname again. The duplicate pins the exact inode without following
+	// a subsequently substituted symlink or blocking on a substituted FIFO.
+	pin, err := pinStagedFile(object)
+	if err != nil {
+		removeErr := removeFileIfSame(transaction.root, name, createdInfo)
+		closeErr := object.Close()
+		return ObjectRef{}, errors.Join(
+			fmt.Errorf("pin new staged CAS object: %w", err),
+			removeErr,
+			closeErr,
+		)
+	}
+	pinnedInfo, pinErr := pin.Stat()
+	if pinErr != nil || !os.SameFile(createdInfo, pinnedInfo) {
+		removeErr := removeFileIfSame(transaction.root, name, createdInfo)
+		pinCloseErr := pin.Close()
+		objectCloseErr := object.Close()
+		return ObjectRef{}, errors.Join(
+			fmt.Errorf("%w: staged CAS object changed while pinning", ErrIntegrity),
+			pinErr,
+			removeErr,
+			pinCloseErr,
+			objectCloseErr,
+		)
+	}
 	transaction.owned[name] = createdInfo
+	transaction.ownedPins[name] = pin
 
 	hexDigest, size, writeErr := writeBounded(
 		ctx,
@@ -310,7 +337,7 @@ func (transaction *Transaction) Abort() error {
 }
 
 func (transaction *Transaction) createStagedFile() (string, *os.File, error) {
-	for attempt := 0; attempt < 32; attempt++ {
+	for range 32 {
 		name, err := randomEntryName("object-")
 		if err != nil {
 			return "", nil, err
@@ -331,26 +358,31 @@ func (transaction *Transaction) createStagedFile() (string, *os.File, error) {
 }
 
 type objectPublication struct {
+	stage         string
 	visible       bool
 	durable       bool
 	indeterminate bool
-	stage         string
 }
 
 func (transaction *Transaction) publishLocked(
 	ctx context.Context,
 	ref ObjectRef,
 	staged *stagedObject,
-) (objectPublication, error) {
+) (outcome objectPublication, resultErr error) {
+	sourceInfo, err := transaction.ownedSourceInfoLocked(staged.name)
+	if err != nil {
+		return objectPublication{}, fmt.Errorf("validate staged object inode pin: %w", err)
+	}
 	if err := verifyFileAt(ctx, transaction.root, staged.name, ref, io.Discard); err != nil {
 		return objectPublication{}, fmt.Errorf("verify staged object: %w", err)
 	}
-	sourceInfo, err := transaction.root.Lstat(staged.name)
-	if err != nil {
-		return objectPublication{}, fmt.Errorf("lstat staged object before publication: %w", err)
-	}
-	if err := validateObjectInfo(staged.name, sourceInfo); err != nil {
-		return objectPublication{}, err
+	verifiedInfo, err := transaction.ownedSourceInfoLocked(staged.name)
+	if err != nil || !os.SameFile(sourceInfo, verifiedInfo) ||
+		!sameObjectMetadata(sourceInfo, verifiedInfo) {
+		return objectPublication{}, errors.Join(
+			fmt.Errorf("%w: staged object changed while verifying", ErrIntegrity),
+			err,
+		)
 	}
 
 	hexDigest := ref.hexDigest()
@@ -358,7 +390,9 @@ func (transaction *Transaction) publishLocked(
 	if err != nil {
 		return objectPublication{}, err
 	}
-	defer shard.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close object shard after publication", shard)
+	}()
 	if !sameFilesystem(transaction.rootInfo, shardInfo) {
 		return objectPublication{}, errors.New("CAS transaction and destination shard are not on the same filesystem")
 	}
@@ -377,8 +411,11 @@ func (transaction *Transaction) publishLocked(
 	}
 	destinationDirectory, err := shard.Open(".")
 	if err != nil {
-		sourceDirectory.Close()
-		return objectPublication{}, fmt.Errorf("open object shard for publication: %w", err)
+		return objectPublication{}, joinCloseError(
+			fmt.Errorf("open object shard for publication: %w", err),
+			"close transaction directory after destination open failure",
+			sourceDirectory,
+		)
 	}
 	rename := renameNoReplaceFunc(renameNoReplace)
 	if transaction.store.publicationRename != nil {
@@ -454,7 +491,15 @@ func (transaction *Transaction) publishLocked(
 	} else if closeErr != nil {
 		publicationErr = fmt.Errorf("close publication directories: %w", closeErr)
 	}
-	delete(transaction.owned, staged.name)
+	// From this point the rename is known to have moved our inode. Keep its
+	// descriptor pinned until every canonical-path, digest, and durability
+	// check has completed so inode-number reuse cannot create an ABA match.
+	defer func() {
+		resultErr = errors.Join(
+			resultErr,
+			transaction.releaseOwnedPinLocked(staged.name),
+		)
+	}()
 	delete(transaction.staged, hexDigest)
 
 	if err := transaction.confirmCanonicalPublication(
@@ -540,6 +585,35 @@ func (transaction *Transaction) publishLocked(
 		}, errors.Join(ErrPublicationUnknown, publicationErr, err)
 	}
 	return objectPublication{visible: true, durable: true}, publicationErr
+}
+
+func (transaction *Transaction) ownedSourceInfoLocked(name string) (os.FileInfo, error) {
+	expected, ok := transaction.owned[name]
+	if !ok {
+		return nil, fmt.Errorf("%w: staged object %s is not transaction-owned", ErrIntegrity, name)
+	}
+	pin := transaction.ownedPins[name]
+	if pin == nil {
+		return nil, fmt.Errorf("%w: staged object %s lost its inode pin", ErrIntegrity, name)
+	}
+	pinned, err := pin.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat staged object %s inode pin: %w", name, err)
+	}
+	if !os.SameFile(expected, pinned) || !sameObjectMetadata(expected, pinned) {
+		return nil, fmt.Errorf("%w: staged object %s inode pin changed", ErrIntegrity, name)
+	}
+	current, err := transaction.root.Lstat(name)
+	if err != nil {
+		return nil, fmt.Errorf("lstat staged object %s: %w", name, err)
+	}
+	if !os.SameFile(pinned, current) || !sameObjectMetadata(pinned, current) {
+		return nil, fmt.Errorf("%w: staged object %s pathname differs from its inode pin", ErrIntegrity, name)
+	}
+	if err := validateObjectInfo(name, current); err != nil {
+		return nil, err
+	}
+	return pinned, nil
 }
 
 func (transaction *Transaction) inspectRenameOutcome(
@@ -656,15 +730,25 @@ func (transaction *Transaction) removeOwnedLocked(name string) error {
 	if !ok {
 		return nil
 	}
+	pin := transaction.ownedPins[name]
+	if pin == nil {
+		return fmt.Errorf("%w: owned transaction file %s lost its inode pin", ErrIntegrity, name)
+	}
+	pinned, pinErr := pin.Stat()
+	if pinErr != nil || !os.SameFile(expected, pinned) {
+		return errors.Join(
+			fmt.Errorf("%w: owned transaction file %s inode pin changed", ErrIntegrity, name),
+			pinErr,
+		)
+	}
 	current, err := transaction.root.Lstat(name)
 	if errors.Is(err, fs.ErrNotExist) {
-		delete(transaction.owned, name)
-		return nil
+		return transaction.releaseOwnedPinLocked(name)
 	}
 	if err != nil {
 		return fmt.Errorf("lstat owned transaction file %s: %w", name, err)
 	}
-	if !os.SameFile(expected, current) {
+	if !os.SameFile(pinned, current) {
 		return fmt.Errorf(
 			"%w: owned transaction file %s changed before cleanup",
 			ErrIntegrity,
@@ -674,14 +758,47 @@ func (transaction *Transaction) removeOwnedLocked(name string) error {
 	if err := transaction.root.Remove(name); err != nil {
 		return fmt.Errorf("remove owned transaction file %s: %w", name, err)
 	}
-	delete(transaction.owned, name)
+	closeErr := transaction.releaseOwnedPinLocked(name)
 	if err := syncRoot(transaction.root); err != nil {
-		return fmt.Errorf("sync transaction directory after removing %s: %w", name, err)
+		return errors.Join(
+			closeErr,
+			fmt.Errorf("sync transaction directory after removing %s: %w", name, err),
+		)
+	}
+	return closeErr
+}
+
+func (transaction *Transaction) releaseOwnedPinLocked(name string) error {
+	pin := transaction.ownedPins[name]
+	delete(transaction.ownedPins, name)
+	delete(transaction.owned, name)
+	if pin == nil {
+		return nil
+	}
+	if err := pin.Close(); err != nil {
+		return fmt.Errorf("close owned transaction file %s inode pin: %w", name, err)
 	}
 	return nil
 }
 
-func (transaction *Transaction) cleanupLocked() error {
+func removeFileIfSame(root *os.Root, name string, expected os.FileInfo) error {
+	current, err := root.Lstat(name)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("lstat staged CAS object %s for cleanup: %w", name, err)
+	}
+	if !os.SameFile(expected, current) {
+		return fmt.Errorf("%w: staged CAS object %s changed before cleanup", ErrIntegrity, name)
+	}
+	if err := root.Remove(name); err != nil {
+		return fmt.Errorf("remove staged CAS object %s: %w", name, err)
+	}
+	return syncRoot(root)
+}
+
+func (transaction *Transaction) cleanupLocked() (resultErr error) {
 	if transaction.cleanupComplete {
 		return nil
 	}
@@ -717,7 +834,12 @@ func (transaction *Transaction) cleanupLocked() error {
 		cleanupErrors = append(cleanupErrors, err)
 		return errors.Join(cleanupErrors...)
 	}
-	defer staging.Close()
+	stagingOpen := true
+	defer func() {
+		if stagingOpen {
+			resultErr = joinCloseError(resultErr, "close CAS staging after transaction cleanup", staging)
+		}
+	}()
 	if !transaction.directoryRemoved {
 		current, err := staging.Lstat(transaction.directory)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -745,6 +867,16 @@ func (transaction *Transaction) cleanupLocked() error {
 	}
 	if err := syncRoot(staging); err != nil {
 		return fmt.Errorf("sync staging after cleanup: %w", err)
+	}
+	if transaction.store.beforeCleanupClose != nil {
+		if err := transaction.store.beforeCleanupClose(); err != nil {
+			return fmt.Errorf("before closing transaction cleanup staging: %w", err)
+		}
+	}
+	closeErr := staging.Close()
+	stagingOpen = false
+	if closeErr != nil {
+		return fmt.Errorf("close CAS staging after transaction cleanup: %w", closeErr)
 	}
 	if transaction.lease != nil {
 		lease := transaction.lease

@@ -32,8 +32,8 @@ import (
 )
 
 const (
-	lifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v1"
-	stateMarkerName  = ".tokenbench-codex-runtime-v1"
+	lifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v2"
+	stateMarkerName  = ".tokenbench-codex-runtime-v2"
 	stateMarkerData  = lifecycleVersion + "\n"
 
 	productionUpstreamOrigin = "https://api.openai.com"
@@ -79,11 +79,12 @@ var productionNetworkOverrideEnvironment = []string{
 	"no_proxy",
 }
 
-// Config controls the fixed local proxy, private runtime tree, resource
-// bounds, and upstream route. UpstreamCredential is deliberately excluded
-// from Identity and every serialized structure.
+// Config controls the fixed local proxy, private runtime tree, immutable
+// toolbox PATH, resource bounds, and upstream route. UpstreamCredential is
+// deliberately excluded from Identity and every serialized structure.
 type Config struct {
 	StateRoot          string
+	ToolboxRoot        string
 	ListenAddress      string
 	UpstreamURL        string
 	UpstreamCredential string
@@ -98,10 +99,13 @@ type Config struct {
 }
 
 // ProductionConfig controls the sole lifecycle construction eligible for
-// conformant publication. Unlike Config, it intentionally exposes no upstream
-// route: production traffic is pinned to OpenAI's canonical /v1 API.
+// conformant publication. ToolboxRoot must name the immutable execution
+// snapshot's closed toolbox directory. Unlike Config, it intentionally exposes
+// no upstream route: production traffic is pinned to OpenAI's canonical /v1
+// API.
 type ProductionConfig struct {
 	StateRoot          string
+	ToolboxRoot        string
 	ListenAddress      string
 	UpstreamCredential string
 	MaxRequestBytes    int64
@@ -118,25 +122,27 @@ type ProductionConfig struct {
 // It supports a single active arm while retaining only sanitized first-arm
 // state until the matching second arm is compared.
 type Lifecycle struct {
-	mu sync.Mutex
-
-	layout            RuntimeLayout
-	identity          string
-	stateRoot         *os.Root
 	listener          net.Listener
-	proxyPort         uint16
+	serveErr          error
+	pairs             map[int]map[genericrunner.Arm]armSnapshot
+	closePermit       chan struct{}
+	serveDone         chan struct{}
+	client            *http.Client
+	active            *ArmSession
+	finalizing        *ArmSession
+	stateRoot         *os.Root
 	server            *http.Server
 	upstreamURL       *url.URL
+	layout            RuntimeLayout
 	credential        string
-	client            *http.Client
+	identity          string
+	productionNetwork string
 	limits            limits
-	active            *ArmSession
-	pairs             map[int]map[genericrunner.Arm]armSnapshot
-	serveErr          error
+	mu                sync.Mutex
+	proxyPort         uint16
 	closed            bool
 	fullyClosed       bool
 	production        bool
-	productionNetwork string
 }
 
 type productionSecurity struct {
@@ -156,30 +162,38 @@ type limits struct {
 }
 
 type armSnapshot struct {
-	trace        harnesscodex.ResponsesTrace
+	captureError string
 	config       []byte
 	configCommon []byte
 	configDelta  []byte
+	trace        harnesscodex.ResponsesTrace
+	requestCount int
+	ordinary     bool
 }
 
 // ArmSession implements runner.ArmSession. It is bound to exactly one cloned
 // ExecutionRequest and is finalized by either Finish or Abort.
 type ArmSession struct {
-	mu sync.Mutex
-
+	fatal            error
+	responseAttempts map[int]harnesscodex.ProviderResponseAttemptTrace
 	lifecycle        *Lifecycle
-	request          genericrunner.ExecutionRequest
+	responses        map[int]harnesscodex.ResponsesResponseTrace
+	cleanupPermit    chan struct{}
+	finishReturned   chan struct{}
+	inflightDrained  chan struct{}
+	turnState        string
+	expectedProvider string
 	requestSHA256    string
 	expectedModel    string
-	expectedProvider string
-	trace            harnesscodex.ResponsesTrace
-	declarations     []harnesscodex.ResponsesToolDeclaration
-	responses        map[int]harnesscodex.ResponsesResponseTrace
-	turnState        string
 	turnStateSHA256  string
-	fatal            error
-	requestCount     int
+	declarations     []harnesscodex.ResponsesToolDeclaration
+	requests         []harnesscodex.ResponsesRequestSnapshot
+	request          genericrunner.ExecutionRequest
+	trace            harnesscodex.ResponsesTrace
 	inflight         sync.WaitGroup
+	requestCount     int
+	drainOnce        sync.Once
+	mu               sync.Mutex
 	state            sessionState
 }
 
@@ -188,6 +202,7 @@ type sessionState uint8
 const (
 	sessionActive sessionState = iota
 	sessionFinishing
+	sessionAborting
 	sessionFinished
 	sessionAborted
 )
@@ -219,6 +234,7 @@ func NewProduction(config ProductionConfig) (*Lifecycle, error) {
 	}
 	return newLifecycle(Config{
 		StateRoot:          config.StateRoot,
+		ToolboxRoot:        config.ToolboxRoot,
 		ListenAddress:      config.ListenAddress,
 		UpstreamURL:        productionUpstreamOrigin,
 		UpstreamCredential: config.UpstreamCredential,
@@ -254,7 +270,7 @@ func snapshotProductionSecurity() (*productionSecurity, error) {
 	if err != nil {
 		return nil, errors.New("load production Codex system TLS roots")
 	}
-	canonical := struct {
+	canonical := struct { //nolint:govet,nolintlint // Field order is the production network identity contract.
 		Schema                string   `json:"schema"`
 		Route                 string   `json:"route"`
 		TLSMinimumVersion     uint16   `json:"tls_minimum_version"`
@@ -292,17 +308,22 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 	}
 	address, ok := listener.Addr().(*net.TCPAddr)
 	if !ok || !address.IP.Equal(net.ParseIP("127.0.0.1")) {
-		listener.Close()
-		return nil, errors.New("Codex proxy listener did not resolve to IPv4 loopback")
+		return nil, joinCloseError(
+			errors.New("codex proxy listener did not resolve to IPv4 loopback"),
+			listener,
+			"close Codex proxy listener",
+		)
 	}
 	localCapability, err := newLocalProxyCapability()
 	if err != nil {
-		listener.Close()
-		return nil, err
+		return nil, joinCloseError(err, listener, "close Codex proxy listener")
 	}
 	if localCapability == config.UpstreamCredential {
-		listener.Close()
-		return nil, errors.New("local proxy capability must differ from the upstream credential")
+		return nil, joinCloseError(
+			errors.New("local proxy capability must differ from the upstream credential"),
+			listener,
+			"close Codex proxy listener",
+		)
 	}
 	layout := RuntimeLayout{
 		ProxyURL:             fmt.Sprintf("http://127.0.0.1:%d/v1", address.Port),
@@ -310,16 +331,15 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 		CodexHome:            filepath.Join(resolved.stateRoot, "codex-home"),
 		Temp:                 filepath.Join(resolved.stateRoot, "tmp"),
 		ConfigLock:           filepath.Join(resolved.stateRoot, "config-lock"),
+		ToolboxRoot:          resolved.toolboxRoot,
 		LocalProxyCapability: localCapability,
 	}
 	if err := layout.Validate(); err != nil {
-		listener.Close()
-		return nil, err
+		return nil, joinCloseError(err, listener, "close Codex proxy listener")
 	}
 	root, err := claimStateRoot(resolved.stateRoot)
 	if err != nil {
-		listener.Close()
-		return nil, err
+		return nil, joinCloseError(err, listener, "close Codex proxy listener")
 	}
 
 	client := newUpstreamClient(resolved.limits.upstreamTimeout)
@@ -331,6 +351,9 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 		)
 		productionNetwork = production.networkIdentity
 	}
+	closePermit := make(chan struct{}, 1)
+	closePermit <- struct{}{}
+	serveDone := make(chan struct{})
 	lifecycle := &Lifecycle{
 		layout:            layout,
 		stateRoot:         root,
@@ -339,6 +362,8 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 		upstreamURL:       resolved.upstreamURL,
 		credential:        config.UpstreamCredential,
 		client:            client,
+		closePermit:       closePermit,
+		serveDone:         serveDone,
 		limits:            resolved.limits,
 		pairs:             make(map[int]map[genericrunner.Arm]armSnapshot),
 		production:        production != nil,
@@ -356,14 +381,14 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 		productionNetwork,
 	)
 	if err != nil {
-		root.Close()
-		listener.Close()
+		err = joinCloseError(err, root, "close Codex StateRoot")
+		err = joinCloseError(err, listener, "close Codex proxy listener")
 		return nil, err
 	}
 	lifecycle.identity = identity
 	if err := lifecycle.resetLayout(context.Background()); err != nil {
-		root.Close()
-		listener.Close()
+		err = joinCloseError(err, root, "close Codex StateRoot")
+		err = joinCloseError(err, listener, "close Codex proxy listener")
 		return nil, err
 	}
 	lifecycle.server = &http.Server{
@@ -372,14 +397,22 @@ func newLifecycle(config Config, production *productionSecurity) (*Lifecycle, er
 		MaxHeaderBytes:    resolved.limits.maxHeaderBytes,
 	}
 	go func() {
+		defer close(lifecycle.serveDone)
 		err := lifecycle.server.Serve(listener)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			lifecycle.mu.Lock()
-			lifecycle.serveErr = fmt.Errorf("Codex proxy server stopped: %w", err)
+			lifecycle.serveErr = fmt.Errorf("codex proxy server stopped: %w", err)
 			lifecycle.mu.Unlock()
 		}
 	}()
 	return lifecycle, nil
+}
+
+func joinCloseError(cause error, closer io.Closer, operation string) error {
+	if err := closer.Close(); err != nil {
+		return errors.Join(cause, fmt.Errorf("%s: %w", operation, err))
+	}
+	return cause
 }
 
 // RuntimeLayout returns the exact publishable layout the adapter must commit.
@@ -472,22 +505,24 @@ func (lifecycle *Lifecycle) BeginArm(
 	lifecycle.mu.Lock()
 	defer lifecycle.mu.Unlock()
 	if lifecycle.closed {
-		return nil, errors.New("Codex lifecycle is closed")
+		return nil, errors.New("codex lifecycle is closed")
 	}
 	if lifecycle.serveErr != nil {
 		return nil, lifecycle.serveErr
 	}
-	if lifecycle.active != nil {
-		return nil, errors.New("Codex lifecycle already has an active arm")
+	if lifecycle.active != nil || lifecycle.finalizing != nil {
+		return nil, errors.New("codex lifecycle already has an active or finalizing arm")
 	}
 	if prior := lifecycle.pairs[request.Repetition]; prior != nil {
 		if _, duplicate := prior[request.Arm]; duplicate {
-			return nil, errors.New("Codex arm was already captured for this repetition")
+			return nil, errors.New("codex arm was already captured for this repetition")
 		}
 	}
 	if err := lifecycle.resetLayout(ctx); err != nil {
 		return nil, err
 	}
+	cleanupPermit := make(chan struct{}, 1)
+	cleanupPermit <- struct{}{}
 	session := &ArmSession{
 		lifecycle:        lifecycle,
 		request:          request,
@@ -496,10 +531,16 @@ func (lifecycle *Lifecycle) BeginArm(
 		expectedProvider: expectedProvider,
 		trace: harnesscodex.ResponsesTrace{
 			SchemaVersion: harnesscodex.ResponsesTraceSchemaVersion,
+			Requests:      make([]harnesscodex.ResponsesRequestSnapshot, 0),
 			Responses:     make([]harnesscodex.ResponsesResponseTrace, 0),
 		},
-		responses: make(map[int]harnesscodex.ResponsesResponseTrace),
-		state:     sessionActive,
+		requests:         make([]harnesscodex.ResponsesRequestSnapshot, 0),
+		responseAttempts: make(map[int]harnesscodex.ProviderResponseAttemptTrace),
+		responses:        make(map[int]harnesscodex.ResponsesResponseTrace),
+		cleanupPermit:    cleanupPermit,
+		finishReturned:   make(chan struct{}),
+		inflightDrained:  make(chan struct{}),
+		state:            sessionActive,
 	}
 	lifecycle.active = session
 	return session, nil
@@ -508,51 +549,158 @@ func (lifecycle *Lifecycle) BeginArm(
 // Close shuts down the reserved proxy and clears runner-owned state. It never
 // reads ambient Codex configuration or any credential source.
 func (lifecycle *Lifecycle) Close(ctx context.Context) error {
+	if lifecycle == nil {
+		return errors.New("codex lifecycle is unavailable")
+	}
 	lifecycle.mu.Lock()
-	if lifecycle.closed {
+	fullyClosed := lifecycle.fullyClosed
+	lifecycle.mu.Unlock()
+	if fullyClosed {
+		return nil
+	}
+	if ctx == nil {
+		return errors.New("codex lifecycle close context is nil")
+	}
+	select {
+	case <-lifecycle.closePermit:
+	default:
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-lifecycle.closePermit:
+		}
+	}
+	defer func() { lifecycle.closePermit <- struct{}{} }()
+
+	lifecycle.mu.Lock()
+	if lifecycle.fullyClosed {
 		lifecycle.mu.Unlock()
 		return nil
 	}
 	lifecycle.closed = true
 	active := lifecycle.active
-	lifecycle.active = nil
 	lifecycle.mu.Unlock()
 
 	var closeErrors []error
 	if active != nil {
-		if err := active.Abort(ctx); err != nil {
+		if _, err := active.startAbort(); err != nil {
 			closeErrors = append(closeErrors, err)
 		}
+	}
+	if err := lifecycle.drainFinalization(ctx); err != nil {
+		closeErrors = append(closeErrors, err)
 	}
 	if lifecycle.server != nil {
 		if err := lifecycle.server.Shutdown(ctx); err != nil {
 			closeErrors = append(closeErrors, fmt.Errorf("shut down Codex proxy: %w", err))
 		}
+		select {
+		case <-lifecycle.serveDone:
+		default:
+			select {
+			case <-ctx.Done():
+				closeErrors = append(closeErrors, ctx.Err())
+			case <-lifecycle.serveDone:
+			}
+		}
+	}
+	lifecycle.mu.Lock()
+	if lifecycle.active != nil || lifecycle.finalizing != nil {
+		closeErrors = append(closeErrors, errors.New(
+			"codex lifecycle retained an active or finalizing arm after shutdown",
+		))
+	}
+	lifecycle.mu.Unlock()
+	if len(closeErrors) != 0 {
+		return errors.Join(closeErrors...)
+	}
+
+	// Finalization can add or reconcile the last pair snapshot. Read this only
+	// after the registered finalizer has drained and returned.
+	lifecycle.mu.Lock()
+	unmatchedPairs := len(lifecycle.pairs)
+	client := lifecycle.client
+	stateRoot := lifecycle.stateRoot
+	serveErr := lifecycle.serveErr
+	lifecycle.mu.Unlock()
+	if unmatchedPairs != 0 {
+		closeErrors = append(closeErrors, unmatchedPairError(unmatchedPairs))
+	}
+	if serveErr != nil {
+		closeErrors = append(closeErrors, serveErr)
 	}
 	if err := lifecycle.resetLayout(ctx); err != nil {
-		closeErrors = append(closeErrors, err)
+		return errors.Join(append(closeErrors, err)...)
 	}
-	if lifecycle.stateRoot != nil {
-		if err := lifecycle.stateRoot.Close(); err != nil {
-			closeErrors = append(closeErrors, fmt.Errorf("close Codex state root: %w", err))
+	if stateRoot != nil {
+		if err := stateRoot.Close(); err != nil {
+			return errors.Join(append(
+				closeErrors,
+				fmt.Errorf("close Codex state root: %w", err),
+			)...)
 		}
-		lifecycle.stateRoot = nil
+		lifecycle.mu.Lock()
+		if lifecycle.stateRoot == stateRoot {
+			lifecycle.stateRoot = nil
+		}
+		lifecycle.mu.Unlock()
+	}
+	if client != nil {
+		client.CloseIdleConnections()
 	}
 	result := errors.Join(closeErrors...)
 	lifecycle.mu.Lock()
 	lifecycle.credential = ""
-	if result == nil {
-		lifecycle.fullyClosed = true
-	}
+	lifecycle.client = nil
+	lifecycle.fullyClosed = result == nil
 	lifecycle.mu.Unlock()
 	return result
 }
 
+func (lifecycle *Lifecycle) drainFinalization(ctx context.Context) error {
+	for {
+		lifecycle.mu.Lock()
+		session := lifecycle.finalizing
+		lifecycle.mu.Unlock()
+		if session == nil {
+			return nil
+		}
+
+		session.mu.Lock()
+		state := session.state
+		finishReturned := session.finishReturned
+		session.mu.Unlock()
+		switch state {
+		case sessionFinishing:
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-finishReturned:
+			}
+		case sessionAborting:
+			if err := session.completeAbort(ctx); err != nil {
+				return err
+			}
+		case sessionFinished, sessionAborted:
+			return errors.New("codex lifecycle retained a terminal finalizer")
+		case sessionActive:
+			return errors.New("codex lifecycle registered an active arm as finalizing")
+		}
+	}
+}
+
+func unmatchedPairError(count int) error {
+	return fmt.Errorf(
+		"codex lifecycle retained %d unmatched repetition snapshot(s)",
+		count,
+	)
+}
+
 // PublicationBoundaryClosed reports whether the listener, every arm session,
-// the upstream credential, and runner-owned state have all been closed. A live
-// run cannot expose publication authority before this returns true, ensuring
-// its committed local proxy capability is expired before signed evidence can
-// be obtained.
+// the upstream client and its idle connections, the upstream credential, and
+// runner-owned state have all been closed. A live run cannot expose publication
+// authority before this returns true, ensuring its committed local proxy
+// capability is expired before signed evidence can be obtained.
 func (lifecycle *Lifecycle) PublicationBoundaryClosed() bool {
 	if lifecycle == nil {
 		return false
@@ -560,20 +708,33 @@ func (lifecycle *Lifecycle) PublicationBoundaryClosed() bool {
 	lifecycle.mu.Lock()
 	defer lifecycle.mu.Unlock()
 	return lifecycle.fullyClosed && lifecycle.closed && lifecycle.active == nil &&
-		lifecycle.credential == ""
+		lifecycle.finalizing == nil && lifecycle.client == nil &&
+		lifecycle.credential == "" && lifecycle.stateRoot == nil
 }
 
 type resolvedConfig struct {
-	stateRoot     string
-	listenAddress string
 	upstreamURL   *url.URL
+	stateRoot     string
+	toolboxRoot   string
+	listenAddress string
 	limits        limits
 }
 
 func resolveConfig(config Config) (resolvedConfig, error) {
 	if !filepath.IsAbs(config.StateRoot) || filepath.Clean(config.StateRoot) != config.StateRoot ||
 		isFilesystemRoot(config.StateRoot) {
-		return resolvedConfig{}, errors.New("Codex StateRoot must be an absolute, clean, non-root path")
+		return resolvedConfig{}, errors.New("codex StateRoot must be an absolute, clean, non-root path")
+	}
+	if !validText(config.ToolboxRoot) || !filepath.IsAbs(config.ToolboxRoot) ||
+		filepath.Clean(config.ToolboxRoot) != config.ToolboxRoot ||
+		isFilesystemRoot(config.ToolboxRoot) ||
+		strings.ContainsRune(config.ToolboxRoot, os.PathListSeparator) {
+		return resolvedConfig{}, errors.New(
+			"codex ToolboxRoot must be one absolute, clean, non-root PATH directory",
+		)
+	}
+	if pathsOverlap(config.StateRoot, config.ToolboxRoot) {
+		return resolvedConfig{}, errors.New("codex StateRoot and ToolboxRoot must be disjoint")
 	}
 	listenAddress := config.ListenAddress
 	if listenAddress == "" {
@@ -581,14 +742,14 @@ func resolveConfig(config Config) (resolvedConfig, error) {
 	}
 	host, port, err := net.SplitHostPort(listenAddress)
 	if err != nil || host != "127.0.0.1" || port == "" {
-		return resolvedConfig{}, errors.New("Codex ListenAddress must be 127.0.0.1:PORT")
+		return resolvedConfig{}, errors.New("codex ListenAddress must be 127.0.0.1:PORT")
 	}
 	if !validCredential(config.UpstreamCredential) {
-		return resolvedConfig{}, errors.New("Codex upstream credential is empty or contains invalid text")
+		return resolvedConfig{}, errors.New("codex upstream credential is empty or contains invalid text")
 	}
 	if harness.ValidLocalProxyCapability(config.UpstreamCredential) {
 		return resolvedConfig{}, errors.New(
-			"Codex upstream credential must not use the local proxy capability namespace",
+			"codex upstream credential must not use the local proxy capability namespace",
 		)
 	}
 	upstream, err := parseUpstreamURL(config.UpstreamURL)
@@ -601,6 +762,7 @@ func resolveConfig(config Config) (resolvedConfig, error) {
 	}
 	return resolvedConfig{
 		stateRoot:     config.StateRoot,
+		toolboxRoot:   config.ToolboxRoot,
 		listenAddress: listenAddress,
 		upstreamURL:   upstream,
 		limits:        resolvedLimits,
@@ -646,10 +808,15 @@ func resolveLimits(config Config) (limits, error) {
 		resolved.maxSSEEventBytes <= 0 || resolved.maxEvents <= 0 ||
 		resolved.maxRequests <= 0 || resolved.maxHeaderBytes <= 0 ||
 		resolved.headerTimeout <= 0 || resolved.upstreamTimeout <= 0 {
-		return limits{}, errors.New("Codex proxy limits and timeouts must be positive")
+		return limits{}, errors.New("codex proxy limits and timeouts must be positive")
 	}
-	if resolved.maxResponseBytes > harnesscodex.MaxResponsesTraceBytes*16 {
-		return limits{}, errors.New("Codex maximum response body is unreasonably large")
+	if resolved.maxResponseBytes > harnesscodex.MaxProviderResponseBodyBytes ||
+		resolved.maxRequests > harnesscodex.MaxResponsesTraceRequests ||
+		resolved.maxEvents > harnesscodex.MaxResponsesTraceSSEEvents ||
+		resolved.maxSSEEventBytes > harnesscodex.MaxResponsesSSEEventBytes {
+		return limits{}, errors.New(
+			"codex proxy limits exceed Responses trace v3 evidence bounds",
+		)
 	}
 	return resolved, nil
 }
@@ -662,11 +829,11 @@ func parseUpstreamURL(raw string) (*url.URL, error) {
 	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" ||
 		parsed.RawPath != "" || parsed.Path != "" && parsed.Path != "/" ||
 		parsed.Hostname() == "" {
-		return nil, errors.New("Codex upstream URL must be an origin without userinfo, path, query, or fragment")
+		return nil, errors.New("codex upstream URL must be an origin without userinfo, path, query, or fragment")
 	}
 	if parsed.Scheme != "https" &&
-		!(parsed.Scheme == "http" && isLoopbackHost(parsed.Hostname())) {
-		return nil, errors.New("Codex upstream URL must use HTTPS or loopback HTTP")
+		(parsed.Scheme != "http" || !isLoopbackHost(parsed.Hostname())) {
+		return nil, errors.New("codex upstream URL must use HTTPS or loopback HTTP")
 	}
 	parsed.Path = ""
 	return parsed, nil
@@ -679,7 +846,7 @@ func lifecycleIdentity(
 	productionRoute string,
 	productionNetwork string,
 ) (string, error) {
-	manifest := struct {
+	manifest := struct { //nolint:govet,nolintlint // Field order is the v2 lifecycle identity contract.
 		Version              string        `json:"version"`
 		Layout               RuntimeLayout `json:"layout"`
 		UpstreamOrigin       string        `json:"upstream_origin"`
@@ -718,22 +885,26 @@ func lifecycleIdentity(
 	return lifecycleVersion + "/sha256:" + hex.EncodeToString(digest[:]), nil
 }
 
-func claimStateRoot(path string) (*os.Root, error) {
+func claimStateRoot(path string) (_ *os.Root, resultErr error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return nil, fmt.Errorf("lstat Codex StateRoot: %w", err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		return nil, errors.New("Codex StateRoot must be a real private directory with mode 0700")
+		return nil, errors.New("codex StateRoot must be a real private directory with mode 0700")
 	}
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return nil, fmt.Errorf("open Codex StateRoot: %w", err)
 	}
+	defer func() {
+		if resultErr != nil {
+			resultErr = joinCloseError(resultErr, root, "close Codex StateRoot")
+		}
+	}()
 	opened, err := root.Stat(".")
 	if err != nil || !os.SameFile(info, opened) {
-		root.Close()
-		return nil, errors.New("Codex StateRoot changed while opening")
+		return nil, errors.New("codex StateRoot changed while opening")
 	}
 	file, err := root.Open(stateMarkerName)
 	switch {
@@ -741,21 +912,17 @@ func claimStateRoot(path string) (*os.Root, error) {
 		content, readErr := io.ReadAll(io.LimitReader(file, int64(len(stateMarkerData)+1)))
 		closeErr := file.Close()
 		if readErr != nil {
-			root.Close()
 			return nil, errors.New("read Codex StateRoot marker")
 		}
 		if closeErr != nil || string(content) != stateMarkerData {
-			root.Close()
-			return nil, errors.New("Codex StateRoot marker is invalid")
+			return nil, errors.Join(errors.New("codex StateRoot marker is invalid"), closeErr)
 		}
 	case errors.Is(err, fs.ErrNotExist):
 		entries, listErr := readDirNames(root)
 		if listErr != nil {
-			root.Close()
 			return nil, listErr
 		}
 		if len(entries) != 0 {
-			root.Close()
 			return nil, errors.New("unclaimed Codex StateRoot must be empty")
 		}
 		marker, createErr := root.OpenFile(
@@ -764,7 +931,6 @@ func claimStateRoot(path string) (*os.Root, error) {
 			0o600,
 		)
 		if createErr != nil {
-			root.Close()
 			return nil, fmt.Errorf("create Codex StateRoot marker: %w", createErr)
 		}
 		if _, createErr = marker.WriteString(stateMarkerData); createErr == nil {
@@ -772,15 +938,12 @@ func claimStateRoot(path string) (*os.Root, error) {
 		}
 		closeErr := marker.Close()
 		if createErr != nil || closeErr != nil {
-			root.Close()
 			return nil, errors.Join(createErr, closeErr)
 		}
 		if err := syncOSRoot(root); err != nil {
-			root.Close()
 			return nil, err
 		}
 	default:
-		root.Close()
 		return nil, fmt.Errorf("open Codex StateRoot marker: %w", err)
 	}
 	return root, nil
@@ -822,12 +985,14 @@ func (lifecycle *Lifecycle) resetLayout(ctx context.Context) error {
 		return fmt.Errorf("open reset CODEX_HOME: %w", err)
 	}
 	if err := codexHome.Mkdir("sqlite", 0o700); err != nil {
-		codexHome.Close()
-		return fmt.Errorf("create CODEX_SQLITE_HOME: %w", err)
+		return joinCloseError(
+			fmt.Errorf("create CODEX_SQLITE_HOME: %w", err),
+			codexHome,
+			"close CODEX_HOME",
+		)
 	}
 	if err := syncOSRoot(codexHome); err != nil {
-		codexHome.Close()
-		return err
+		return joinCloseError(err, codexHome, "close CODEX_HOME")
 	}
 	if err := codexHome.Close(); err != nil {
 		return fmt.Errorf("close CODEX_HOME: %w", err)
@@ -840,7 +1005,7 @@ func (lifecycle *Lifecycle) validateRequest(request genericrunner.ExecutionReque
 		return fmt.Errorf("invalid Codex arm %q", request.Arm)
 	}
 	if request.Repetition < 0 {
-		return errors.New("Codex repetition must be nonnegative")
+		return errors.New("codex repetition must be nonnegative")
 	}
 	if err := lifecycle.layout.Validate(); err != nil {
 		return err
@@ -857,20 +1022,20 @@ func (lifecycle *Lifecycle) validateRequest(request genericrunner.ExecutionReque
 	wantedEnvironment := lifecycle.layout.Environment()
 	if !reflect.DeepEqual(request.Invocation.Environment, wantedEnvironment) ||
 		!reflect.DeepEqual(request.Process.Environment, wantedEnvironment) {
-		return errors.New("Codex launch environment differs from the committed runtime layout")
+		return errors.New("codex launch environment differs from the committed runtime layout")
 	}
 	if err := validateLayoutArguments(request.Process.Argv, lifecycle.layout); err != nil {
 		return err
 	}
 	if request.Invocation.Model == "" || request.Invocation.Model != request.Invocation.RequestedModel {
-		return errors.New("Codex requested model is missing or unresolved")
+		return errors.New("codex requested model is missing or unresolved")
 	}
 	if request.Arm == genericrunner.BaselineArm && len(request.Invocation.MCPServers) != 0 {
-		return errors.New("Codex baseline unexpectedly contains an MCP registration")
+		return errors.New("codex baseline unexpectedly contains an MCP registration")
 	}
 	if request.Arm == genericrunner.CandidateArm &&
 		(len(request.Invocation.MCPServers) != 1 || request.Invocation.MCPServers[0].Name != "repo_view") {
-		return errors.New("Codex candidate does not contain exactly the repo_view registration")
+		return errors.New("codex candidate does not contain exactly the repo_view registration")
 	}
 	return nil
 }
@@ -885,19 +1050,20 @@ func validateLayoutArguments(arguments []string, layout RuntimeLayout) error {
 		"openai_base_url=",
 		"debug.config_lockfile.export_dir=",
 		"debug.config_lockfile.save_fields_resolved_from_model_catalog=",
+		"shell_environment_policy.set=",
 	}
 	for index := 0; index < len(arguments); index++ {
 		if arguments[index] != "-c" {
 			continue
 		}
 		if index+1 == len(arguments) {
-			return errors.New("Codex argv ends with a bare -c")
+			return errors.New("codex argv ends with a bare -c")
 		}
 		assignment := arguments[index+1]
 		for _, prefix := range ownedPrefixes {
 			if strings.HasPrefix(assignment, prefix) {
 				if _, ok := expected[assignment]; !ok {
-					return fmt.Errorf("Codex runtime assignment drifted: %q", assignment)
+					return fmt.Errorf("codex runtime assignment drifted: %q", assignment)
 				}
 				seen[assignment]++
 			}
@@ -906,7 +1072,7 @@ func validateLayoutArguments(arguments []string, layout RuntimeLayout) error {
 	}
 	for assignment := range expected {
 		if seen[assignment] != 1 {
-			return fmt.Errorf("Codex runtime assignment %q appeared %d times", assignment, seen[assignment])
+			return fmt.Errorf("codex runtime assignment %q appeared %d times", assignment, seen[assignment])
 		}
 	}
 	return nil
@@ -915,7 +1081,7 @@ func validateLayoutArguments(arguments []string, layout RuntimeLayout) error {
 func providerModel(revision string) (string, error) {
 	separator := strings.IndexByte(revision, '@')
 	if separator <= 0 || separator == len(revision)-1 || strings.ContainsRune(revision[separator+1:], '@') {
-		return "", errors.New("Codex model revision is not canonical")
+		return "", errors.New("codex model revision is not canonical")
 	}
 	return revision[separator+1:], nil
 }
@@ -978,11 +1144,12 @@ func syncOSRoot(root *os.Root) error {
 	if err != nil {
 		return fmt.Errorf("open directory for sync: %w", err)
 	}
-	if err := directory.Sync(); err != nil {
-		directory.Close()
-		return fmt.Errorf("sync directory: %w", err)
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return errors.Join(fmt.Errorf("sync directory: %w", syncErr), closeErr)
 	}
-	return directory.Close()
+	return closeErr
 }
 
 func newUpstreamClient(timeout time.Duration) *http.Client {
@@ -995,7 +1162,7 @@ func newUpstreamClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("Codex upstream redirects are disabled")
+			return errors.New("codex upstream redirects are disabled")
 		},
 	}
 }
@@ -1022,7 +1189,7 @@ func newProductionUpstreamClient(
 	return &http.Client{
 		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return errors.New("Codex upstream redirects are disabled")
+			return errors.New("codex upstream redirects are disabled")
 		},
 	}
 }

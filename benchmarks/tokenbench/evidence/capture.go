@@ -16,17 +16,17 @@ import (
 )
 
 const (
-	CaptureSchemaVersion = "tokenbench.capture/v2"
+	CaptureSchemaVersion = "tokenbench.capture/v3"
 
-	captureMediaType     = "application/vnd.tokenbench.capture.v2+json"
-	planMediaType        = "application/vnd.tokenbench.plan.v2+json"
+	captureMediaType     = "application/vnd.tokenbench.capture.v3+json"
+	planMediaType        = "application/vnd.tokenbench.plan.v3+json"
 	observationMediaType = "application/vnd.tokenbench.observation.v1+json"
 	stdoutMediaType      = "application/vnd.tokenbench.stdout"
 	stderrMediaType      = "application/vnd.tokenbench.stderr"
 	artifactMediaType    = "application/vnd.tokenbench.artifact"
 
 	maxCaptureManifestBytes = 1 << 20
-	maxPlanObjectBytes      = 64 << 20
+	maxPlanObjectBytes      = tokenbench.MaximumPlanObjectBytes
 	maxObservationBytes     = 32 << 20
 )
 
@@ -41,7 +41,7 @@ type ArtifactObject struct {
 
 // RawCapture stores exact process termination state and references its byte
 // streams and sanitized adapter artifacts.
-type RawCapture struct {
+type RawCapture struct { //nolint:govet,nolintlint // Field order defines canonical capture JSON.
 	Stdout          cas.ObjectRef            `json:"stdout"`
 	Stderr          cas.ObjectRef            `json:"stderr"`
 	Artifacts       []ArtifactObject         `json:"artifacts"`
@@ -55,7 +55,7 @@ type RawCapture struct {
 }
 
 // Attempt stores exactly one normalized observation or ordinary failure.
-type Attempt struct {
+type Attempt struct { //nolint:govet,nolintlint // Field order defines canonical capture JSON.
 	Observation *cas.ObjectRef             `json:"observation,omitempty"`
 	Failure     *tokenbench.AttemptFailure `json:"failure,omitempty"`
 	Raw         RawCapture                 `json:"raw"`
@@ -76,11 +76,11 @@ type CaptureManifest struct {
 
 // Capture is a recursively verified, reconstructed run and its immutable root.
 type Capture struct {
+	Run         tokenbench.Run
+	Attestation AttestationEnvelope
 	Root        cas.ObjectRef
 	Subject     cas.ObjectRef
-	Attestation AttestationEnvelope
 	Manifest    CaptureManifest
-	Run         tokenbench.Run
 }
 
 type publicationObjectSet struct {
@@ -315,7 +315,7 @@ func loadCaptureSubject(
 func validateConformantCapture(run tokenbench.Run) error {
 	identity := run.ExecutorIdentity
 	if identity.Kind != "process" ||
-		identity.Version != "tokenbench.process-executor/v1" ||
+		identity.Version != "tokenbench.process-executor/v2" ||
 		!tokenbench.ValidSHA256(identity.ConfigSHA256) {
 		return fmt.Errorf(
 			"%w: capture executor is not the built-in conformant process runner",
@@ -363,7 +363,7 @@ func validateConformantCapture(run tokenbench.Run) error {
 		run.Plan.Baseline,
 		run.Plan.RenderedProcesses.Baseline,
 	); err != nil {
-		return fmt.Errorf("%w: validate canonical Codex process: %v", ErrInvalidAttestation, err)
+		return fmt.Errorf("%w: validate canonical Codex process: %w", ErrInvalidAttestation, err)
 	}
 	return nil
 }

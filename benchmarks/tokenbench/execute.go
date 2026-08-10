@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -38,7 +40,7 @@ type ExecutorIdentity struct {
 
 // executionRequest is issued only by an adapter-bound Pair. Process and
 // Invocation are defensive copies of the already parity-checked arm.
-type executionRequest struct {
+type executionRequest struct { //nolint:govet,nolintlint // Preserve the stable request field order.
 	Arm        Arm                 `json:"arm"`
 	Repetition int                 `json:"repetition"`
 	Invocation harness.Invocation  `json:"invocation"`
@@ -100,7 +102,7 @@ type AttemptFailure struct {
 
 // ArmRun contains raw capture and a normalized observation when decoding
 // succeeds. Failed arms are retained; they are never silently dropped.
-type ArmRun struct {
+type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v1 JSON.
 	Failure     *AttemptFailure      `json:"failure,omitempty"`
 	Observation *harness.Observation `json:"observation,omitempty"`
 	Raw         harness.RawExecution `json:"raw"`
@@ -109,7 +111,7 @@ type ArmRun struct {
 
 // Run is one randomized, paired execution. The embedded plan is audit data;
 // it still cannot be used as an execution capability.
-type Run struct {
+type Run struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v1 JSON.
 	Plan             ResolvedPlan     `json:"plan"`
 	Baseline         ArmRun           `json:"baseline"`
 	Candidate        ArmRun           `json:"candidate"`
@@ -122,10 +124,10 @@ type Run struct {
 }
 
 type publicationAuthority struct {
-	mu       sync.Mutex
 	snapshot Run
-	digest   string
 	ready    func() bool
+	digest   string
+	mu       sync.Mutex
 	state    publicationState
 }
 
@@ -153,6 +155,12 @@ func (pair Pair) Execute(
 	if !executor.Publishable() || !executor.Conformant() {
 		return Run{}, errors.New("executor is not the conformant built-in Codex runner")
 	}
+	if !pair.Publishable() {
+		return Run{}, errors.New("pair has no live immutable execution snapshot authority")
+	}
+	if err := pair.validateExecutorPolicy(executor); err != nil {
+		return Run{}, err
+	}
 	run, err := pair.executeWithBackend(
 		ctx,
 		conformantRunnerBridge{executor: executor},
@@ -161,10 +169,42 @@ func (pair Pair) Execute(
 	if err != nil {
 		return run, err
 	}
-	if err := sealRun(&run, executor.PublicationBoundaryClosed); err != nil {
+	if err := pair.validateExecutorPolicy(executor); err != nil {
+		return run, err
+	}
+	if err := sealRun(&run, func() bool {
+		return executor.PublicationBoundaryClosed() && pair.ExecutionSnapshotClosed()
+	}); err != nil {
 		return Run{}, err
 	}
 	return run, nil
+}
+
+func (pair Pair) validateExecutorPolicy(executor *runner.Executor) error {
+	policy, err := executor.ConformancePolicy()
+	if err != nil {
+		return fmt.Errorf("read conformant executor policy: %w", err)
+	}
+	return pair.validateExecutorPolicyIdentity(policy)
+}
+
+func (pair Pair) validateExecutorPolicyIdentity(policy runner.ConformancePolicyIdentity) error {
+	readOnly := append([]string(nil), pair.executionInputs.ReadOnlyPaths...)
+	executable := append([]string(nil), pair.executionInputs.ExecutablePaths...)
+	sort.Strings(readOnly)
+	sort.Strings(executable)
+	expected := runner.ConformancePolicyIdentity{
+		SchemaVersion:             runner.ConformancePolicySchemaVersion,
+		ReadOnlyPaths:             readOnly,
+		ExecutablePaths:           executable,
+		CommonMCPExecutable:       pair.executionInputs.RepoViewExecutable,
+		CommonMCPExecutableSHA256: pair.originInputs.RepoView.SHA256,
+		ArmInitExecutableSHA256:   pair.originInputs.Runner.SHA256,
+	}
+	if !reflect.DeepEqual(policy, expected) {
+		return errors.New("conformant executor policy differs from the pair execution snapshot")
+	}
+	return nil
 }
 
 func (pair Pair) executeWithBackend(
@@ -202,7 +242,7 @@ func (pair Pair) executeWithBackend(
 		Repetition:       repetition,
 	}
 	for _, arm := range order {
-		if err := reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
+		if err := pair.reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
 			return run, fmt.Errorf("integrity check before %s: %w", arm, err)
 		}
 		invocation, process := pair.armInputs(arm, processes)
@@ -222,7 +262,7 @@ func (pair Pair) executeWithBackend(
 		if prepared == nil {
 			return run, fmt.Errorf("prepare %s execution returned no capability", arm)
 		}
-		if err := reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
+		if err := pair.reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
 			return run, errors.Join(
 				fmt.Errorf("integrity check after %s preparation: %w", arm, err),
 				abortPrepared(prepared),
@@ -230,7 +270,7 @@ func (pair Pair) executeWithBackend(
 		}
 		raw, executeErr := prepared.Execute(ctx)
 		cleanupErr := abortPrepared(prepared)
-		if err := reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
+		if err := pair.reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
 			return run, errors.Join(
 				fmt.Errorf("integrity check after %s execution: %w", arm, err),
 				cleanupErr,
@@ -249,6 +289,7 @@ func (pair Pair) executeWithBackend(
 		if executeErr != nil {
 			var integrityError *runner.IntegrityError
 			if errors.As(executeErr, &integrityError) {
+				setArmRun(&run, armRun)
 				return run, fmt.Errorf("%s executor integrity failure: %w", arm, executeErr)
 			}
 			terminal, terminalErr := classifyTermination(raw)
@@ -272,7 +313,7 @@ func (pair Pair) executeWithBackend(
 			continue
 		}
 		observation, decodeErr := pair.adapter.Decode(ctx, cloneRawExecution(raw))
-		if err := reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
+		if err := pair.reverifyExecutionInputs(ctx, pair.baseline, pair.candidate); err != nil {
 			return run, fmt.Errorf("integrity check after %s decode: %w", arm, err)
 		}
 		if decodeErr != nil {
@@ -352,11 +393,11 @@ func scheduledOrder(suiteSHA256 string, seed uint64, repetition int) [2]Arm {
 
 func validateExecutorIdentity(identity ExecutorIdentity) error {
 	switch {
-	case !validPublicText(identity.Kind, 128, true):
+	case !validPublicText(identity.Kind, 128):
 		return errors.New("executor identity kind is required")
 	case strings.TrimSpace(identity.Kind) != identity.Kind:
 		return errors.New("executor identity kind must be canonical")
-	case !validPublicText(identity.Version, 256, true):
+	case !validPublicText(identity.Version, 256):
 		return errors.New("executor identity version is required")
 	case strings.TrimSpace(identity.Version) != identity.Version:
 		return errors.New("executor identity version must be canonical")
@@ -378,7 +419,7 @@ func validateObservation(
 	switch {
 	case !observation.Completed:
 		return errors.New("harness did not report a completed turn")
-	case !validPublicText(observation.Model, 512, true):
+	case !validPublicText(observation.Model, 512):
 		return errors.New("observed model contains invalid text")
 	case observation.Model != invocation.Model:
 		return fmt.Errorf(
@@ -386,7 +427,7 @@ func validateObservation(
 			observation.Model,
 			invocation.Model,
 		)
-	case !validPublicText(observation.FinalAnswer, 16<<20, true):
+	case !validPublicText(observation.FinalAnswer, 16<<20):
 		return errors.New("completed turn final answer contains invalid text")
 	case strings.TrimSpace(observation.FinalAnswer) == "":
 		return errors.New("completed turn has no final answer")
@@ -402,7 +443,7 @@ func validateObservation(
 		"repo_view.outline": {},
 	}
 	for _, call := range observation.ToolCalls {
-		if !validPublicText(call, 512, true) {
+		if !validPublicText(call, 512) {
 			return errors.New("observation tool call contains invalid text")
 		}
 		if strings.HasPrefix(call, "repo_view.") {
@@ -523,8 +564,8 @@ func classifyFailedResourceOutcome(resources *harness.ResourceOutcome) *AttemptF
 	return nil
 }
 
-func validPublicText(value string, maximum int, required bool) bool {
-	if required && value == "" {
+func validPublicText(value string, maximum int) bool {
+	if value == "" {
 		return false
 	}
 	return len(value) <= maximum && utf8.ValidString(value) &&
@@ -538,9 +579,9 @@ func validateAttemptFailure(
 	if failure == nil {
 		return nil
 	}
-	if !validPublicText(failure.Stage, 64, true) ||
-		!validPublicText(failure.Kind, 64, true) ||
-		!validPublicText(failure.Message, 1024, true) {
+	if !validPublicText(failure.Stage, 64) ||
+		!validPublicText(failure.Kind, 64) ||
+		!validPublicText(failure.Message, 1024) {
 		return errors.New("attempt failure contains invalid public text")
 	}
 	terminal, err := classifyTermination(raw)

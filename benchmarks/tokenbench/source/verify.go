@@ -35,7 +35,7 @@ const (
 	maximumLocalOverrideBytes    = 1 << 20
 )
 
-var errGitCommandOutputLimit = errors.New("Git command output exceeds the configured limit")
+var errGitCommandOutputLimit = errors.New("git command output exceeds the configured limit")
 
 type boundedCommandOutput struct {
 	bytes.Buffer
@@ -595,7 +595,7 @@ func rejectUnsafeIndexFlags(
 		count++
 		if count > maximumTrackedEntries {
 			return fmt.Errorf(
-				"Git index flag listing exceeds %d entries",
+				"git index flag listing exceeds %d entries",
 				maximumTrackedEntries,
 			)
 		}
@@ -818,7 +818,7 @@ func requireStandaloneGitDir(ctx context.Context, git gitRunner, root string) er
 				entries++
 				if entries > maximumMetadataEntries {
 					return fmt.Errorf(
-						"Git metadata exceeds %d entries",
+						"git metadata exceeds %d entries",
 						maximumMetadataEntries,
 					)
 				}
@@ -845,14 +845,14 @@ func requireStandaloneGitDir(ctx context.Context, git gitRunner, root string) er
 					}
 					if entryInfo.Size() < 0 || entryInfo.Size() > maximumRegularFileBytes {
 						return fmt.Errorf(
-							"Git metadata file exceeds %d bytes: %s",
+							"git metadata file exceeds %d bytes: %s",
 							maximumRegularFileBytes,
 							path,
 						)
 					}
 					if totalBytes > maximumGitMetadataBytes-entryInfo.Size() {
 						return fmt.Errorf(
-							"Git metadata exceeds %d bytes",
+							"git metadata exceeds %d bytes",
 							maximumGitMetadataBytes,
 						)
 					}
@@ -1029,7 +1029,7 @@ func gitMetadataDigestContext(ctx context.Context, root string) (string, error) 
 			}
 			if len(entries) >= maximumMetadataEntries {
 				return fmt.Errorf(
-					"Git metadata exceeds %d entries",
+					"git metadata exceeds %d entries",
 					maximumMetadataEntries,
 				)
 			}
@@ -1084,7 +1084,7 @@ func gitMetadataDigestContext(ctx context.Context, root string) (string, error) 
 				}
 				if totalBytes > maximumGitMetadataBytes-int64(len(content)) {
 					return fmt.Errorf(
-						"Git metadata exceeds %d bytes",
+						"git metadata exceeds %d bytes",
 						maximumGitMetadataBytes,
 					)
 				}
@@ -1267,12 +1267,12 @@ func writeFrame(writer io.Writer, content []byte) {
 }
 
 type gitRunner struct {
-	executable *os.File
 	info       os.FileInfo
+	executable *os.File
+	closeFn    func() error
 	path       string
 	sha256     string
 	mode       os.FileMode
-	closeFn    func() error
 }
 
 func resolveGitRunner() (gitRunner, error) {
@@ -1559,10 +1559,10 @@ func closeGitRunner(git gitRunner, resultErr *error) {
 func validatePinnedGitExecutableInfo(info os.FileInfo) error {
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 ||
 		info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("Git executable is not an executable regular file")
+		return errors.New("git executable is not an executable regular file")
 	}
 	if !pinnedGitExecutableHasOneLink(info) {
-		return errors.New("Git executable must have exactly one filesystem link")
+		return errors.New("git executable must have exactly one filesystem link")
 	}
 	return nil
 }

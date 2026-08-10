@@ -13,7 +13,7 @@ import (
 
 func decodeJSONObject(raw []byte) (map[string]any, error) {
 	if !utf8.Valid(raw) {
-		return nil, errors.New("JSON is not valid UTF-8")
+		return nil, errors.New("json is not valid UTF-8")
 	}
 	if err := rejectDuplicateJSONKeys(raw); err != nil {
 		return nil, err
@@ -25,7 +25,7 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 		return nil, err
 	}
 	if object == nil {
-		return nil, errors.New("JSON document must be an object")
+		return nil, errors.New("json document must be an object")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
@@ -81,7 +81,7 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 				}
 				key, ok := keyToken.(string)
 				if !ok {
-					return errors.New("JSON object key is not a string")
+					return errors.New("json object key is not a string")
 				}
 				if _, exists := seen[key]; exists {
 					return fmt.Errorf("duplicate JSON object key %q", key)
@@ -111,7 +111,7 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return errors.New("JSON has trailing content")
+			return errors.New("json has trailing content")
 		}
 		return err
 	}
@@ -121,11 +121,11 @@ func rejectDuplicateJSONKeys(raw []byte) error {
 func requiredString(object map[string]any, key string) (string, error) {
 	value, ok := object[key]
 	if !ok {
-		return "", fmt.Errorf("JSON field %q is required", key)
+		return "", fmt.Errorf("json field %q is required", key)
 	}
 	text, ok := value.(string)
 	if !ok || text == "" || !validText(text) {
-		return "", fmt.Errorf("JSON field %q must be nonempty text", key)
+		return "", fmt.Errorf("json field %q must be nonempty text", key)
 	}
 	return text, nil
 }
@@ -133,11 +133,11 @@ func requiredString(object map[string]any, key string) (string, error) {
 func requiredObject(object map[string]any, key string) (map[string]any, error) {
 	value, ok := object[key]
 	if !ok {
-		return nil, fmt.Errorf("JSON field %q is required", key)
+		return nil, fmt.Errorf("json field %q is required", key)
 	}
 	nested, ok := value.(map[string]any)
 	if !ok || nested == nil {
-		return nil, fmt.Errorf("JSON field %q must be an object", key)
+		return nil, fmt.Errorf("json field %q must be an object", key)
 	}
 	return nested, nil
 }
@@ -145,11 +145,11 @@ func requiredObject(object map[string]any, key string) (map[string]any, error) {
 func requiredArray(object map[string]any, key string) ([]any, error) {
 	value, ok := object[key]
 	if !ok {
-		return nil, fmt.Errorf("JSON field %q is required", key)
+		return nil, fmt.Errorf("json field %q is required", key)
 	}
 	array, ok := value.([]any)
 	if !ok || array == nil {
-		return nil, fmt.Errorf("JSON field %q must be an array", key)
+		return nil, fmt.Errorf("json field %q must be an array", key)
 	}
 	return array, nil
 }

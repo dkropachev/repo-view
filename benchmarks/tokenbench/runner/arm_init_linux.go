@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"unsafe"
@@ -14,16 +15,17 @@ import (
 )
 
 const (
-	armInitVersion             = "tokenbench.arm-init/v1"
-	armInitMarkerEnvironment   = "TOKENBENCH_INTERNAL_ARM_INIT_V1"
-	armInitFDLayoutEnvironment = "TOKENBENCH_INTERNAL_FD_LAYOUT_V1"
-	armInitProbeEnvironment    = "TOKENBENCH_INTERNAL_ARM_PROBE_V1"
-	armInitSeccompPolicy       = "deny-inspection-namespace-kernel-unix-ioring/v2"
-	armInitTargetFD            = 4
-	commonMCPExecutableFD      = 5
-	armInitDevNullRuleFD       = 6
-	firstWritableFD            = 7
-	minimumLandlockABI         = 5
+	armInitVersion                 = "tokenbench.arm-init/v2"
+	armInitMarkerEnvironment       = "TOKENBENCH_INTERNAL_ARM_INIT_V1"
+	armInitFDLayoutEnvironment     = "TOKENBENCH_INTERNAL_FD_LAYOUT_V1"
+	armInitProbeEnvironment        = "TOKENBENCH_INTERNAL_ARM_PROBE_V1"
+	armInitPIDNamespaceEnvironment = "TOKENBENCH_INTERNAL_PID_NAMESPACE_V1"
+	armInitSeccompPolicy           = "deny-inspection-namespace-kernel-unix-ioring/v4"
+	armInitTargetFD                = 4
+	commonMCPExecutableFD          = 5
+	armInitDevNullRuleFD           = 6
+	firstWritableFD                = 7
+	minimumLandlockABI             = 6
 )
 
 const landlockHandledWriteAccess = uint64(
@@ -56,6 +58,7 @@ const landlockRuleNetPort = 2
 type landlockRulesetAttr struct {
 	HandledAccessFS  uint64
 	HandledAccessNet uint64
+	Scoped           uint64
 }
 
 type landlockNetPortAttr struct {
@@ -64,14 +67,14 @@ type landlockNetPortAttr struct {
 }
 
 type armInitLayout struct {
+	connectPorts    []uint16
+	bindPorts       []uint16
 	writableFirst   int
 	writableCount   int
 	readOnlyFirst   int
 	readOnlyCount   int
 	executableFirst int
 	executableCount int
-	connectPorts    []uint16
-	bindPorts       []uint16
 }
 
 func formatArmInitFDLayout(
@@ -210,9 +213,13 @@ func init() {
 			_, _ = fmt.Fprintf(os.Stderr, "tokenbench arm-init probe: %v\n", err)
 			os.Exit(125)
 		}
+		suffix := ""
+		if os.Getenv(armInitPIDNamespaceEnvironment) == armInitVersion {
+			suffix = "+pid-namespace"
+		}
 		_, _ = fmt.Fprint(
 			os.Stdout,
-			armInitVersion+":atomic-cgroup+landlock+no-new-privs+target-dumpable+seccomp\n",
+			armInitVersion+":atomic-cgroup+landlock+no-new-privs+target-dumpable+seccomp+no-caps"+suffix+"\n",
 		)
 		os.Exit(0)
 	}
@@ -226,6 +233,17 @@ func init() {
 }
 
 func runArmInitProbe() error {
+	expectPIDNamespace, err := parseArmInitPIDNamespaceExpectation()
+	if err != nil {
+		return err
+	}
+	if expectPIDNamespace && (os.Getpid() != 1 || os.Getppid() != 0) {
+		return fmt.Errorf(
+			"probe did not enter its PID namespace: pid=%d ppid=%d",
+			os.Getpid(),
+			os.Getppid(),
+		)
+	}
 	membership, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
 		return err
@@ -234,12 +252,18 @@ func runArmInitProbe() error {
 		return fmt.Errorf("probe membership is not the pair cgroup: %q", membership)
 	}
 	noNewPrivileges, err := unix.PrctlRetInt(unix.PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0)
-	if err != nil || noNewPrivileges != 1 {
-		return fmt.Errorf("probe did not retain no_new_privs: value=%d err=%v", noNewPrivileges, err)
+	if err != nil {
+		return fmt.Errorf("probe did not retain no_new_privs: value=%d: %w", noNewPrivileges, err)
+	}
+	if noNewPrivileges != 1 {
+		return fmt.Errorf("probe did not retain no_new_privs: value=%d", noNewPrivileges)
 	}
 	dumpable, err := unix.PrctlRetInt(unix.PR_GET_DUMPABLE, 0, 0, 0, 0)
-	if err != nil || dumpable != 1 {
-		return fmt.Errorf("probe target dumpability: value=%d err=%v", dumpable, err)
+	if err != nil {
+		return fmt.Errorf("probe target dumpability: value=%d: %w", dumpable, err)
+	}
+	if dumpable != 1 {
+		return fmt.Errorf("probe target dumpability: value=%d", dumpable)
 	}
 	status, err := os.ReadFile("/proc/self/status")
 	if err != nil {
@@ -248,30 +272,129 @@ func runArmInitProbe() error {
 	if !strings.Contains(string(status), "Seccomp:\t2\n") {
 		return errors.New("probe target did not retain seccomp filter mode")
 	}
+	for _, field := range []string{"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"} {
+		if !strings.Contains(string(status), field+":\t0000000000000000\n") {
+			return fmt.Errorf("probe target retained Linux capabilities in %s", field)
+		}
+	}
 	_, _, ptraceErr := unix.RawSyscall(unix.SYS_PTRACE, unix.PTRACE_TRACEME, 0, 0)
 	if ptraceErr != unix.EPERM {
-		return fmt.Errorf("probe ptrace syscall was not filtered: %v", ptraceErr)
+		if ptraceErr != 0 {
+			return fmt.Errorf("probe ptrace syscall was not filtered: %w", ptraceErr)
+		}
+		return errors.New("probe ptrace syscall was not filtered")
 	}
 	unixSocket, socketErr := unix.Socket(unix.AF_UNIX, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, 0)
 	if unixSocket >= 0 {
 		_ = unix.Close(unixSocket)
 	}
 	if socketErr != unix.EPERM {
-		return fmt.Errorf("probe AF_UNIX socket was not filtered: %v", socketErr)
+		if socketErr != nil {
+			return fmt.Errorf("probe AF_UNIX socket was not filtered: %w", socketErr)
+		}
+		return errors.New("probe AF_UNIX socket was not filtered")
+	}
+	for _, probe := range []struct {
+		name     string
+		protocol int
+	}{
+		{name: "SCTP", protocol: unix.IPPROTO_SCTP},
+		{name: "MPTCP", protocol: unix.IPPROTO_MPTCP},
+	} {
+		descriptor, protocolErr := unix.Socket(
+			unix.AF_INET,
+			unix.SOCK_STREAM|unix.SOCK_CLOEXEC,
+			probe.protocol,
+		)
+		if descriptor >= 0 {
+			_ = unix.Close(descriptor)
+		}
+		if protocolErr != unix.EPERM {
+			if protocolErr != nil {
+				return fmt.Errorf(
+					"probe %s stream socket was not filtered: %w",
+					probe.name,
+					protocolErr,
+				)
+			}
+			return fmt.Errorf("probe %s stream socket was not filtered", probe.name)
+		}
+	}
+	listener, socketErr := unix.Socket(
+		unix.AF_INET,
+		unix.SOCK_STREAM|unix.SOCK_CLOEXEC,
+		unix.IPPROTO_TCP,
+	)
+	if socketErr != nil {
+		return fmt.Errorf("create unbound listen probe socket: %w", socketErr)
+	}
+	listenErr := unix.Listen(listener, 1)
+	_ = unix.Close(listener)
+	if listenErr != unix.EPERM {
+		if listenErr != nil {
+			return fmt.Errorf("probe unbound listen escaped its seccomp boundary: %w", listenErr)
+		}
+		return errors.New("probe unbound listen escaped its seccomp boundary")
+	}
+	if !expectPIDNamespace {
+		if err := unix.Kill(os.Getppid(), 0); err != unix.EPERM {
+			if err != nil {
+				return fmt.Errorf("probe signal escaped its Landlock domain: %w", err)
+			}
+			return errors.New("probe signal escaped its Landlock domain")
+		}
+		var parentLimit unix.Rlimit
+		if err := unix.Prlimit(os.Getppid(), unix.RLIMIT_NOFILE, nil, &parentLimit); err != unix.EPERM {
+			if err != nil {
+				return fmt.Errorf("probe prlimit64 escaped its seccomp boundary: %w", err)
+			}
+			return errors.New("probe prlimit64 escaped its seccomp boundary")
+		}
 	}
 	return nil
 }
 
+func parseArmInitPIDNamespaceExpectation() (bool, error) {
+	value := os.Getenv(armInitPIDNamespaceEnvironment)
+	switch value {
+	case "":
+		return false, nil
+	case armInitVersion:
+		return true, nil
+	default:
+		return false, errors.New("arm-init PID namespace marker is invalid")
+	}
+}
+
 func runArmInit() error {
+	// Capabilities are per-thread. Keep all setup and the final exec on this
+	// exact runtime thread so the target inherits the capability state we prove.
+	runtime.LockOSThread()
 	layout, err := parseArmInitFDLayout(os.Getenv(armInitFDLayoutEnvironment))
 	if err != nil {
 		return err
+	}
+	expectPIDNamespace, err := parseArmInitPIDNamespaceExpectation()
+	if err != nil {
+		return err
+	}
+	if expectPIDNamespace && (os.Getpid() != 1 || os.Getppid() != 0) {
+		return fmt.Errorf(
+			"arm-init did not enter its PID namespace: pid=%d ppid=%d",
+			os.Getpid(),
+			os.Getppid(),
+		)
 	}
 	if err := os.Unsetenv(armInitMarkerEnvironment); err != nil {
 		return err
 	}
 	if err := os.Unsetenv(armInitFDLayoutEnvironment); err != nil {
 		return err
+	}
+	if os.Getenv(armInitProbeEnvironment) != armInitVersion {
+		if err := os.Unsetenv(armInitPIDNamespaceEnvironment); err != nil {
+			return err
+		}
 	}
 	if err := validateArmInitFDLayout(layout); err != nil {
 		return err
@@ -294,12 +417,15 @@ func runArmInit() error {
 		return err
 	}
 	if abi < minimumLandlockABI {
-		return fmt.Errorf("Landlock ABI %d is below required ABI %d", abi, minimumLandlockABI)
+		return fmt.Errorf("landlock ABI %d is below required ABI %d", abi, minimumLandlockABI)
 	}
 	if err := restrictArmAccess(layout); err != nil {
 		return err
 	}
 	if err := restrictProcessInspection(); err != nil {
+		return err
+	}
+	if err := dropArmCapabilities(); err != nil {
 		return err
 	}
 	if err := unix.CloseRange(3, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
@@ -320,16 +446,117 @@ func runArmInit() error {
 	)
 }
 
+func dropArmCapabilities() error {
+	// Clear ambient state before and after changing the traditional capability
+	// sets. Drop the bounding set while CAP_SETPCAP is still effective; a host
+	// that cannot provide this one-time launcher privilege is nonconformant.
+	if err := unix.Prctl(
+		unix.PR_CAP_AMBIENT,
+		unix.PR_CAP_AMBIENT_CLEAR_ALL,
+		0,
+		0,
+		0,
+	); err != nil {
+		return fmt.Errorf("clear ambient capabilities before capability drop: %w", err)
+	}
+	for capability := 0; capability <= unix.CAP_LAST_CAP; capability++ {
+		if err := unix.Prctl(unix.PR_CAPBSET_DROP, uintptr(capability), 0, 0, 0); err != nil {
+			return fmt.Errorf("drop capability %d from bounding set: %w", capability, err)
+		}
+	}
+	header := unix.CapUserHeader{Version: unix.LINUX_CAPABILITY_VERSION_3}
+	data := [2]unix.CapUserData{}
+	if err := unix.Capset(&header, &data[0]); err != nil {
+		return fmt.Errorf("clear effective, permitted, and inheritable capabilities: %w", err)
+	}
+	if err := unix.Prctl(
+		unix.PR_CAP_AMBIENT,
+		unix.PR_CAP_AMBIENT_CLEAR_ALL,
+		0,
+		0,
+		0,
+	); err != nil {
+		return fmt.Errorf("clear ambient capabilities after capability drop: %w", err)
+	}
+	observed := [2]unix.CapUserData{}
+	if err := unix.Capget(&header, &observed[0]); err != nil {
+		return fmt.Errorf("verify cleared process capabilities: %w", err)
+	}
+	if observed != [2]unix.CapUserData{} {
+		return errors.New("effective, permitted, or inheritable capabilities survived capability drop")
+	}
+	for capability := 0; capability <= unix.CAP_LAST_CAP; capability++ {
+		value, err := unix.PrctlRetInt(unix.PR_CAPBSET_READ, uintptr(capability), 0, 0, 0)
+		if err != nil {
+			return fmt.Errorf(
+				"inspect capability %d in bounding set: value=%d: %w",
+				capability,
+				value,
+				err,
+			)
+		}
+		if value != 0 {
+			return fmt.Errorf("capability %d survived in bounding set: value=%d", capability, value)
+		}
+		value, err = unix.PrctlRetInt(
+			unix.PR_CAP_AMBIENT,
+			unix.PR_CAP_AMBIENT_IS_SET,
+			uintptr(capability),
+			0,
+			0,
+		)
+		if err != nil {
+			return fmt.Errorf(
+				"inspect capability %d in ambient set: value=%d: %w",
+				capability,
+				value,
+				err,
+			)
+		}
+		if value != 0 {
+			return fmt.Errorf("capability %d survived in ambient set: value=%d", capability, value)
+		}
+	}
+	return nil
+}
+
 func restrictProcessInspection() error {
-	filters := []unix.SockFilter{{
-		Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS,
-		K:    0, // offsetof(struct seccomp_data, nr)
-	}}
-	for _, number := range []uint32{
+	if armInitAuditArchitecture == 0 {
+		return errors.New("process-inspection seccomp filter does not support this architecture")
+	}
+	filters := []unix.SockFilter{
+		// A syscall-number-only filter is unsound: a task can select another
+		// supported ABI whose syscall table assigns different meanings to the
+		// same numbers. Kill the process before interpreting nr when the kernel's
+		// audited architecture differs from this binary.
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 4}, // seccomp_data.arch
+		{
+			Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
+			Jt:   1,
+			K:    armInitAuditArchitecture,
+		},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+		{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0}, // seccomp_data.nr
+		// Linux reports x32 calls as AUDIT_ARCH_X86_64 while setting bit 30 in
+		// nr. Reject that alternate table explicitly; applying the same reserved
+		// bit rule on arm64 also fails closed for malformed syscall numbers.
+		{
+			Code: unix.BPF_JMP | unix.BPF_JSET | unix.BPF_K,
+			Jf:   1,
+			K:    x32SyscallBit,
+		},
+		{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_KILL_PROCESS},
+	}
+	deniedSyscalls := []uint32{
 		uint32(unix.SYS_PTRACE),
 		uint32(unix.SYS_PROCESS_VM_READV),
 		uint32(unix.SYS_PROCESS_VM_WRITEV),
+		uint32(unix.SYS_PROCESS_MADVISE),
+		uint32(unix.SYS_PROCESS_MRELEASE),
 		uint32(unix.SYS_KCMP),
+		uint32(unix.SYS_PIDFD_OPEN),
+		uint32(unix.SYS_PIDFD_GETFD),
+		uint32(unix.SYS_PIDFD_SEND_SIGNAL),
 		uint32(unix.SYS_BPF),
 		uint32(unix.SYS_PERF_EVENT_OPEN),
 		uint32(unix.SYS_USERFAULTFD),
@@ -349,9 +576,9 @@ func restrictProcessInspection() error {
 		uint32(unix.SYS_IO_URING_SETUP),
 		uint32(unix.SYS_IO_URING_ENTER),
 		uint32(unix.SYS_IO_URING_REGISTER),
-		uint32(unix.SYS_SOCKETPAIR),
-		uint32(unix.SYS_BIND),
-	} {
+	}
+	deniedSyscalls = append(deniedSyscalls, armInitNetworkServerSyscalls...)
+	for _, number := range deniedSyscalls {
 		filters = append(filters,
 			unix.SockFilter{
 				Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
@@ -364,9 +591,22 @@ func restrictProcessInspection() error {
 			},
 		)
 	}
-	// clone3 carries flags behind a pointer, which classic seccomp cannot
-	// inspect. Return ENOSYS so libc safely falls back to inspectable clone.
 	filters = append(filters,
+		// libc implements getrlimit/setrlimit with prlimit64 on several static
+		// toolchains. Permit only pid=0 (the calling process); targeting the
+		// runner or another same-UID process is an integrity escape.
+		unix.SockFilter{
+			Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
+			Jf:   4,
+			K:    uint32(unix.SYS_PRLIMIT64),
+		},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 16},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: 0},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
+
+		// clone3 carries flags behind a pointer, which classic seccomp cannot
+		// inspect. Return ENOSYS so libc safely falls back to inspectable clone.
 		unix.SockFilter{
 			Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
 			Jf:   1,
@@ -377,12 +617,14 @@ func restrictProcessInspection() error {
 			K:    unix.SECCOMP_RET_ERRNO | uint32(unix.ENOSYS),
 		},
 	)
-	// Only TCP IPv4/IPv6 sockets are useful to a contained arm. This denies
-	// raw/UDP/netlink sockets and both pathname and abstract AF_UNIX channels.
+	// Only ordinary TCP IPv4/IPv6 sockets are useful to a contained arm. This
+	// denies raw/UDP/SCTP/MPTCP/netlink sockets and both pathname and abstract
+	// AF_UNIX channels. A cgroup connect program separately restricts the exact
+	// destination address and port for conformant execution.
 	filters = append(filters,
 		unix.SockFilter{
 			Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K,
-			Jf:   8,
+			Jf:   12,
 			K:    uint32(unix.SYS_SOCKET),
 		},
 		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 16},
@@ -392,6 +634,10 @@ func restrictProcessInspection() error {
 		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 24},
 		unix.SockFilter{Code: unix.BPF_ALU | unix.BPF_AND | unix.BPF_K, K: 0xf},
 		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: unix.SOCK_STREAM},
+		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
+		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 32},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 2, K: 0},
+		unix.SockFilter{Code: unix.BPF_JMP | unix.BPF_JEQ | unix.BPF_K, Jt: 1, K: unix.IPPROTO_TCP},
 		unix.SockFilter{Code: unix.BPF_RET | unix.BPF_K, K: unix.SECCOMP_RET_ERRNO | uint32(unix.EPERM)},
 		unix.SockFilter{Code: unix.BPF_LD | unix.BPF_W | unix.BPF_ABS, K: 0},
 	)
@@ -483,7 +729,7 @@ func validateArmInitFDLayout(layout armInitLayout) error {
 	for descriptor := layout.writableFirst; descriptor < layout.writableFirst+layout.writableCount; descriptor++ {
 		var stat unix.Stat_t
 		if err := unix.Fstat(descriptor, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFDIR {
-			return fmt.Errorf("Landlock writable FD %d is not a directory", descriptor)
+			return fmt.Errorf("landlock writable FD %d is not a directory", descriptor)
 		}
 	}
 	for descriptor := layout.readOnlyFirst; descriptor < layout.readOnlyFirst+layout.readOnlyCount; descriptor++ {
@@ -493,14 +739,14 @@ func validateArmInitFDLayout(layout armInitLayout) error {
 			kind = stat.Mode & unix.S_IFMT
 		}
 		if kind != unix.S_IFREG && kind != unix.S_IFDIR {
-			return fmt.Errorf("Landlock read-only FD %d is not a file or directory", descriptor)
+			return fmt.Errorf("landlock read-only FD %d is not a file or directory", descriptor)
 		}
 	}
 	for descriptor := layout.executableFirst; descriptor < layout.executableFirst+layout.executableCount; descriptor++ {
 		var stat unix.Stat_t
 		if err := unix.Fstat(descriptor, &stat); err != nil ||
 			stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o111 == 0 {
-			return fmt.Errorf("Landlock executable FD %d is not an executable regular file", descriptor)
+			return fmt.Errorf("landlock executable FD %d is not an executable regular file", descriptor)
 		}
 	}
 	return nil
@@ -525,7 +771,7 @@ func landlockABI() (int, error) {
 	return int(result), nil
 }
 
-func restrictArmAccess(layout armInitLayout) error {
+func restrictArmAccess(layout armInitLayout) (resultErr error) {
 	fullFilesystemPolicy := layout.readOnlyCount != 0 || layout.executableCount != 0
 	handledFilesystem := landlockHandledWriteAccess
 	if fullFilesystemPolicy {
@@ -534,6 +780,7 @@ func restrictArmAccess(layout armInitLayout) error {
 	rulesetAttribute := landlockRulesetAttr{
 		HandledAccessFS:  handledFilesystem,
 		HandledAccessNet: landlockHandledNetworkAccess,
+		Scoped:           unix.LANDLOCK_SCOPE_SIGNAL,
 	}
 	ruleset, _, errno := unix.Syscall6(
 		unix.SYS_LANDLOCK_CREATE_RULESET,
@@ -548,7 +795,11 @@ func restrictArmAccess(layout armInitLayout) error {
 		return fmt.Errorf("create Landlock ruleset: %w", errno)
 	}
 	rulesetFD := int(ruleset)
-	defer unix.Close(rulesetFD)
+	defer func() {
+		if err := unix.Close(rulesetFD); err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("close Landlock ruleset: %w", err))
+		}
+	}()
 	devNullAccess := uint64(unix.LANDLOCK_ACCESS_FS_WRITE_FILE)
 	if fullFilesystemPolicy {
 		devNullAccess |= unix.LANDLOCK_ACCESS_FS_READ_FILE
@@ -579,13 +830,20 @@ func restrictArmAccess(layout armInitLayout) error {
 		if err != nil {
 			return fmt.Errorf("open /proc/self Landlock root: %w", err)
 		}
-		defer unix.Close(procSelf)
-		if err := addLandlockPathRule(
+		ruleErr := addLandlockPathRule(
 			rulesetFD,
 			procSelf,
 			unix.LANDLOCK_ACCESS_FS_READ_FILE|unix.LANDLOCK_ACCESS_FS_READ_DIR,
-		); err != nil {
-			return fmt.Errorf("allow Landlock /proc/self reads: %w", err)
+		)
+		if ruleErr != nil {
+			ruleErr = fmt.Errorf("allow Landlock /proc/self reads: %w", ruleErr)
+		}
+		closeErr := unix.Close(procSelf)
+		if closeErr != nil {
+			closeErr = fmt.Errorf("close /proc/self Landlock root: %w", closeErr)
+		}
+		if err := errors.Join(ruleErr, closeErr); err != nil {
+			return err
 		}
 	}
 	for descriptor := layout.writableFirst; descriptor < layout.writableFirst+layout.writableCount; descriptor++ {

@@ -14,8 +14,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,7 +25,7 @@ import (
 )
 
 const (
-	executorVersion        = "tokenbench.process-executor/v1"
+	executorVersion        = "tokenbench.process-executor/v2"
 	defaultMaxOutput       = harness.MaxRawStreamBytes
 	defaultMaxArtifact     = harness.MaxArtifactBytes
 	defaultWaitDelay       = 500 * time.Millisecond
@@ -59,62 +61,49 @@ type Lifecycle interface {
 
 // Config controls bounded execution. Zero values select conservative defaults.
 type Config struct {
-	Lifecycle        Lifecycle
-	MaxStdoutBytes   int
-	MaxStderrBytes   int
-	MaxArtifactBytes int
-	WaitDelay        time.Duration
-	CleanupTimeout   time.Duration
-	// RequireContainment requires the same bounded delegated cgroup-v2
-	// boundary used by conformant publication. It is useful for exercising a
-	// non-publishable harness extension under the production process boundary.
-	RequireContainment bool
-	// WritablePaths are the only filesystem subtrees a contained generic
-	// extension may modify. Conformant construction ignores caller policy and
-	// obtains the exact four runtime paths from the built-in Codex lifecycle.
-	WritablePaths []string
-	// ReadOnlyPaths is the complete list of filesystem input roots. ExecutablePaths
-	// names individual executable files; broad host binary directories are not
-	// accepted as an executable allowlist.
-	ReadOnlyPaths   []string
-	ExecutablePaths []string
-	// CommonMCPExecutable is opened once, pinned by digest, and inherited
-	// read-only at FD5 by both arms. Conformant construction requires a static,
-	// single-link, non-writable repo-view executable here.
-	CommonMCPExecutable       string
+	Lifecycle                 Lifecycle
 	CommonMCPExecutableSHA256 string
-
-	// allowUnboundedContainment is package-test-only. Production callers can
-	// never relax the finite ancestor task and memory requirements.
+	CommonMCPExecutable       string
+	WritablePaths             []string
+	ExecutablePaths           []string
+	ReadOnlyPaths             []string
+	MaxArtifactBytes          int
+	CleanupTimeout            time.Duration
+	WaitDelay                 time.Duration
+	MaxStderrBytes            int
+	MaxStdoutBytes            int
+	RequireContainment        bool
 	allowUnboundedContainment bool
 }
 
 // Executor executes an argv ProcessSpec with its complete environment.
 type Executor struct {
+	lifecycle            Lifecycle
+	containment          *cgroupManager
+	devNullRule          *os.File
+	commonSlot           *os.File
+	commonMCP            *pinnedCommonExecutable
+	active               map[*preparedExecution]struct{}
+	armInit              *pinnedCommonExecutable
+	identity             ExecutorIdentity
+	lifecycleIdentity    string
+	construction         constructionMode
+	executablePaths      []string
+	readOnlyPaths        []string
+	writablePaths        []string
+	cleanup              time.Duration
+	maxStdout            int
+	landlockABI          int
+	waitDelay            time.Duration
+	maxArtifact          int
+	maxStderr            int
 	mu                   sync.Mutex
 	closeMu              sync.Mutex
-	closed               bool
 	fullyClosed          bool
-	active               map[*preparedExecution]struct{}
-	lifecycle            Lifecycle
-	lifecycleIdentity    string
-	identity             ExecutorIdentity
-	construction         constructionMode
-	maxStdout            int
-	maxStderr            int
-	maxArtifact          int
-	waitDelay            time.Duration
-	cleanup              time.Duration
-	containment          *cgroupManager
-	armInit              *pinnedCommonExecutable
-	commonMCP            *pinnedCommonExecutable
-	commonSlot           *os.File
-	devNullRule          *os.File
-	landlockABI          int
-	writablePaths        []string
-	readOnlyPaths        []string
-	executablePaths      []string
+	closed               bool
 	fullFilesystemPolicy bool
+	exactNetworkBoundary bool
+	pidNamespace         bool
 }
 
 // New validates and commits an extension-friendly executor configuration. An
@@ -203,6 +192,13 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 	if err != nil {
 		return nil, err
 	}
+	if err := validateFilesystemPolicySeparation(
+		writablePaths,
+		readOnlyPaths,
+		executablePaths,
+	); err != nil {
+		return nil, err
+	}
 	fullFilesystemPolicy := len(readOnlyPaths) != 0 && len(executablePaths) != 0
 	requireContainment := construction == conformantCodexConstruction || config.RequireContainment
 	var containment *cgroupManager
@@ -231,6 +227,8 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 	var commonSlot *os.File
 	var devNullRule *os.File
 	landlockVersion := 0
+	pidNamespace := construction == conformantCodexConstruction
+	exactNetworkBoundary := false
 	if containment != nil {
 		requireStatic := construction == conformantCodexConstruction &&
 			!config.allowUnboundedContainment
@@ -290,15 +288,22 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 			commonSlot,
 			devNullRule,
 			cleanupTimeout,
+			pidNamespace,
 		); err != nil {
 			return nil, fmt.Errorf("prove runner arm-init boundary: %w", err)
+		}
+		if construction == conformantCodexConstruction {
+			if err := probeExactConnectPolicy(containment, cleanupTimeout); err != nil {
+				return nil, fmt.Errorf("prove exact loopback cgroup connect boundary: %w", err)
+			}
+			exactNetworkBoundary = true
 		}
 	} else if len(writablePaths) != 0 || len(readOnlyPaths) != 0 ||
 		len(executablePaths) != 0 || config.CommonMCPExecutable != "" ||
 		config.CommonMCPExecutableSHA256 != "" {
-		return nil, errors.New("Landlock and common FD5 policy require cgroup containment")
+		return nil, errors.New("landlock and common FD5 policy require cgroup containment")
 	}
-	canonical := struct {
+	canonical := struct { //nolint:govet,nolintlint // Field order defines the v2 configuration hash.
 		Version              string   `json:"version"`
 		Construction         string   `json:"construction"`
 		LifecycleIdentity    string   `json:"lifecycle_identity"`
@@ -308,6 +313,7 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 		WaitDelayNanos       int64    `json:"wait_delay_nanos"`
 		CleanupNanos         int64    `json:"cleanup_timeout_nanos"`
 		Containment          any      `json:"containment"`
+		NetworkPolicy        any      `json:"network_policy"`
 		ArmInit              any      `json:"arm_init"`
 		WritablePaths        []string `json:"writable_paths"`
 		ReadOnlyPaths        []string `json:"read_only_paths"`
@@ -330,10 +336,11 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 		ReadOnlyPaths:        readOnlyPaths,
 		ExecutablePaths:      executablePaths,
 		FullFilesystemPolicy: fullFilesystemPolicy,
+		NetworkPolicy:        networkPolicyIdentity(construction, containment != nil),
 	}
 	if containment != nil {
 		canonical.Containment = containment.identity()
-		canonical.ArmInit = struct {
+		canonical.ArmInit = struct { //nolint:govet,nolintlint // Field order defines the v2 arm-init hash input.
 			Version            string `json:"version"`
 			ExecutableSHA256   string `json:"executable_sha256"`
 			LandlockABI        int    `json:"landlock_abi"`
@@ -341,7 +348,19 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 			PreExecNonDumpable bool   `json:"pre_exec_non_dumpable"`
 			TargetDumpable     bool   `json:"target_dumpable"`
 			SeccompPolicy      string `json:"seccomp_policy"`
-		}{armInitVersion, armInit.digest, landlockVersion, true, true, true, armInitSeccompPolicy}
+			PIDNamespace       bool   `json:"pid_namespace"`
+			CapabilitiesEmpty  bool   `json:"capabilities_empty"`
+		}{
+			Version:            armInitVersion,
+			ExecutableSHA256:   armInit.digest,
+			SeccompPolicy:      armInitSeccompPolicy,
+			LandlockABI:        landlockVersion,
+			NoNewPrivileges:    true,
+			PreExecNonDumpable: true,
+			TargetDumpable:     true,
+			PIDNamespace:       pidNamespace,
+			CapabilitiesEmpty:  true,
+		}
 		canonical.CommonMCPFD = commonMCPExecutableFD
 		if commonMCP != nil {
 			canonical.CommonMCPSHA256 = commonMCP.digest
@@ -372,12 +391,43 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 		readOnlyPaths:        readOnlyPaths,
 		executablePaths:      executablePaths,
 		fullFilesystemPolicy: fullFilesystemPolicy,
+		exactNetworkBoundary: exactNetworkBoundary,
+		pidNamespace:         pidNamespace,
 		identity: ExecutorIdentity{
 			Kind:         "process",
 			Version:      executorVersion,
 			ConfigSHA256: hex.EncodeToString(digest[:]),
 		},
 	}, nil
+}
+
+func validateFilesystemPolicySeparation(
+	writablePaths, readOnlyPaths, executablePaths []string,
+) error {
+	for _, writable := range writablePaths {
+		for _, protected := range append(
+			append(make([]string, 0, len(readOnlyPaths)+len(executablePaths)), readOnlyPaths...),
+			executablePaths...,
+		) {
+			if filesystemPathsOverlap(writable, protected) {
+				return fmt.Errorf(
+					"landlock writable path %q overlaps protected read/execute path %q",
+					writable,
+					protected,
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func filesystemPathsOverlap(left, right string) bool {
+	within := func(root, path string) bool {
+		relative, err := filepath.Rel(root, path)
+		return err == nil && relative != ".." &&
+			!strings.HasPrefix(relative, ".."+string(filepath.Separator))
+	}
+	return within(left, right) || within(right, left)
 }
 
 // Identity returns the runner-owned, publication-neutral executor identity.
@@ -408,6 +458,7 @@ func (executor *Executor) Prepare(
 			armInitMarkerEnvironment,
 			armInitFDLayoutEnvironment,
 			armInitProbeEnvironment,
+			armInitPIDNamespaceEnvironment,
 		} {
 			if _, exists := request.Process.Environment[reserved]; exists {
 				return nil, NewIntegrityError(
@@ -459,6 +510,17 @@ func (executor *Executor) Prepare(
 	}
 	prepared.connectPorts = connectPorts
 	prepared.bindPorts = bindPorts
+	if executor.construction == conformantCodexConstruction {
+		if prepared.cgroup == nil || len(connectPorts) != 1 {
+			return prepared, NewIntegrityError(
+				"install exact arm network policy",
+				errors.New("conformant arm omitted its cgroup or sole proxy port"),
+			)
+		}
+		if err := prepared.cgroup.installExactConnectPolicy(connectPorts[0]); err != nil {
+			return prepared, NewIntegrityError("install exact arm network policy", err)
+		}
+	}
 	if executor.containment != nil {
 		if err := executor.armInit.reverify(); err != nil {
 			return prepared, NewIntegrityError("reverify arm-init executable", err)
@@ -531,34 +593,63 @@ func (executor *Executor) Close(ctx context.Context) error {
 		)
 		return NewIntegrityError("close runner executor", resultErr)
 	}
-	if executor.containment != nil {
-		if err := executor.containment.close(); err != nil {
+	executor.mu.Lock()
+	containment := executor.containment
+	executor.containment = nil
+	executor.mu.Unlock()
+	if containment != nil {
+		if err := containment.close(); err != nil {
+			executor.mu.Lock()
+			executor.containment = containment
+			executor.mu.Unlock()
 			return NewIntegrityError("close runner executor containment", err)
 		}
 	}
-	if executor.commonMCP != nil {
-		if err := executor.commonMCP.close(); err != nil {
+	executor.mu.Lock()
+	commonMCP := executor.commonMCP
+	commonSlot := executor.commonSlot
+	executor.commonMCP = nil
+	executor.commonSlot = nil
+	executor.mu.Unlock()
+	if commonMCP != nil {
+		if err := commonMCP.close(); err != nil {
+			executor.mu.Lock()
+			executor.commonMCP = commonMCP
+			executor.commonSlot = commonSlot
+			executor.mu.Unlock()
 			return NewIntegrityError("close runner common FD5 executable", err)
 		}
-		executor.commonSlot = nil
-		executor.commonMCP = nil
-	} else if executor.commonSlot != nil {
-		if err := executor.commonSlot.Close(); err != nil {
+	} else if commonSlot != nil {
+		if err := commonSlot.Close(); err != nil {
+			executor.mu.Lock()
+			executor.commonSlot = commonSlot
+			executor.mu.Unlock()
 			return NewIntegrityError("close runner common FD5 placeholder", err)
 		}
-		executor.commonSlot = nil
 	}
-	if executor.devNullRule != nil {
-		if err := executor.devNullRule.Close(); err != nil {
+	executor.mu.Lock()
+	devNullRule := executor.devNullRule
+	executor.devNullRule = nil
+	executor.mu.Unlock()
+	if devNullRule != nil {
+		if err := devNullRule.Close(); err != nil {
+			executor.mu.Lock()
+			executor.devNullRule = devNullRule
+			executor.mu.Unlock()
 			return NewIntegrityError("close runner /dev/null Landlock rule", err)
 		}
-		executor.devNullRule = nil
 	}
-	if executor.armInit != nil {
-		if err := executor.armInit.close(); err != nil {
+	executor.mu.Lock()
+	armInit := executor.armInit
+	executor.armInit = nil
+	executor.mu.Unlock()
+	if armInit != nil {
+		if err := armInit.close(); err != nil {
+			executor.mu.Lock()
+			executor.armInit = armInit
+			executor.mu.Unlock()
 			return NewIntegrityError("close runner arm-init executable", err)
 		}
-		executor.armInit = nil
 	}
 	executor.mu.Lock()
 	executor.fullyClosed = true
@@ -573,24 +664,23 @@ func (executor *Executor) unregister(prepared *preparedExecution) {
 }
 
 type preparedExecution struct {
-	executor        *Executor
 	session         ArmSession
+	executor        *Executor
 	executable      *pinnedExecutionTarget
 	cgroup          *armCgroup
-	writableRoots   []*os.File
-	readOnlyRoots   []*os.File
-	executableRoots []*os.File
-	connectPorts    []uint16
+	runCancel       context.CancelFunc
+	runDone         chan struct{}
 	bindPorts       []uint16
+	connectPorts    []uint16
+	executableRoots []*os.File
+	readOnlyRoots   []*os.File
+	writableRoots   []*os.File
 	request         ExecutionRequest
-
-	mu        sync.Mutex
-	abortMu   sync.Mutex
-	used      bool
-	running   bool
-	aborted   bool
-	runDone   chan struct{}
-	runCancel context.CancelFunc
+	mu              sync.Mutex
+	abortMu         sync.Mutex
+	used            bool
+	running         bool
+	aborted         bool
 }
 
 func resolveArmNetworkPolicy(
@@ -730,6 +820,12 @@ func (prepared *preparedExecution) run(
 				prepared.bindPorts,
 			),
 		)
+		if executor.pidNamespace {
+			command.Env = append(
+				command.Env,
+				armInitPIDNamespaceEnvironment+"="+armInitVersion,
+			)
+		}
 	}
 	command.Stdin = bytes.NewReader(request.Process.Stdin)
 	command.Stdout = stdout
@@ -737,8 +833,22 @@ func (prepared *preparedExecution) run(
 	command.WaitDelay = executor.waitDelay
 	if prepared.cgroup == nil {
 		isolateCommand(command)
-	} else if err := configureContainedCommand(command, prepared.cgroup); err != nil {
-		return harness.RawExecution{}, NewIntegrityError("configure arm cgroup", err)
+	} else {
+		if executor.exactNetworkBoundary {
+			if err := prepared.cgroup.verifyExactConnectPolicy(); err != nil {
+				return harness.RawExecution{}, NewIntegrityError(
+					"verify exact arm network policy before launch",
+					err,
+				)
+			}
+		}
+		if err := configureContainedCommand(
+			command,
+			prepared.cgroup,
+			executor.pidNamespace,
+		); err != nil {
+			return harness.RawExecution{}, NewIntegrityError("configure arm cgroup", err)
+		}
 	}
 	runErr := command.Run()
 	var resources *harness.ResourceOutcome
@@ -800,25 +910,21 @@ func (prepared *preparedExecution) run(
 			cloneRawExecution(raw),
 		)
 		finishCancel()
-		if err != nil {
-			return raw, NewIntegrityError("finish arm lifecycle", err)
-		}
-		if err := harness.ValidateArtifacts(artifacts); err != nil {
-			return raw, NewIntegrityError("validate arm artifacts", err)
-		}
-		total := 0
-		for _, artifact := range artifacts {
-			if len(artifact.Data) > executor.maxArtifact-total {
-				return raw, NewIntegrityError(
-					"validate arm artifacts",
-					errors.New("runner artifacts exceeded configured byte limit"),
-				)
+		artifactErr := validateArmArtifacts(artifacts, executor.maxArtifact)
+		if artifactErr == nil {
+			raw.Artifacts = cloneArtifacts(artifacts)
+			if captureErr := validateRawCapture(raw); captureErr != nil {
+				artifactErr = NewIntegrityError("validate completed raw capture", captureErr)
 			}
-			total += len(artifact.Data)
+		} else {
+			artifactErr = NewIntegrityError("validate arm artifacts", artifactErr)
 		}
-		raw.Artifacts = cloneArtifacts(artifacts)
-		if err := validateRawCapture(raw); err != nil {
-			return raw, NewIntegrityError("validate completed raw capture", err)
+		var finishErr error
+		if err != nil {
+			finishErr = NewIntegrityError("finish arm lifecycle", err)
+		}
+		if resultErr := errors.Join(artifactErr, finishErr); resultErr != nil {
+			return raw, resultErr
 		}
 	}
 	if runErr == nil {
@@ -830,6 +936,20 @@ func (prepared *preparedExecution) run(
 		return raw, nil
 	}
 	return raw, fmt.Errorf("start or wait for process: %w", runErr)
+}
+
+func validateArmArtifacts(artifacts []harness.Artifact, maximumBytes int) error {
+	if err := harness.ValidateArtifacts(artifacts); err != nil {
+		return err
+	}
+	total := 0
+	for _, artifact := range artifacts {
+		if len(artifact.Data) > maximumBytes-total {
+			return errors.New("runner artifacts exceeded configured byte limit")
+		}
+		total += len(artifact.Data)
+	}
+	return nil
 }
 
 func validateRawCapture(raw harness.RawExecution) error {
@@ -937,10 +1057,10 @@ func (prepared *preparedExecution) Abort(ctx context.Context) error {
 }
 
 type pinnedExecutionTarget struct {
+	info          os.FileInfo
 	file          *os.File
 	path          string
 	digest        string
-	info          os.FileInfo
 	requireVerity bool
 }
 
@@ -1062,8 +1182,8 @@ func exitCode(command *exec.Cmd, runErr error) int {
 }
 
 type limitBuffer struct {
-	buffer    bytes.Buffer
 	cancel    context.CancelFunc
+	buffer    bytes.Buffer
 	limit     int
 	truncated bool
 }

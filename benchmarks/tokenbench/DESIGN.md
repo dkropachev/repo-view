@@ -1,128 +1,246 @@
 # Tokenbench design
 
-> Status: current process-planning foundation plus proposed execution architecture. Suite/model/source/Git verification, adapter binding, pair resolution, invocation and process parity, audit-plan serialization, fake/conformance support, and the external process bridge are current. Target-process execution, live MCP read-only verification, Codex, immutable evidence, replay, statistics, and reporting are planned.
+Tokenbench treats benchmark validity as an authority problem. Serializable JSON
+can describe what should have happened, but only private capabilities returned
+by successful live verification may authorize execution or publication.
 
-## Goals
+## Security and validity objective
 
-Tokenbench should make a paired token-efficiency result reproducible and falsifiable. It must:
-
-- isolate one treatment: one read-only `repo_view` MCP registration;
-- reject pairs with any other semantic input or configuration delta;
-- support a planned Codex integration and other live harnesses through one narrow adapter boundary;
-- preserve raw evidence immutably and derive reports offline;
-- make usage semantics, quality checks, exclusions, and provenance explicit.
-
-It is not a general agent tournament, prompt optimizer, or live dashboard.
-
-## Terms
-
-- **Run specification:** versioned, harness-neutral semantic inputs shared by both arms.
-- **Registration:** the canonical `repo_view` launch metadata and declared read-only flag; the live server/tool surface is not captured yet.
-- **Prepared suite:** private, non-serializable state retaining the verified source snapshot, resolved identity, tokenbench executable identity, and adapter capability.
-- **Resolved invocation:** the common semantic harness input after adapter model/identity resolution; arms differ only by the registration field.
-- **Process pair:** current wrapper-level process plans built once from common state, with candidate argv extended centrally by the MCP suffix.
-- **Resolved plan:** serializable audit/transport data containing the verified process pair and its digest; it can validate in-document commitments but cannot build or execute processes.
-- **Pair:** current private adapter-bound baseline/candidate invocations plus parity proof; it is the capability that can call `Build` or `Plan`.
-- **Attempt pair:** future baseline/candidate executions for one task, repetition, repository state, and run specification.
-- **Bundle:** immutable manifest plus content-addressed evidence objects.
-- **Replay:** deterministic decoding and analysis of captured objects without a model call.
-
-## Treatment invariant
-
-The adapter resolves common identity during preparation; `Pair.Build` later re-resolves the same common request. Central code, not the adapter, derives the arms from one common invocation `c` and registration `m`:
+For one task, repository state, and repetition:
 
 ```text
-baseline  = clone(c)
-candidate = clone(c)
-baseline.mcp_servers  = []
-candidate.mcp_servers = [m]
-remove(candidate.mcp_servers[0]) == baseline
-
-p = adapter.Build(baseline)             # exactly once, no MCP servers
-baseline_process  = clone(p)
-candidate_process = clone(p)
-candidate_process.argv += adapter.MCPArguments(m)
+baseline  = common configuration with mcp_servers = []
+candidate = the same configuration with mcp_servers = [repo_view]
 ```
 
-The equality is deep and fail-closed. Baseline has no MCP registrations. Candidate contains exactly one registration in total, named `repo_view`. The current planner computes the selected executable digest and commits the complete code-owned registration digest in the resolved plan. There may be no shared server, replacement, duplicate, alias, or second candidate-only tool.
+Removing candidate's one registration must produce baseline exactly. The
+candidate receives the MCP declarations that Codex derives from that
+registration; no other candidate-only input is authorized. Run order and fresh
+random values are committed evidence metadata and are not placed in model-visible
+paths, prompts, environment, or configuration.
 
-The MCP tool declarations learned from that registration are a direct consequence of the treatment. No separate prompt text may explain, recommend, or require the tool. Current code marks the registration required/read-only and pins its executable and code-owned argv; proving the live server identity, handshake, and read-only tool surface is planned.
+A run is not publishable merely because two objects compare equal. Tokenbench
+must also prove that the exact configuration reached the child and provider,
+that the repository/tools stayed immutable, that both process trees were
+contained and removed, and that evidence publication completed durably.
 
-Semantic equality includes, at minimum:
-
-- exact system, developer, user, and task bytes in the same roles and order;
-- requested model, expected and resolved `<model>@<immutable-revision>`, reasoning effort, sampling controls, context controls, and tokenizer/accounting contract;
-- harness binary/version and adapter executable, control-configuration, effective child-configuration, and version identities;
-- canonical tokenbench executable path and digest;
-- non-registration arguments, feature flags, routing, and account class; a harness-native encoding of the exact registration is part of the one permitted delta;
-- sandbox, permissions, network policy, timeout, limits, locale, clock policy, working directory, and model-visible repository path;
-- repository tree/commit, standalone `.git` metadata digest, pinned Git executable/path/digest, and pre-run filesystem state;
-- environment, including the complete `PATH` value;
-- the native tool inventory; no common MCP registration is permitted.
-
-Arm labels, pair IDs, timestamps, randomized order, and host scheduling facts are evidence metadata. They must not be injected into prompts, environment variables, paths, or other model-visible state.
-
-Physical isolation must preserve semantic paths. A future runner should use fresh isomorphic sandboxes mounted at the same model-visible location, or sequentially restore the same location, rather than leak arm-specific temporary paths.
-
-## Canonical run specification
-
-The current `tokenbench.suite/v1` authors one common prompt, requested model, expected `<model>@<immutable-revision>`, harness executable/digest/kind, canonical Git executable path/digest, read-only permission profile, timeout, repetition count, seed, and full source/base/tree commitment. Source verification invokes only that pinned Git executable; it does not discover Git from ambient `PATH`. The suite deliberately contains no arm fields, opaque harness argument/environment escape hatch, or tool registry. Current code validates and commits the repetition and seed fields through the suite digest but does not schedule repetitions or derive an AB/BA order from them.
-
-The target complete study specification contains no arbitrary arm override. Its logical sections are:
-
-- schema and corpus versions;
-- task and prompt object digests;
-- immutable repository locator, tree/commit digest, standalone Git-metadata digest, and suite-authored Git-executable identity;
-- harness adapter wrapper/child identities and pinned harness binary identity;
-- requested model, resolved immutable model revision, and inference settings;
-- sandbox, permissions, resource limits, and timeout;
-- an allowlisted environment snapshot with secret references separated from values;
-- the common native-tool contract, with no authored MCP registry;
-- one canonical read-only `repo_view` registration;
-- repetition, pairing, randomization, and quality policy;
-- usage-decoder and pricing-table identities.
-
-There is intentionally no `baseline_overrides`, `candidate_prompt`, `navigator_policy`, or arm-specific environment block.
-
-Unknown fields are rejected by the current loader. Defaults must be resolved before parity and stored in future evidence so a later harness release cannot reinterpret an old specification.
-
-The current CLI planning flow is `LoadSuite` → `PrepareSuite(adapter)` → `NewRepoViewTool` → `ResolvePair` → `Pair.Plan(ctx)` → `ResolvedPlan.Validate`. `PreparedSuite` retains its verified `source.Snapshot`, resolved `Identity`, tokenbench executable identity, and adapter capability. `Pair.Plan(ctx)` internally calls the bound pair's `Build` exactly once; that build re-resolves identity, renders/verifies the common process once, centrally clones/appends only `MCPArguments`, and then reverifies the tokenbench/harness/MCP executables plus source/Git identity. The plan stores the verified process pair and its digest. No target process is launched.
-
-`ResolvedPlan` intentionally omits the adapter capability even though it contains rendered process data. `DecodePlan` performs strict audit validation only; a decoded plan cannot call `Pair.Build` and must never be accepted as execution authority. A future executor must reload and prepare the authored suite, then use the retained `Pair` capability.
-
-## Component boundaries
+## Authority flow
 
 ```text
-suite + prompt + source + adapter
-              |
-              v
-   PrepareSuite: verify source/Git + resolve common identity
-              |
-              v
- ResolvePair: clone common invocation + add one registration
-              |
-              v
- Pair.Plan(ctx): call bound Pair.Build exactly once
-              |
-              v
- Pair.Build: re-resolve -> build once -> clone/append -> reverify
-              |
-              v
- ResolvedPlan: verified ProcessPair + digest (audit-only)
-              |
-              v
- target execution/CAS/replay/stats (planned)
+suite v2 + prompt + mutable source + trusted artifact bundle
+                            |
+                            v
+            LoadArtifactBundle / PrepareOrigins
+                            |
+                            v
+          BuildExecutionSnapshot (fs-verity + read-only mount)
+                            |
+                            v
+            PreparedExecution (live private authority)
+                            |
+                            v
+     BindAdapter (built-in production Codex capability only)
+                            |
+                            v
+              Pair (sole-delta + snapshot authority)
+                            |
+                            v
+       Pair.Execute (conformant runner + fresh arm sessions)
+                            |
+                            v
+ runner closed -> lifecycle closed -> snapshot unmounted/closed
+                            |
+                            v
+     signed CAS publication (private one-shot run authority)
 ```
 
-### Validation core
+`ResolvedPlan`, `Run`, capture JSON, replay JSON, and filesystem paths are audit
+data. Decoding or constructing them never recreates a private authority.
+Publication consumes a one-shot marker sealed around the exact completed run;
+the marker becomes ready only after executor, lifecycle, and immutable snapshot
+closure predicates all hold.
 
-Owns strict decoding, canonical serialization, digesting, and cross-field validation. It must not know harness command-line details.
+## Authored suite
 
-### Harness adapter
+`tokenbench.suite/v2` is one common specification. It has no baseline/candidate
+blocks, open tool registry, arbitrary environment, opaque harness arguments, or
+arm override. It binds:
 
-`PrepareSuite` calls `Resolve` with common state only. `ResolvePair` then constructs and parity-checks both invocations. `Pair.Build` calls `Resolve` again and requires exact identity equality, calls `Build` once with the MCP-free common invocation, and calls `MCPArguments` only with the approved registration. Central code constructs candidate process argv; the adapter never builds candidate independently.
+- exact suite and prompt bytes;
+- requested model and expected immutable model revision;
+- common developer instructions, reasoning effort, read-only permissions,
+  timeout, repetitions, and order seed;
+- exact Codex and verifier-Git paths/digests;
+- exact trusted artifact-manifest digest;
+- clean standalone source root, full base/head object IDs, and tracked-tree
+  digest.
 
-The current boundary is:
+Unknown and duplicate fields are rejected. Treatment-neutrality checks reject
+prompt/instruction text that names or hints at the treatment. Paths resolve
+before execution and every mutable input is reverified across external calls.
+
+## Trusted artifacts and immutable execution image
+
+The fixed artifact-manifest v1 contains a closed set of exact executable roles:
+Codex, repo-view, static verifier Git, static Bash, and 14 native utilities. It
+also contains bounded source/recipe/builder provenance. The manifest is accepted
+only when three commitments agree: authored suite, exact manifest bytes, and an
+unexported digest embedded in the tokenbench executable at link time.
+
+Linux loading uses traversal-safe `openat2`, rejects symlinks, hard links,
+dynamic ELF interpreters/dependencies, nonnative ABI, oversized files, role
+aliasing, and byte drift. A private loader capability, not an exported manifest
+value, is required for origin preparation.
+
+The snapshot builder:
+
+1. verifies a clean, standalone source and `.git` graph with pinned Git;
+2. copies the source and closed executable set without crossing filesystems,
+   following links, or accepting special files;
+3. derives a bounded, canonical base-to-head changed-state cache using the same
+   diff contract as live Git-backed repo-view;
+4. enables and measures fs-verity for every regular file;
+5. creates a self-bind mount, makes it read-only, `nosuid`, and `nodev`, and
+   verifies its mount namespace, parent propagation state, filesystem root,
+   inode, options, and lack of descendant mounts;
+6. returns an `Authority` that continuously reverifies the mount and all
+   committed inputs.
+
+Both arms use the same model-visible source path and toolbox. The snapshot
+authority cannot report closed until unmount and every retained descriptor close
+succeeds. Cleanup failure preserves residue and blocks signing.
+
+## Pair and process construction
+
+Central code derives both invocations from one common value. Baseline has a
+non-nil empty MCP list; candidate receives one private, code-owned registration:
+
+```text
+name: repo_view
+command: immutable snapshot repo-view path
+arguments: mcp, immutable root/base/head, immutable changed-state cache + digest
+environment: {}
+required: true
+read_only: true
+```
+
+The adapter is called once to build the common MCP-free process. Candidate is a
+deep clone with only the adapter's encoding of the approved registration
+appended. Parity covers prompt, model, identity digests, cwd, complete
+environment, stdin, timeouts, source/Git identities, runner, artifact inputs,
+and every rendered common argument. The complete plan is size-bounded before
+the first arm.
+
+The built-in Codex adapter pins CLI v0.144.0, its exact executable digest,
+feature allow/deny state, model/reasoning allowlist, command line, environment,
+config-lock export, decoder, provider model, and MCP suffix. It never consults
+ambient Codex configuration. An offline adapter can create audit-only plans;
+only the exact production constructor can bind a publishable pair.
+
+## Fresh runtime and containment
+
+One production lifecycle reserves a loopback capture-proxy address and creates
+one common layout before arm order is applied. Before each arm it deletes and
+recreates the same `HOME`, `CODEX_HOME`, temporary, SQLite, and config-lock
+paths. It retains no transcript or harness state between arms. The local proxy
+capability and paths are identical; the upstream credential is never placed in
+the child environment.
+
+The runner creates a fresh bounded cgroup for each arm and atomically launches
+the child into it. The arm-init process establishes:
+
+- a private PID namespace with a reaping PID 1;
+- verified empty effective/permitted/inheritable/ambient/bounding capability
+  sets and `no_new_privs`;
+- Landlock read/write/execute policy over exactly the immutable image, four
+  writable runtime paths, and `/dev/null`;
+- seccomp architecture validation, x32 rejection on amd64, process-inspection,
+  namespace, kernel attack-surface, listening, Unix-socket, and mutation syscall
+  denial;
+- cgroup BPF allowing the model process to connect only to the exact loopback
+  capture-proxy port; code-owned proxy logic separately pins the upstream
+  production route and TLS policy.
+
+The model process inherits the same read-only repo-view image at fixed FD 5 in
+both arms. Candidate configuration references it; baseline configuration does
+not. This keeps executable availability, descriptors, and sandbox policy common
+while preserving the one intended configuration delta.
+
+Containment identity commits finite ancestor and arm limits, controller state,
+kernel program IDs, network ports, Landlock ABI, seccomp version, executable
+digests, and cleanup rules. Unexpected ancestor BPF programs, extra cgroup
+processes, stale children, capability drift, inability to kill the whole tree,
+or inability to remove the arm cgroup is an integrity error.
+
+## Provider and effective-config parity
+
+The capture proxy accepts requests only from the active arm and forwards only
+to the code-owned production endpoint using a proxy-free HTTP transport and
+system TLS roots. Ambient proxy/base-URL/custom-CA variables are forbidden.
+Every verified DNS name and DER certificate chain is committed in the trace.
+
+For every request and response, capture retains the exact body digest, bounded
+SSE order, and a canonical digest of the complete reviewed semantic header
+envelope. It does not claim to preserve raw HTTP/2 framing, header order, or
+header-name casing. The trace also binds dynamic request fields,
+response-attempt status (including transport/non-2xx/overflow failures), TLS
+identity, usage, provider model, and tool output. Codex JSONL, provider body,
+reviewed provider headers, and decoder claims must agree.
+
+The trace explicitly commits whether production TLS is required. In that mode,
+each observed response and every attempt that reached the provider carries its
+verified TLS identity; only a transport failure before any response or TLS
+handshake may have an empty TLS list.
+
+After each arm, tokenbench reads the exact exported effective config. The
+normalized common config must match across arms; baseline must have no MCP
+entry, and candidate must have exactly the approved entry. Provider requests
+must have the same nonce-normalized non-tool payload and native tool
+declarations. Baseline must expose no MCP declarations; candidate must expose
+exactly the four repo-view operations and the expected Codex MCP support tools.
+Missing capture, request-count asymmetry, provider model drift, tool drift, or
+an unmatched arm blocks publication.
+
+## Failure semantics
+
+Failures are separated into two classes:
+
+- ordinary arm outcomes, such as timeout, cancellation, nonzero exit, or bounded
+  stdout/stderr truncation, are retained as failed attempts with sanitized
+  partial capture;
+- parity, identity, containment, cleanup, capture, evidence-integrity, and
+  authority failures invalidate the pair and cannot acquire publication
+  authority.
+
+The second arm may still run after an ordinary first-arm failure so failure
+rates remain observable. Tokenbench never retries silently; a retry is a new
+explicit repetition or study record. It never converts missing data to zero or
+drops failed attempts from evidence.
+
+## Evidence and replay
+
+Raw execution is published into a typed append-only CAS. Objects are created
+exclusively, hashed while written, re-opened and verified, and linked by a
+canonical capture manifest. Publication makes the signed Ed25519 attestation
+root visible last. Inode pins, per-store/process locks, directory sync, recovery
+records, and final graph verification distinguish complete, retryable, visible,
+and indeterminate outcomes. An uncertain publication is never reported as
+complete.
+
+Trust is out of band. Evidence does not embed a key that can authorize itself.
+`verify` authenticates the signer role and walks the full graph. `replay` first
+authenticates a capture, reconstructs the exact pinned decoder from its plan,
+decodes offline, and publishes a new signed child root. It never invokes Codex,
+reads a credential, mutates the source capture, or overwrites a root.
+
+Provider-reported input, cached-input, output, reasoning, and total counters are
+preserved separately. Cached input remains a subset rather than an invented
+discounted token total. Price calculations, quality evaluation, and statistical
+reports are derived layers with their own versioned policy and lineage.
+
+## Harness extension boundary
+
+The harness-neutral interface is:
 
 ```go
 type Adapter interface {
@@ -134,54 +252,12 @@ type Adapter interface {
 }
 ```
 
-`ResolveRequest` includes common harness/model settings, working directory, source/base/tree identities, pinned Git executable/metadata identities, and the canonical tokenbench executable path/digest, but no arm. `Build` must reject an invocation containing MCP servers. `MCPArguments` returns a nonempty suffix and has no task/prompt input. `Decode` normalizes raw execution supplied by a future target-process runner. The current external process bridge implements these calls; no checked-in adapter executes Codex.
+The fake adapter, shared conformance suite, external-process bridge, and generic
+executor let another harness implement and test the boundary without importing
+Codex. Such an extension is intentionally non-publishable until reviewed code
+adds a concrete production lifecycle, exact effective-config/tool-surface
+verification, executable/model allowlists, and an unforgeable constructor. A
+caller-defined interface implementation cannot self-declare conformance.
 
-### Parity gate
-
-The current invocation gate validates the exact registration and deep equality after removing it, then commits common/baseline/candidate/prompt/registration digests. The current process gate verifies that adapter output preserves executable, stdin, full environment, working directory, and timeout, and that candidate is a clone with only the MCP argv suffix. Live child-effective configuration and MCP handshake/tool-surface verification remain planned. A harness that cannot expose them is unsupported for live results.
-
-### Source and identity verifier
-
-Current verification requires a clean standalone repository whose `.git` directory, object storage, index, HEAD, tracked paths/modes/raw bytes, local configuration, and absence of alternates/linked state are self-contained. It rejects unsafe index flags, symlinks/submodules, ignored/untracked files, local overrides, transient Git state, and external hard links. It records the source revision/base/tree digest, a stable digest over complete `.git` metadata, and the canonical Git executable path/digest. Preparation also resolves and hashes the canonical tokenbench executable. `Pair.Build` repeats source/Git verification and rehashes that executable after adapter control calls.
-
-The suite names the requested model and expected immutable revision separately. Adapter `Identity.Model` must equal the requested model and `Identity.ModelRevision` must equal the exact expected `<model>@<immutable-revision>` both during preparation and build-time re-resolution.
-
-### Plan authority
-
-`Pair` is the current build authority because it retains the adapter capability in private state. `ResolvedPlan` is a defensive serializable audit view containing semantic invocations, the rendered process pair, and their commitments. Those commitments can be recomputed after decoding, but the plan cannot be converted back into a `Pair` or used to skip source, executable, adapter, or model re-verification.
-
-### Target-process runner (planned)
-
-Will launch the verified `ProcessPair` in fresh sessions, perform the live MCP identity/handshake/read-only surface checks, use a pre-recorded randomized AB/BA order, and record all outcomes. It must not retry silently; a retry is a new linked attempt.
-
-### Capture and evidence store (planned)
-
-Capture writes typed raw bytes to a content-addressed store. A small root manifest links the pair, configuration, events, responses, usage, exits, and checks. Publication is atomic: either the verified manifest becomes visible or the bundle is incomplete and not analyzed.
-
-### Replay, checks, analysis, and reporting (planned)
-
-Replay reads only captured objects, verifies digests, applies a pinned decoder, and writes a new derived bundle linked to its source. Quality checks consume responses and task fixtures without changing raw evidence. Analysis reports raw counters and financial estimates as separate metric families.
-
-## State and side effects
-
-The current verifier treats the worktree, standalone `.git` state, Git executable, and tokenbench executable as immutable inputs and detects drift again during `Pair.Build`. Future model sessions receive no prior transcript. Any harness scratch state must be isolated per run and initialized identically. The future live MCP gate must establish that exposed `repo_view` operations cannot edit the repository, Git metadata, host configuration, or external systems.
-
-Credentials are supplied through the same non-model-visible mechanism to both arms. Secret values are never serialized into a run specification, resolved-configuration artifact, event object, or report.
-
-## Failure model
-
-Failures are data, not omissions:
-
-- **spec failure:** invalid or non-canonical input;
-- **parity failure:** any effective delta beyond the registration;
-- **adapter failure:** harness unavailable, incompatible, or not auditable;
-- **infrastructure failure:** timeout, launch, transport, or capture failure;
-- **decoder failure:** raw usage cannot be interpreted by the pinned decoder;
-- **quality failure:** response fails a predeclared check;
-- **integrity failure:** missing object or digest mismatch.
-
-No token-efficiency winner is declared from an invalid pair. Reports include attempt counts and reasons before any filtered analysis.
-
-## Extension rules
-
-New harnesses implement the same adapter contract; they do not weaken parity. New metrics derive from immutable raw evidence. Schema changes are versioned and old decoders remain available for replay. A new treatment requires a separately named experiment design rather than another candidate override in tokenbench.
+See [docs/adapter-authoring.md](docs/adapter-authoring.md) for the wire protocol
+and checklist.

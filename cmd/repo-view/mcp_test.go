@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dkropachev/repo-view/repoview"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -116,6 +118,62 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	}
 	if serverStderr.Len() != 0 {
 		t.Fatalf("MCP server wrote stderr: %s", serverStderr.String())
+	}
+
+	cache := repoview.ChangedStateCache{
+		SchemaVersion: repoview.ChangedStateSchemaVersion,
+		BaseCommit:    base,
+		HeadCommit:    base,
+		HeadSubject:   "base",
+		ChangedFiles:  []repoview.ChangedFileState{},
+		Patch:         "",
+	}
+	cacheRaw, err := json.Marshal(cache)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cachePath := filepath.Join(t.TempDir(), "changed-state.json")
+	if err := os.WriteFile(cachePath, cacheRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cacheDigest := sha256.Sum256(cacheRaw)
+	var cacheStderr bytes.Buffer
+	cacheCommand := exec.Command(
+		binary,
+		"mcp",
+		"--root", root,
+		"--base", base,
+		"--head", base,
+		"--changed-state-cache", cachePath,
+		"--changed-state-cache-sha256", hex.EncodeToString(cacheDigest[:]),
+	)
+	cacheCommand.Env = []string{}
+	cacheCommand.Dir = root
+	cacheCommand.Stderr = &cacheStderr
+	cacheClient := mcp.NewClient(
+		&mcp.Implementation{Name: "repo-view-cache-command-test", Version: "v1"},
+		&mcp.ClientOptions{Capabilities: &mcp.ClientCapabilities{}},
+	)
+	cacheSession, err := cacheClient.Connect(
+		context.Background(),
+		&mcp.CommandTransport{Command: cacheCommand, TerminateDuration: time.Second},
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("connect to cache-only repo-view MCP: %v; stderr: %s", err, cacheStderr.String())
+	}
+	response, err = cacheSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "outline", Arguments: map[string]any{"path": "demo.go"},
+	})
+	if err != nil || response.IsError {
+		_ = cacheSession.Close()
+		t.Fatalf("cache-only outline = %#v, %v; stderr: %s", response, err, cacheStderr.String())
+	}
+	if err := cacheSession.Close(); err != nil {
+		t.Fatalf("close cache-only MCP subprocess: %v; stderr: %s", err, cacheStderr.String())
+	}
+	if cacheStderr.Len() != 0 {
+		t.Fatalf("cache-only MCP server wrote stderr: %s", cacheStderr.String())
 	}
 }
 

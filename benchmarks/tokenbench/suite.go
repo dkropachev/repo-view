@@ -17,8 +17,9 @@ import (
 )
 
 // SuiteSchemaVersion is the only authored suite schema accepted by this
-// implementation.
-const SuiteSchemaVersion = "tokenbench.suite/v1"
+// implementation. The historical v1 schema remains in schemas/ for audit;
+// publishable preparation requires v2's artifact-manifest commitment.
+const SuiteSchemaVersion = "tokenbench.suite/v2"
 
 const (
 	maxRepetitions              = 100
@@ -37,26 +38,27 @@ const (
 // Suite is deliberately a single common specification. It has no arm fields,
 // no tool registry, and no arbitrary per-arm extension map.
 type Suite struct {
-	Model                 string `json:"model"`
-	ExpectedModelRevision string `json:"expected_model_revision"`
-	DeveloperInstructions string `json:"developer_instructions"`
-	ID                    string `json:"id"`
-	PromptFile            string `json:"prompt_file"`
-	HarnessKind           string `json:"harness_kind"`
-	HarnessExecutable     string `json:"harness_executable"`
-	HarnessSHA256         string `json:"harness_sha256"`
-	GitExecutable         string `json:"git_executable"`
-	GitExecutableSHA256   string `json:"git_executable_sha256"`
-	SourceTreeSHA256      string `json:"source_tree_sha256"`
-	SchemaVersion         string `json:"schema_version"`
-	ReasoningEffort       string `json:"reasoning_effort"`
-	PermissionProfile     string `json:"permission_profile"`
-	SourceRoot            string `json:"source_root"`
-	SourceRevision        string `json:"source_revision"`
-	SourceBaseRevision    string `json:"source_base_revision"`
-	TimeoutMillis         int64  `json:"timeout_millis"`
-	Repetitions           int    `json:"repetitions"`
-	Seed                  uint64 `json:"seed"`
+	Model                  string `json:"model"`
+	ExpectedModelRevision  string `json:"expected_model_revision"`
+	DeveloperInstructions  string `json:"developer_instructions"`
+	ID                     string `json:"id"`
+	PromptFile             string `json:"prompt_file"`
+	HarnessKind            string `json:"harness_kind"`
+	HarnessExecutable      string `json:"harness_executable"`
+	HarnessSHA256          string `json:"harness_sha256"`
+	ArtifactManifestSHA256 string `json:"artifact_manifest_sha256"`
+	GitExecutable          string `json:"git_executable"`
+	GitExecutableSHA256    string `json:"git_executable_sha256"`
+	SourceTreeSHA256       string `json:"source_tree_sha256"`
+	SchemaVersion          string `json:"schema_version"`
+	ReasoningEffort        string `json:"reasoning_effort"`
+	PermissionProfile      string `json:"permission_profile"`
+	SourceRoot             string `json:"source_root"`
+	SourceRevision         string `json:"source_revision"`
+	SourceBaseRevision     string `json:"source_base_revision"`
+	TimeoutMillis          int64  `json:"timeout_millis"`
+	Repetitions            int    `json:"repetitions"`
+	Seed                   uint64 `json:"seed"`
 }
 
 // LoadedSuite binds authored configuration to its exact bytes and location.
@@ -196,6 +198,7 @@ func requireSuiteFields(raw []byte) error {
 		"harness_kind",
 		"harness_executable",
 		"harness_sha256",
+		"artifact_manifest_sha256",
 		"git_executable",
 		"git_executable_sha256",
 		"model",
@@ -262,6 +265,8 @@ func (suite Suite) Validate() error {
 		return errors.New("harness_executable must be a canonical path")
 	case !ValidSHA256(suite.HarnessSHA256):
 		return errors.New("harness_sha256 must be a lowercase SHA-256 digest")
+	case !ValidSHA256(suite.ArtifactManifestSHA256):
+		return errors.New("artifact_manifest_sha256 must be a lowercase SHA-256 digest")
 	case len(suite.GitExecutable) > maximumSuitePathBytes:
 		return fmt.Errorf("git_executable must not exceed %d bytes", maximumSuitePathBytes)
 	case !filepath.IsAbs(suite.GitExecutable):
@@ -409,10 +414,6 @@ func resolveRelative(base, path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Clean(filepath.Join(base, path))
-}
-
-func readStableRegularFile(path string) ([]byte, error) {
-	return readStableRegularFileLimited(path, maximumPromptBytes)
 }
 
 func readStableRegularFileLimited(

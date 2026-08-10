@@ -20,11 +20,11 @@ var (
 )
 
 type pinnedIdentity struct {
-	mu       sync.Mutex
-	file     *os.File
 	fileInfo os.FileInfo
-	identity Identity
 	err      error
+	file     *os.File
+	identity Identity
+	mu       sync.Mutex
 }
 
 // Current returns the identity of the exact executable inode running this

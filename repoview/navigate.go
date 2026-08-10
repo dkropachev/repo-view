@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/dkropachev/repo-view/internal/gitdiffcontract"
 )
 
 const (
@@ -556,13 +558,19 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	if err != nil {
 		return ChangedResponse{}, err
 	}
-	headCommit, err := r.gitText("rev-parse", "HEAD")
-	if err != nil {
-		return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
-	}
-	headSubject, err := r.gitText("show", "-s", "--format=%s", "HEAD")
-	if err != nil {
-		return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
+	var headCommit, headSubject string
+	if r.changedState != nil {
+		headCommit = r.changedState.HeadCommit
+		headSubject = r.changedState.HeadSubject
+	} else {
+		headCommit, err = r.gitText("rev-parse", "HEAD")
+		if err != nil {
+			return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
+		}
+		headSubject, err = r.gitText("show", "-s", "--format=%s", "HEAD")
+		if err != nil {
+			return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
+		}
 	}
 	files, err := r.changedFiles(baseCommit)
 	if err != nil {
@@ -605,7 +613,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		}
 		language = prepareLanguageBackend(language, lines)
 		rel = cleanRel
-		lineNumbers, err := r.changedLines(rel, baseCommit)
+		lineNumbers, err := r.changedLines(rel, baseCommit, len(lines))
 		if err != nil {
 			return ChangedResponse{}, err
 		}
@@ -1229,15 +1237,18 @@ func (r *RepoView) changedFileSet(opts Options) (map[string]bool, error) {
 }
 
 func (r *RepoView) changedFiles(base string) ([]string, error) {
+	if r.changedState != nil {
+		if base != r.changedState.BaseCommit {
+			return nil, errors.New("changed-state cache is not bound to the requested base")
+		}
+		files := make([]string, len(r.changedState.ChangedFiles))
+		for index, file := range r.changedState.ChangedFiles {
+			files[index] = file.Path
+		}
+		return files, nil
+	}
 	if base != "" {
-		return r.gitFileList(
-			"diff",
-			"--no-ext-diff",
-			"--no-textconv",
-			"--name-only",
-			"-z",
-			base+"...HEAD",
-		)
+		return r.gitFileList(gitdiffcontract.NameOnlyArguments(base, "HEAD")...)
 	}
 	commands := [][]string{
 		{"diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z"},
@@ -1270,7 +1281,30 @@ func (r *RepoView) changedPatch(
 	if len(files) == 0 {
 		return "", false, nil
 	}
+	if r.changedState != nil {
+		if base != r.changedState.BaseCommit {
+			return "", false, errors.New(
+				"changed-state cache is not bound to the requested base",
+			)
+		}
+		outputs := make([]string, 0, len(files))
+		for _, path := range files {
+			file, ok := r.changedState.file(path)
+			if !ok {
+				return "", false, fmt.Errorf(
+					"changed-state cache has no record for selected path %q",
+					path,
+				)
+			}
+			if file.Patch != "" {
+				outputs = append(outputs, strings.TrimRight(file.Patch, "\n"))
+			}
+		}
+		patch, truncated := truncatePatchLines(strings.Join(outputs, "\n"), maxLines)
+		return patch, truncated, nil
+	}
 	var outputs []string
+	aggregateOutputBytes := 0
 	commands := [][]string{{
 		"diff",
 		"--no-color",
@@ -1279,14 +1313,11 @@ func (r *RepoView) changedPatch(
 		"--find-renames",
 	}}
 	if base != "" {
-		commands = [][]string{{
-			"diff",
-			"--no-color",
-			"--no-ext-diff",
-			"--no-textconv",
-			"--find-renames",
-			base + "...HEAD",
-		}}
+		commands = nil
+		for _, file := range files {
+			arguments := gitdiffcontract.PatchArguments(base, "HEAD")
+			commands = append(commands, append(arguments, file))
+		}
 	} else {
 		commands = append(commands, []string{
 			"diff",
@@ -1298,11 +1329,25 @@ func (r *RepoView) changedPatch(
 		})
 	}
 	for _, args := range commands {
-		args = append(args, "--")
-		args = append(args, files...)
-		output, err := r.gitOutput(args...)
+		if base == "" {
+			args = append(args, "--")
+			args = append(args, files...)
+		}
+		var output []byte
+		var err error
+		if base != "" {
+			output, err = r.gitOutputLimit(maximumPerFilePatchBytes, args...)
+		} else {
+			output, err = r.gitOutput(args...)
+		}
 		if err != nil {
 			return "", false, fmt.Errorf("read changed patch: %w", err)
+		}
+		if base != "" {
+			if len(output) > maximumAggregatePatchBytes-aggregateOutputBytes {
+				return "", false, errors.New("changed patches exceed their aggregate limit")
+			}
+			aggregateOutputBytes += len(output)
 		}
 		if len(output) > 0 {
 			outputs = append(outputs, strings.TrimRight(string(output), "\n"))
@@ -1342,11 +1387,16 @@ func (r *RepoView) changedPatch(
 		}
 	}
 	patch := strings.Join(outputs, "\n")
+	truncatedPatch, truncated := truncatePatchLines(patch, maxLines)
+	return truncatedPatch, truncated, nil
+}
+
+func truncatePatchLines(patch string, maxLines int) (string, bool) {
 	lines := strings.Split(patch, "\n")
 	if maxLines > 0 && len(lines) > maxLines {
-		return strings.Join(lines[:maxLines], "\n"), true, nil
+		return strings.Join(lines[:maxLines], "\n"), true
 	}
-	return patch, false, nil
+	return patch, false
 }
 
 func (r *RepoView) gitFileList(args ...string) ([]string, error) {
@@ -1364,6 +1414,19 @@ func (r *RepoView) gitFileList(args ...string) ([]string, error) {
 }
 
 func (r *RepoView) resolveBase(base string) (string, error) {
+	if r.changedState != nil {
+		if base == "" {
+			return "", errors.New("changed-state cache mode requires its bound base commit")
+		}
+		if base != r.changedState.BaseCommit {
+			return "", fmt.Errorf(
+				"changed-state cache base is %s, not %s",
+				r.changedState.BaseCommit,
+				base,
+			)
+		}
+		return base, nil
+	}
 	if base == "" {
 		return "", nil
 	}
@@ -1387,10 +1450,20 @@ func (r *RepoView) resolveBase(base string) (string, error) {
 	return resolved, nil
 }
 
-// VerifyBaseCommit verifies that base names an existing ancestor of HEAD and
-// is already its canonical full object ID. It uses the pinned Git executable
-// when the view was constructed by NewWithGit.
+// VerifyBaseCommit verifies that base names the view's configured base. Git
+// views additionally prove that it is an existing ancestor of HEAD; cache
+// views rely on the independently authenticated cache binding.
 func (r *RepoView) VerifyBaseCommit(base string) error {
+	if r.changedState != nil {
+		if base != r.changedState.BaseCommit {
+			return fmt.Errorf(
+				"changed-state cache base is %s, not %s",
+				r.changedState.BaseCommit,
+				base,
+			)
+		}
+		return nil
+	}
 	resolved, err := r.resolveBase(base)
 	if err != nil {
 		return err
@@ -1409,23 +1482,66 @@ func (r *RepoView) gitText(args ...string) (string, error) {
 	return strings.TrimSpace(string(output)), err
 }
 
-func (r *RepoView) changedLines(rel, base string) ([]int, error) {
-	args := []string{
-		"diff",
-		"--no-color",
-		"--no-ext-diff",
-		"--no-textconv",
-		"--unified=0",
+func (r *RepoView) changedLines(rel, base string, sourceLineCount int) ([]int, error) {
+	if r.changedState != nil {
+		if base != r.changedState.BaseCommit {
+			return nil, errors.New("changed-state cache is not bound to the requested base")
+		}
+		file, ok := r.changedState.file(rel)
+		if !ok {
+			return nil, fmt.Errorf("changed-state cache has no record for path %q", rel)
+		}
+		count := 0
+		for _, span := range file.Lines {
+			if span.End > sourceLineCount {
+				return nil, fmt.Errorf(
+					"changed-state lines for %q exceed the configured HEAD source",
+					rel,
+				)
+			}
+			width := span.End - span.Start + 1
+			if width < 0 || width > maximumExpandedChangedLines-count {
+				return nil, errors.New("changed-state line expansion exceeds its limit")
+			}
+			count += width
+		}
+		lines := make([]int, 0, count)
+		for _, span := range file.Lines {
+			for line := span.Start; line <= span.End; line++ {
+				lines = append(lines, line)
+			}
+		}
+		return lines, nil
 	}
+	var args []string
 	if base != "" {
-		args = append(args, base+"...HEAD")
+		args = gitdiffcontract.ChangedLineArguments(base, "HEAD")
+		args = append(args, rel)
+	} else {
+		args = []string{
+			"diff",
+			"--no-color",
+			"--no-ext-diff",
+			"--no-textconv",
+			"--unified=0",
+			"--",
+			rel,
+		}
 	}
-	args = append(args, "--", rel)
-	output, err := r.gitOutput(args...)
+	var output []byte
+	var err error
+	if base != "" {
+		output, err = r.gitOutputLimit(maximumPerFilePatchBytes, args...)
+	} else {
+		output, err = r.gitOutput(args...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("read changed lines for %s: %w", rel, err)
 	}
-	lines := parseChangedLineNumbers(string(output))
+	lines, err := parseCanonicalChangedLineNumbers(output)
+	if err != nil {
+		return nil, fmt.Errorf("parse changed lines for %s: %w", rel, err)
+	}
 	if base == "" {
 		cachedArgs := []string{
 			"diff",
@@ -1441,7 +1557,11 @@ func (r *RepoView) changedLines(rel, base string) ([]int, error) {
 		if err != nil {
 			return nil, fmt.Errorf("read staged changed lines for %s: %w", rel, err)
 		}
-		lines = append(lines, parseChangedLineNumbers(string(cachedOutput))...)
+		cachedLines, parseErr := parseCanonicalChangedLineNumbers(cachedOutput)
+		if parseErr != nil {
+			return nil, fmt.Errorf("parse staged changed lines for %s: %w", rel, parseErr)
+		}
+		lines = append(lines, cachedLines...)
 	}
 	sort.Ints(lines)
 	return uniqueInts(lines), nil
@@ -1451,21 +1571,32 @@ func (r *RepoView) gitOutput(args ...string) ([]byte, error) {
 	return r.gitOutputContext(r.operationContext(), args...)
 }
 
+func (r *RepoView) gitOutputLimit(limit int, args ...string) ([]byte, error) {
+	return r.gitOutputContextLimit(r.operationContext(), limit, args...)
+}
+
 func (r *RepoView) gitOutputContext(
 	ctx context.Context,
 	args ...string,
+) ([]byte, error) {
+	return r.gitOutputContextLimit(ctx, maximumGitOutputBytes, args...)
+}
+
+func (r *RepoView) gitOutputContextLimit(
+	ctx context.Context,
+	limit int,
+	args ...string,
 ) (output []byte, resultErr error) {
+	if r.changedState != nil {
+		return nil, errors.New("git is disabled in changed-state cache mode")
+	}
+	if limit <= 0 || limit > maximumGitOutputBytes {
+		return nil, errors.New("git output limit is invalid")
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	safeArgs := []string{
-		"--literal-pathspecs",
-		"-c", "color.ui=false",
-		"-c", "core.fsmonitor=false",
-		"-c", "core.pager=cat",
-		"-c", "core.untrackedCache=false",
-		"-c", "diff.external=",
-	}
+	safeArgs := gitdiffcontract.InvocationPrefix()
 	safeArgs = append(safeArgs, args...)
 	var (
 		cmd       *exec.Cmd
@@ -1491,7 +1622,7 @@ func (r *RepoView) gitOutputContext(
 	}
 	cmd.Dir = r.root
 	cmd.Env = isolatedGitEnvironment()
-	stdout := &boundedOutputBuffer{limit: maximumGitOutputBytes}
+	stdout := &boundedOutputBuffer{limit: limit}
 	stderr := &boundedOutputBuffer{limit: maximumGitErrorBytes}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
@@ -1521,20 +1652,7 @@ func (r *RepoView) gitOutputContext(
 }
 
 func isolatedGitEnvironment() []string {
-	environment := []string{
-		"GIT_ATTR_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL=" + os.DevNull,
-		"GIT_CONFIG_SYSTEM=" + os.DevNull,
-		"GIT_CONFIG_NOSYSTEM=1",
-		"GIT_LITERAL_PATHSPECS=1",
-		"GIT_NO_REPLACE_OBJECTS=1",
-		"GIT_OPTIONAL_LOCKS=0",
-		"GIT_PAGER=cat",
-		"GIT_TERMINAL_PROMPT=0",
-		"LANG=C",
-		"LC_ALL=C",
-		"TZ=UTC",
-	}
+	environment := gitdiffcontract.Environment(os.DevNull)
 	if runtime.GOOS == "windows" {
 		if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
 			environment = append(environment, "SystemRoot="+systemRoot)
@@ -1543,29 +1661,34 @@ func isolatedGitEnvironment() []string {
 	return environment
 }
 
-func parseChangedLineNumbers(patch string) []int {
-	re := regexp.MustCompile(`(?m)^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`)
-	var lines []int
-	for _, match := range re.FindAllStringSubmatch(patch, -1) {
-		start, err := strconv.Atoi(match[1])
-		if err != nil {
-			continue
+func parseCanonicalChangedLineNumbers(patch []byte) ([]int, error) {
+	spans, err := gitdiffcontract.ParseChangedSpans(
+		patch,
+		maximumChangedSpansPerFile,
+		maximumChangedLine,
+	)
+	if err != nil {
+		return nil, err
+	}
+	count := 0
+	for _, span := range spans {
+		width := span.End - span.Start + 1
+		if width > maximumExpandedChangedLines-count {
+			return nil, errors.New("changed-line expansion exceeds its limit")
 		}
-		count := 1
-		if match[2] != "" {
-			count, err = strconv.Atoi(match[2])
-			if err != nil {
-				continue
-			}
-		}
-		if count == 0 {
-			lines = append(lines, max(1, start))
-			continue
-		}
-		for lineNo := start; lineNo < start+count; lineNo++ {
+		count += width
+	}
+	lines := make([]int, 0, count)
+	for _, span := range spans {
+		for lineNo := span.Start; lineNo <= span.End; lineNo++ {
 			lines = append(lines, lineNo)
 		}
 	}
+	return lines, nil
+}
+
+func parseChangedLineNumbers(patch string) []int {
+	lines, _ := parseCanonicalChangedLineNumbers([]byte(patch))
 	return lines
 }
 

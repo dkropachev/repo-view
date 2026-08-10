@@ -20,9 +20,13 @@ func TestParseCompletedResponseCommitsOrderedJSONLPayloads(t *testing.T) {
 		InputSchemaSHA256: strings.Repeat("2", 64),
 	}}
 	request := harnesscodex.ResponsesRequestTrace{
-		Model:                "gpt-5.4",
-		NonToolPayloadSHA256: strings.Repeat("3", 64),
-		Tools:                declarations,
+		Model:                               "gpt-5.4",
+		ExactBodySHA256:                     strings.Repeat("4", 64),
+		NonceNormalizedNonToolPayloadSHA256: strings.Repeat("3", 64),
+		Headers: harnesscodex.ProviderRequestHeadersTrace{
+			ReviewedSemanticSHA256: strings.Repeat("5", 64),
+		},
+		Tools: declarations,
 	}
 	providerOutputs := []any{
 		map[string]any{
@@ -93,7 +97,9 @@ func TestParseCompletedResponseCommitsOrderedJSONLPayloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.RequestNonToolPayloadSHA256 != request.NonToolPayloadSHA256 ||
+	if response.RequestNonceNormalizedNonToolPayloadSHA256 != request.NonceNormalizedNonToolPayloadSHA256 ||
+		response.RequestExactBodySHA256 != request.ExactBodySHA256 ||
+		response.RequestHeadersSHA256 != request.Headers.ReviewedSemanticSHA256 ||
 		response.RequestToolsSHA256 != toolsSHA256 {
 		t.Fatalf("request commitments = %#v", response)
 	}
@@ -113,6 +119,52 @@ func TestParseUsagePreservesPresentZeroTotalTokens(t *testing.T) {
 	}
 	if usage.InputTokens != 0 || usage.OutputTokens != 0 || total == nil || *total != 0 {
 		t.Fatalf("usage/total = %#v, %v", usage, total)
+	}
+}
+
+func TestTLSIdentitySetIncludesFailedResponseAttempts(t *testing.T) {
+	t.Parallel()
+	connection := harnesscodex.TLSConnectionTrace{
+		DNSName:              "api.openai.com",
+		VerifiedChainsSHA256: [][]string{{strings.Repeat("a", 64)}},
+		TLSVersion:           0x0304,
+	}
+	trace := harnesscodex.ResponsesTrace{
+		ResponseAttempts: []harnesscodex.ProviderResponseAttemptTrace{{
+			TLSConnections: []harnesscodex.TLSConnectionTrace{connection},
+		}},
+	}
+	identities, err := tlsIdentitySet(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(connection)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := bytesDigest(raw)
+	if len(identities) != 1 || identities[0] != want {
+		t.Fatalf("attempt TLS identities = %q, want [%q]", identities, want)
+	}
+	trace.Responses = []harnesscodex.ResponsesResponseTrace{{
+		TLSConnections: []harnesscodex.TLSConnectionTrace{connection},
+	}}
+	identities, err = tlsIdentitySet(trace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(identities) != 1 || identities[0] != want {
+		t.Fatalf("duplicate response TLS identity was not deduplicated: %q", identities)
+	}
+}
+
+func TestComparePairSnapshotsRejectsTLSModeDrift(t *testing.T) {
+	t.Parallel()
+	baseline := armSnapshot{trace: harnesscodex.ResponsesTrace{TLSRequired: false}}
+	candidate := armSnapshot{trace: harnesscodex.ResponsesTrace{TLSRequired: true}}
+	if err := comparePairSnapshots(baseline, candidate); err == nil ||
+		!strings.Contains(err.Error(), "TLS modes drifted") {
+		t.Fatalf("TLS mode drift error = %v", err)
 	}
 }
 
@@ -222,6 +274,7 @@ func TestParseOutputItemRejectsUnmappedProviderWire(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			if _, err := parseOutputItem(test.typeName, test.item); err == nil {
 				t.Fatal("parseOutputItem accepted unmapped provider output")
 			}

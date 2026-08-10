@@ -42,8 +42,11 @@ func ensurePrivateDirectory(parent *os.Root, name string) (*os.Root, os.FileInfo
 	// Sync even when a concurrent process created the directory. Its process
 	// may have stopped after mkdir and before making the parent entry durable.
 	if err := syncRoot(parent); err != nil {
-		directory.Close()
-		return nil, nil, fmt.Errorf("sync parent containing %s: %w", name, err)
+		return nil, nil, joinCloseError(
+			fmt.Errorf("sync parent containing %s: %w", name, err),
+			"close private directory after parent sync failure",
+			directory,
+		)
 	}
 	return directory, info, nil
 }
@@ -63,30 +66,48 @@ func openPrivateDirectory(parent *os.Root, name string) (*os.Root, os.FileInfo, 
 	}
 	opened, err := directory.Stat(".")
 	if err != nil {
-		directory.Close()
-		return nil, nil, fmt.Errorf("stat opened directory %s: %w", name, err)
+		return nil, nil, joinCloseError(
+			fmt.Errorf("stat opened directory %s: %w", name, err),
+			"close private directory after stat failure",
+			directory,
+		)
 	}
 	if err := validatePrivateDirectoryInfo(name, opened); err != nil {
-		directory.Close()
-		return nil, nil, err
+		return nil, nil, joinCloseError(
+			err,
+			"close invalid private directory",
+			directory,
+		)
 	}
 	if !os.SameFile(before, opened) {
-		directory.Close()
-		return nil, nil, fmt.Errorf("%w: directory %s changed while opening", ErrIntegrity, name)
+		return nil, nil, joinCloseError(
+			fmt.Errorf("%w: directory %s changed while opening", ErrIntegrity, name),
+			"close changed private directory",
+			directory,
+		)
 	}
 
 	current, err := parent.Lstat(name)
 	if err != nil {
-		directory.Close()
-		return nil, nil, fmt.Errorf("%w: re-lstat directory %s: %v", ErrIntegrity, name, err)
+		return nil, nil, joinCloseError(
+			fmt.Errorf("%w: re-lstat directory %s: %w", ErrIntegrity, name, err),
+			"close private directory after re-lstat failure",
+			directory,
+		)
 	}
 	if err := validatePrivateDirectoryInfo(name, current); err != nil {
-		directory.Close()
-		return nil, nil, err
+		return nil, nil, joinCloseError(
+			err,
+			"close revalidated private directory",
+			directory,
+		)
 	}
 	if !os.SameFile(opened, current) {
-		directory.Close()
-		return nil, nil, fmt.Errorf("%w: directory %s changed while opening", ErrIntegrity, name)
+		return nil, nil, joinCloseError(
+			fmt.Errorf("%w: directory %s changed while opening", ErrIntegrity, name),
+			"close changed private directory",
+			directory,
+		)
 	}
 	return directory, opened, nil
 }
@@ -113,13 +134,28 @@ func syncRoot(root *os.Root) error {
 		return fmt.Errorf("open directory for sync: %w", err)
 	}
 	if err := directory.Sync(); err != nil {
-		directory.Close()
-		return fmt.Errorf("sync directory: %w", err)
+		return joinCloseError(
+			fmt.Errorf("sync directory: %w", err),
+			"close directory after sync failure",
+			directory,
+		)
 	}
 	if err := directory.Close(); err != nil {
 		return fmt.Errorf("close synced directory: %w", err)
 	}
 	return nil
+}
+
+func joinCloseError(
+	resultErr error,
+	operation string,
+	closer interface{ Close() error },
+) error {
+	closeErr := wrapError(operation, closer.Close())
+	if closeErr == nil {
+		return resultErr
+	}
+	return errors.Join(resultErr, closeErr)
 }
 
 func openTransactionLock(staging *os.Root) (*os.File, os.FileInfo, error) {

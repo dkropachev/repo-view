@@ -20,7 +20,7 @@ import (
 func TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath(t *testing.T) {
 	manager, err := discoverCgroupManager(time.Second, false)
 	if err != nil {
-		t.Skipf("delegated cgroup-v2 fixture unavailable: %v", err)
+		privilegedTestUnavailable(t, "delegated cgroup-v2 fixture unavailable: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := manager.close(); err != nil {
@@ -28,7 +28,7 @@ func TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath(t *testing.T) {
 		}
 	})
 	var firstPath string
-	for iteration := 0; iteration < 2; iteration++ {
+	for iteration := range 2 {
 		arm, err := manager.newArm()
 		if err != nil {
 			t.Fatalf("newArm(%d): %v", iteration, err)
@@ -63,7 +63,7 @@ func TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath(t *testing.T) {
 func TestExecutorClosePreventsPrepareAndRemovesPairCgroup(t *testing.T) {
 	executor, err := New(Config{allowUnboundedContainment: true})
 	if err != nil {
-		t.Skipf("delegated cgroup-v2 fixture unavailable: %v", err)
+		privilegedTestUnavailable(t, "delegated cgroup-v2 fixture unavailable: %v", err)
 	}
 	pairPath := executor.containment.pairPath
 	prepared, err := executor.Prepare(context.Background(), helperRequest(t, "wait"))
@@ -90,7 +90,7 @@ func TestExecutorClosePreventsPrepareAndRemovesPairCgroup(t *testing.T) {
 func TestCgroupManagerCloseRetriesTransientHostRemoval(t *testing.T) {
 	manager, err := discoverCgroupManager(time.Second, false)
 	if err != nil {
-		t.Skipf("delegated cgroup-v2 fixture unavailable: %v", err)
+		privilegedTestUnavailable(t, "delegated cgroup-v2 fixture unavailable: %v", err)
 	}
 	t.Cleanup(func() {
 		manager.removeHost = manager.root.Remove
@@ -129,6 +129,49 @@ func TestCgroupManagerCloseRetriesTransientHostRemoval(t *testing.T) {
 			manager.hostCreated,
 			manager.lease == nil,
 		)
+	}
+}
+
+func TestArmCleanupRetriesTransientRemovalWithoutLosingInodePin(t *testing.T) {
+	manager, err := discoverCgroupManager(time.Second, false)
+	if err != nil {
+		privilegedTestUnavailable(t, "delegated cgroup-v2 fixture unavailable: %v", err)
+	}
+	t.Cleanup(func() {
+		manager.removeArm = manager.root.Remove
+		if err := manager.close(); err != nil {
+			t.Errorf("close cgroup manager: %v", err)
+		}
+	})
+	arm, err := manager.newArm()
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.removeArm = func(string) error { return unix.EBUSY }
+	if err := arm.killAndRemove(time.Nanosecond); !errors.Is(err, unix.EBUSY) {
+		t.Fatalf("first killAndRemove error = %v, want EBUSY", err)
+	}
+	arm.mu.Lock()
+	pinRetained := arm.directory != nil
+	cleaned := arm.cleaned
+	arm.mu.Unlock()
+	manager.mu.Lock()
+	_, active := manager.active[arm.name]
+	manager.mu.Unlock()
+	if !pinRetained || cleaned || !active {
+		t.Fatalf(
+			"failed cleanup lost retry state: pin=%v cleaned=%v active=%v",
+			pinRetained,
+			cleaned,
+			active,
+		)
+	}
+	manager.removeArm = manager.root.Remove
+	if err := arm.killAndRemove(time.Second); err != nil {
+		t.Fatalf("retry killAndRemove: %v", err)
+	}
+	if err := manager.close(); err != nil {
+		t.Fatalf("close after cleanup retry: %v", err)
 	}
 }
 
@@ -180,6 +223,7 @@ func TestCgroupCleanupKillsDescendantOnTimeoutAndCancellation(t *testing.T) {
 		{
 			name: "timeout",
 			run: func(t *testing.T, executor *Executor) harness.RawExecution {
+				t.Helper()
 				request := helperRequest(t, "spawn-escape-wait")
 				request.Process.TimeoutMillis = 100
 				raw, err := runPrepared(context.Background(), executor, request)
@@ -195,6 +239,7 @@ func TestCgroupCleanupKillsDescendantOnTimeoutAndCancellation(t *testing.T) {
 		{
 			name: "cancellation",
 			run: func(t *testing.T, executor *Executor) harness.RawExecution {
+				t.Helper()
 				ctx, cancel := context.WithCancel(context.Background())
 				time.AfterFunc(100*time.Millisecond, cancel)
 				raw, err := runPrepared(ctx, executor, helperRequest(t, "spawn-escape-wait"))
@@ -394,11 +439,11 @@ func fullPolicyTestConfig(
 	t.Helper()
 	loader, err := filepath.EvalSymlinks("/lib64/ld-linux-x86-64.so.2")
 	if err != nil {
-		t.Skipf("dynamic loader fixture unavailable: %v", err)
+		privilegedTestUnavailable(t, "dynamic loader fixture unavailable: %v", err)
 	}
 	libc, err := filepath.EvalSymlinks("/usr/lib/x86_64-linux-gnu/libc.so.6")
 	if err != nil {
-		t.Skipf("libc fixture unavailable: %v", err)
+		privilegedTestUnavailable(t, "libc fixture unavailable: %v", err)
 	}
 	readOnly := []string{request.Process.Directory, libc}
 	if _, err := os.Stat("/etc/ld.so.cache"); err == nil {
@@ -487,6 +532,11 @@ func TestArmInitTargetSecurityStateIsHonestAndFiltered(t *testing.T) {
 	if !strings.Contains(string(raw.Stdout), "Seccomp:\t2\n") {
 		t.Fatalf("target did not inherit seccomp filter mode: %s", raw.Stdout)
 	}
+	for _, field := range []string{"CapInh", "CapPrm", "CapEff", "CapBnd", "CapAmb"} {
+		if !strings.Contains(string(raw.Stdout), field+":\t0000000000000000\n") {
+			t.Fatalf("target retained Linux capabilities in %s: %s", field, raw.Stdout)
+		}
+	}
 }
 
 func newContainedTestExecutor(t *testing.T, lifecycle Lifecycle) *Executor {
@@ -500,7 +550,11 @@ func newContainedTestExecutorConfig(t *testing.T, config Config) *Executor {
 	config.allowUnboundedContainment = true
 	executor, err := New(config)
 	if err != nil {
-		t.Skipf("exclusive delegated cgroup-v2 fixture unavailable: %v", err)
+		privilegedTestUnavailable(
+			t,
+			"exclusive delegated cgroup-v2/Landlock fixture unavailable: %v",
+			err,
+		)
 	}
 	t.Cleanup(func() {
 		if err := executor.Close(context.Background()); err != nil {

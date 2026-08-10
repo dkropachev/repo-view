@@ -28,7 +28,7 @@ func TestIsolatedGitEnvironmentDoesNotInheritAmbientValues(t *testing.T) {
 		got[name] = value
 	}
 	for _, forbidden := range []string{
-		"PATH", "HOME", "LD_PRELOAD", "GIT_DIR", "GIT_CONFIG_COUNT",
+		"PATH", "LD_PRELOAD", "GIT_DIR", "GIT_CONFIG_COUNT",
 	} {
 		if _, ok := got[forbidden]; ok {
 			t.Fatalf("inherited forbidden environment variable %s", forbidden)
@@ -44,6 +44,7 @@ func TestIsolatedGitEnvironmentDoesNotInheritAmbientValues(t *testing.T) {
 		"GIT_OPTIONAL_LOCKS",
 		"GIT_PAGER",
 		"GIT_TERMINAL_PROMPT",
+		"HOME",
 		"LANG",
 		"LC_ALL",
 		"TZ",
@@ -52,7 +53,10 @@ func TestIsolatedGitEnvironmentDoesNotInheritAmbientValues(t *testing.T) {
 			t.Fatalf("missing deterministic environment variable %s", required)
 		}
 	}
-	wantCount := 12
+	if got["HOME"] != os.DevNull {
+		t.Fatalf("deterministic HOME = %q, want %q", got["HOME"], os.DevNull)
+	}
+	wantCount := 13
 	if runtime.GOOS == "windows" && os.Getenv("SystemRoot") != "" {
 		wantCount++
 	}

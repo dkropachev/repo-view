@@ -29,9 +29,10 @@ const (
 )
 
 type RepoView struct {
-	pinnedGit *gitExecutableIdentity
-	root      string
-	ctx       context.Context
+	ctx          context.Context
+	pinnedGit    *gitExecutableIdentity
+	changedState *ChangedStateCache
+	root         string
 }
 
 func New(root string) (*RepoView, error) {

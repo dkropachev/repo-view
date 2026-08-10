@@ -41,8 +41,8 @@ type turnStartedEvent struct {
 }
 
 type turnCompletedEvent struct {
-	Type  string     `json:"type"`
 	Usage *execUsage `json:"usage"`
+	Type  string     `json:"type"`
 }
 
 type threadError struct {
@@ -50,8 +50,8 @@ type threadError struct {
 }
 
 type turnFailedEvent struct {
-	Type  string       `json:"type"`
 	Error *threadError `json:"error"`
+	Type  string       `json:"type"`
 }
 
 type threadErrorEvent struct {
@@ -95,14 +95,14 @@ type mcpItemError struct {
 }
 
 type mcpItem struct {
+	Result    *mcpItemResult  `json:"result"`
+	Error     *mcpItemError   `json:"error"`
 	ID        string          `json:"id"`
 	Type      string          `json:"type"`
 	Server    string          `json:"server"`
 	Tool      string          `json:"tool"`
-	Arguments json.RawMessage `json:"arguments"`
-	Result    *mcpItemResult  `json:"result"`
-	Error     *mcpItemError   `json:"error"`
 	Status    string          `json:"status"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 type itemState struct {
@@ -131,19 +131,19 @@ type execOutput struct {
 
 type execDecoded struct {
 	finalAnswer string
-	usage       harness.Usage
 	toolCalls   []execCall
 	outputs     []execOutput
+	usage       harness.Usage
 }
 
 type execDecoder struct {
 	items       map[string]itemState
+	finalAnswer string
 	toolCalls   []execCall
 	outputs     []execOutput
-	finalAnswer string
+	usage       harness.Usage
 	eventCount  int
 	phase       int
-	usage       harness.Usage
 }
 
 // Decode implements harness.Adapter. It requires successful bounded process
@@ -162,27 +162,27 @@ func (adapter *Adapter) Decode(
 	}
 	switch {
 	case execution.LaunchFailed:
-		return harness.Observation{}, errors.New("Codex execution could not be launched")
+		return harness.Observation{}, errors.New("codex execution could not be launched")
 	case execution.TimedOut:
-		return harness.Observation{}, errors.New("Codex execution timed out")
+		return harness.Observation{}, errors.New("codex execution timed out")
 	case execution.Cancelled:
-		return harness.Observation{}, errors.New("Codex execution was cancelled")
+		return harness.Observation{}, errors.New("codex execution was cancelled")
 	case execution.StdoutTruncated:
-		return harness.Observation{}, errors.New("Codex stdout was truncated")
+		return harness.Observation{}, errors.New("codex stdout was truncated")
 	case execution.StderrTruncated:
-		return harness.Observation{}, errors.New("Codex stderr was truncated")
+		return harness.Observation{}, errors.New("codex stderr was truncated")
 	case execution.ExitCode != 0:
-		return harness.Observation{}, fmt.Errorf("Codex execution exited with status %d", execution.ExitCode)
+		return harness.Observation{}, fmt.Errorf("codex execution exited with status %d", execution.ExitCode)
 	case len(execution.Stderr) != 0:
-		return harness.Observation{}, errors.New("Codex execution wrote to stderr")
+		return harness.Observation{}, errors.New("codex execution wrote to stderr")
 	case len(execution.Stdout) == 0:
-		return harness.Observation{}, errors.New("Codex execution wrote no JSONL")
+		return harness.Observation{}, errors.New("codex execution wrote no JSONL")
 	case len(execution.Stdout) > maxJSONLBytes:
-		return harness.Observation{}, errors.New("Codex JSONL exceeds its byte limit")
+		return harness.Observation{}, errors.New("codex JSONL exceeds its byte limit")
 	case !utf8.Valid(execution.Stdout):
-		return harness.Observation{}, errors.New("Codex JSONL must be valid UTF-8")
+		return harness.Observation{}, errors.New("codex JSONL must be valid UTF-8")
 	case execution.Stdout[len(execution.Stdout)-1] != '\n':
-		return harness.Observation{}, errors.New("Codex JSONL must end with a newline")
+		return harness.Observation{}, errors.New("codex JSONL must end with a newline")
 	}
 
 	trace, err := decodeArtifacts(execution.Artifacts)
@@ -195,13 +195,13 @@ func (adapter *Adapter) Decode(
 	}
 	if execOutput.usage != trace.usage {
 		return harness.Observation{}, fmt.Errorf(
-			"Codex JSONL usage %+v differs from provider usage %+v",
+			"codex JSONL usage %+v differs from provider usage %+v",
 			execOutput.usage, trace.usage,
 		)
 	}
 	if len(execOutput.outputs) != len(trace.outputs) {
 		return harness.Observation{}, fmt.Errorf(
-			"Codex JSONL reported %d mapped output items but provider trace reported %d",
+			"codex JSONL reported %d mapped output items but provider trace reported %d",
 			len(execOutput.outputs), len(trace.outputs),
 		)
 	}
@@ -210,7 +210,7 @@ func (adapter *Adapter) Decode(
 		if observed.typeName != claimed.Type || observed.kind != claimed.Kind ||
 			observed.name != claimed.Name || observed.payloadSHA256 != claimed.PayloadSHA256 {
 			return harness.Observation{}, fmt.Errorf(
-				"Codex output item %d differs between JSONL and provider trace",
+				"codex output item %d differs between JSONL and provider trace",
 				index,
 			)
 		}
@@ -242,31 +242,31 @@ func decodeExecJSONL(ctx context.Context, raw []byte) (execDecoded, error) {
 		line := scanner.Bytes()
 		decoder.eventCount++
 		if decoder.eventCount > maxJSONLEvents {
-			return execDecoded{}, errors.New("Codex JSONL exceeds its event limit")
+			return execDecoded{}, errors.New("codex JSONL exceeds its event limit")
 		}
 		if len(bytes.TrimSpace(line)) == 0 {
-			return execDecoded{}, fmt.Errorf("Codex JSONL event %d is blank", decoder.eventCount)
+			return execDecoded{}, fmt.Errorf("codex JSONL event %d is blank", decoder.eventCount)
 		}
 		if err := decoder.consume(line); err != nil {
-			return execDecoded{}, fmt.Errorf("Codex JSONL event %d: %w", decoder.eventCount, err)
+			return execDecoded{}, fmt.Errorf("codex JSONL event %d: %w", decoder.eventCount, err)
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return execDecoded{}, fmt.Errorf("scan Codex JSONL: %w", err)
 	}
 	if decoder.phase != 3 {
-		return execDecoded{}, errors.New("Codex JSONL did not complete its turn")
+		return execDecoded{}, errors.New("codex JSONL did not complete its turn")
 	}
 	if decoder.finalAnswer == "" {
-		return execDecoded{}, errors.New("Codex JSONL omitted a nonempty final answer")
+		return execDecoded{}, errors.New("codex JSONL omitted a nonempty final answer")
 	}
 	for id, item := range decoder.items {
 		if item.started && !item.completed {
-			return execDecoded{}, fmt.Errorf("Codex JSONL item %q did not complete", id)
+			return execDecoded{}, fmt.Errorf("codex JSONL item %q did not complete", id)
 		}
 	}
 	if err := harness.ValidateUsage(decoder.usage); err != nil {
-		return execDecoded{}, fmt.Errorf("Codex JSONL usage: %w", err)
+		return execDecoded{}, fmt.Errorf("codex JSONL usage: %w", err)
 	}
 	return execDecoded{
 		finalAnswer: decoder.finalAnswer,
@@ -349,7 +349,7 @@ func (decoder *execDecoder) consume(line []byte) error {
 		if event.Error == nil || !validText(event.Error.Message) || event.Error.Message == "" {
 			return errors.New("turn.failed omitted a valid error")
 		}
-		return errors.New("Codex turn.failed")
+		return errors.New("codex turn.failed")
 	case "error":
 		var event threadErrorEvent
 		if err := strictUnmarshalJSON(line, &event); err != nil {
@@ -358,7 +358,7 @@ func (decoder *execDecoder) consume(line []byte) error {
 		if !validText(event.Message) || event.Message == "" {
 			return errors.New("error event omitted a valid message")
 		}
-		return errors.New("Codex emitted a fatal error event")
+		return errors.New("codex emitted a fatal error event")
 	case "item.started", "item.updated", "item.completed":
 		if decoder.phase != 2 {
 			return errors.New("item event appeared outside the active turn")
@@ -539,7 +539,7 @@ func parseItem(raw json.RawMessage, typeName, phase string) (itemState, error) {
 			return itemState{}, err
 		}
 		if len(item.Arguments) == 0 {
-			return itemState{}, errors.New("MCP tool call omitted arguments")
+			return itemState{}, errors.New("mcp tool call omitted arguments")
 		}
 		toolKind, err := validateMCPItemIdentity(item)
 		if err != nil {
@@ -573,7 +573,7 @@ func parseItem(raw json.RawMessage, typeName, phase string) (itemState, error) {
 					return itemState{}, errors.New("failed MCP tool call has an invalid error")
 				}
 			default:
-				return itemState{}, fmt.Errorf("MCP tool call has invalid terminal status %q", item.Status)
+				return itemState{}, fmt.Errorf("mcp tool call has invalid terminal status %q", item.Status)
 			}
 		}
 		state.toolKind = toolKind
@@ -611,7 +611,7 @@ func validateMCPItemIdentity(item mcpItem) (string, error) {
 		if raw, exists := arguments["server"]; exists {
 			server, err = requiredRawString(raw, "server")
 			if err != nil || server != "repo_view" {
-				return "", errors.New("MCP support list call has an invalid server argument")
+				return "", errors.New("mcp support list call has an invalid server argument")
 			}
 		}
 		if raw, exists := arguments["cursor"]; exists {
@@ -624,7 +624,7 @@ func validateMCPItemIdentity(item mcpItem) (string, error) {
 			wantedEventServer = server
 		}
 		if item.Server != wantedEventServer {
-			return "", errors.New("MCP support list event server disagrees with its arguments")
+			return "", errors.New("mcp support list event server disagrees with its arguments")
 		}
 	case "read_mcp_resource":
 		if err := exactRawKeys(arguments, "server", "uri"); err != nil {
@@ -654,7 +654,7 @@ func mcpArgumentObject(raw json.RawMessage) (map[string]json.RawMessage, error) 
 		return nil, fmt.Errorf("decode MCP support arguments: %w", err)
 	}
 	if object == nil {
-		return nil, errors.New("MCP support arguments must be an object")
+		return nil, errors.New("mcp support arguments must be an object")
 	}
 	return object, nil
 }
@@ -674,11 +674,11 @@ func exactRawKeys(object map[string]json.RawMessage, allowed ...string) error {
 
 func requiredRawString(raw json.RawMessage, name string) (string, error) {
 	if len(raw) == 0 || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
-		return "", fmt.Errorf("MCP support argument %q must be nonempty text", name)
+		return "", fmt.Errorf("mcp support argument %q must be nonempty text", name)
 	}
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil || value == "" || !validText(value) {
-		return "", fmt.Errorf("MCP support argument %q must be nonempty text", name)
+		return "", fmt.Errorf("mcp support argument %q must be nonempty text", name)
 	}
 	return value, nil
 }
@@ -694,15 +694,15 @@ func execCommandArguments(command string) ([]byte, error) {
 		return nil, fmt.Errorf("decode Codex command display: %w", err)
 	}
 	if len(argv) != 3 || argv[1] != "-c" {
-		return nil, errors.New("Codex command display is not the pinned non-login shell form")
+		return nil, errors.New("codex command display is not the pinned non-login shell form")
 	}
 	if !filepath.IsAbs(argv[0]) || filepath.Clean(argv[0]) != argv[0] ||
 		!validText(argv[0]) || argv[2] == "" || !validText(argv[2]) {
-		return nil, errors.New("Codex command display contains an invalid shell or command")
+		return nil, errors.New("codex command display contains an invalid shell or command")
 	}
 	joined, err := joinShlex(argv)
 	if err != nil || joined != command {
-		return nil, errors.New("Codex command display is not canonical shlex 1.3.0 output")
+		return nil, errors.New("codex command display is not canonical shlex 1.3.0 output")
 	}
 	arguments, err := json.Marshal(map[string]any{"cmd": argv[2]})
 	if err != nil {
@@ -840,7 +840,7 @@ func quoteShlex(value string) (string, error) {
 			result.WriteByte('\'')
 		case allowed&quoteDouble != 0:
 			result.WriteByte('"')
-			for chunkIndex := 0; chunkIndex < len(chunk); chunkIndex++ {
+			for chunkIndex := range len(chunk) {
 				character := chunk[chunkIndex]
 				if character == '$' || character == '`' || character == '"' || character == '\\' {
 					result.WriteByte('\\')

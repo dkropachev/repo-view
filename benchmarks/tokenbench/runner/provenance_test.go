@@ -3,6 +3,7 @@ package runner_test
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -14,7 +15,7 @@ import (
 type fakeLifecycle struct{}
 
 func (fakeLifecycle) Identity() string {
-	return "tokenbench.codex-runner/codex-cli-v0.144.0/v1/sha256:" +
+	return "tokenbench.codex-runner/codex-cli-v0.144.0/v2/sha256:" +
 		"0000000000000000000000000000000000000000000000000000000000000000"
 }
 
@@ -49,6 +50,7 @@ func TestOnlyConcreteBuiltInCodexLifecycleIsPublishable(t *testing.T) {
 	}
 	lifecycle, err := runnercodex.NewProduction(runnercodex.ProductionConfig{
 		StateRoot:          stateRoot,
+		ToolboxRoot:        filepath.Join(t.TempDir(), "toolbox"),
 		UpstreamCredential: "offline-provenance-test-credential",
 		UpstreamTimeout:    30 * time.Second,
 	})
@@ -73,6 +75,9 @@ func TestOnlyConcreteBuiltInCodexLifecycleIsPublishable(t *testing.T) {
 	if err != nil {
 		if !strings.Contains(err.Error(), "initialize runner cgroup containment") {
 			t.Fatalf("runner.NewConformant(): %v", err)
+		}
+		if os.Getenv("TOKENBENCH_REQUIRE_PRIVILEGED_TESTS") == "1" {
+			t.Fatalf("required conformant cgroup-v2 containment unavailable: %v", err)
 		}
 		// Normal CI need not provide an exclusive, bounded cgroup delegation.
 		// Reaching this stage proves the exact production lifecycle passed the
@@ -106,6 +111,7 @@ func TestConcreteNonProductionCodexLifecycleIsNotPublishable(t *testing.T) {
 	}
 	lifecycle, err := runnercodex.New(runnercodex.Config{
 		StateRoot:          stateRoot,
+		ToolboxRoot:        filepath.Join(t.TempDir(), "toolbox"),
 		UpstreamURL:        "https://example.invalid",
 		UpstreamCredential: "offline-nonproduction-test-credential",
 		UpstreamTimeout:    30 * time.Second,

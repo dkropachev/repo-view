@@ -13,6 +13,7 @@ import (
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
+	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
 )
 
@@ -27,6 +28,60 @@ func TestCurrentRunnerIdentityUsesPinnedRunningImage(t *testing.T) {
 	}
 	if path != want.Path || digest != want.SHA256 {
 		t.Fatalf("currentRunnerIdentity() = (%q, %q), want (%q, %q)", path, digest, want.Path, want.SHA256)
+	}
+}
+
+func TestPreparedExecutionInputsRequiresLiveAuthority(t *testing.T) {
+	if _, err := (*PreparedExecution)(nil).Inputs(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "live prepared execution") {
+		t.Fatalf("nil PreparedExecution.Inputs() = %v", err)
+	}
+	prepared := &PreparedExecution{}
+	//nolint:staticcheck // This assertion deliberately exercises the nil-context rejection boundary.
+	if _, err := prepared.Inputs(nil); err == nil || !strings.Contains(err.Error(), "context") {
+		t.Fatalf("PreparedExecution.Inputs(nil) = %v", err)
+	}
+}
+
+func TestCloneExactPreparedInputsRejectsDriftAndDefensivelyClones(t *testing.T) {
+	expected := executionsnapshot.ExecutionInputs{
+		ReadOnlyPaths:   []string{"/snapshot/source"},
+		ExecutablePaths: []string{"/snapshot/tool"},
+		ChangedStateCache: executionsnapshot.ChangedStateCache{
+			ChangedFiles: []executionsnapshot.ChangedFileState{},
+		},
+		Manifest: []executionsnapshot.ManifestEntry{{
+			SnapshotPath: "/snapshot/tool",
+			ELF:          &executionsnapshot.ELFIdentity{Needed: []string{}},
+		}},
+	}
+	live := expected.Clone()
+	result, err := cloneExactPreparedInputs(expected, live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.ReadOnlyPaths[0] = "/changed"
+	result.Manifest[0].ELF.Needed = append(result.Manifest[0].ELF.Needed, "changed")
+	if expected.ReadOnlyPaths[0] == "/changed" || len(expected.Manifest[0].ELF.Needed) != 0 {
+		t.Fatal("prepared execution inputs share mutable storage")
+	}
+	live.ExecutablePaths[0] = "/different"
+	if _, err := cloneExactPreparedInputs(expected, live); err == nil ||
+		!strings.Contains(err.Error(), "differs") {
+		t.Fatalf("drifted live inputs = %v", err)
+	}
+}
+
+func TestPlanByteCeilingIsSharedByConstructionAndDecode(t *testing.T) {
+	if err := validatePlanByteLength(MaximumPlanObjectBytes); err != nil {
+		t.Fatalf("exact plan ceiling rejected: %v", err)
+	}
+	if err := validatePlanByteLength(MaximumPlanObjectBytes + 1); err == nil {
+		t.Fatal("oversized plan length was accepted")
+	}
+	if _, err := DecodePlan(make([]byte, MaximumPlanObjectBytes+1)); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized encoded plan was not rejected before decoding: %v", err)
 	}
 }
 
@@ -595,26 +650,27 @@ func buildReadyPair(t *testing.T, adapter harness.Adapter) (Pair, string) {
 	prompt := []byte("Explain the change.\n")
 	loaded := LoadedSuite{
 		suite: Suite{
-			SchemaVersion:         SuiteSchemaVersion,
-			ID:                    "build-fixture",
-			PromptFile:            filepath.Join(directory, "prompt.md"),
-			HarnessKind:           adapter.Kind(),
-			HarnessExecutable:     harnessPath,
-			HarnessSHA256:         SHA256([]byte("harness")),
-			GitExecutable:         gitExecutable,
-			GitExecutableSHA256:   gitSHA256,
-			Model:                 "fixed-model",
-			ExpectedModelRevision: "fixed-model@2026-08-01",
-			ReasoningEffort:       "medium",
-			PermissionProfile:     "read-only",
-			DeveloperInstructions: "common instructions",
-			SourceRoot:            root,
-			SourceRevision:        revision,
-			SourceBaseRevision:    base,
-			SourceTreeSHA256:      treeSHA256,
-			TimeoutMillis:         30_000,
-			Repetitions:           2,
-			Seed:                  1,
+			SchemaVersion:          SuiteSchemaVersion,
+			ID:                     "build-fixture",
+			PromptFile:             filepath.Join(directory, "prompt.md"),
+			HarnessKind:            adapter.Kind(),
+			HarnessExecutable:      harnessPath,
+			HarnessSHA256:          SHA256([]byte("harness")),
+			ArtifactManifestSHA256: SHA256([]byte("artifact-manifest")),
+			GitExecutable:          gitExecutable,
+			GitExecutableSHA256:    gitSHA256,
+			Model:                  "fixed-model",
+			ExpectedModelRevision:  "fixed-model@2026-08-01",
+			ReasoningEffort:        "medium",
+			PermissionProfile:      "read-only",
+			DeveloperInstructions:  "common instructions",
+			SourceRoot:             root,
+			SourceRevision:         revision,
+			SourceBaseRevision:     base,
+			SourceTreeSHA256:       treeSHA256,
+			TimeoutMillis:          30_000,
+			Repetitions:            2,
+			Seed:                   1,
 		},
 		path:         filepath.Join(directory, "suite.json"),
 		prompt:       prompt,
@@ -803,26 +859,27 @@ func validLoadedSuite() LoadedSuite {
 	prompt := []byte("Explain the change.\n")
 	loaded := LoadedSuite{
 		suite: Suite{
-			SchemaVersion:         SuiteSchemaVersion,
-			ID:                    "fixture",
-			PromptFile:            "/suite/prompt.md",
-			HarnessKind:           "fake",
-			HarnessExecutable:     "/tools/fake-harness",
-			HarnessSHA256:         SHA256([]byte("harness")),
-			GitExecutable:         "/usr/bin/git",
-			GitExecutableSHA256:   SHA256([]byte("git")),
-			Model:                 "gpt-5.2-codex",
-			ExpectedModelRevision: "gpt-5.2-codex@2026-08-01",
-			ReasoningEffort:       "medium",
-			PermissionProfile:     "read-only",
-			DeveloperInstructions: "Answer using repository evidence.",
-			SourceRoot:            "/source",
-			SourceRevision:        strings.Repeat("1", 40),
-			SourceBaseRevision:    strings.Repeat("0", 40),
-			SourceTreeSHA256:      SHA256([]byte("tree")),
-			TimeoutMillis:         60_000,
-			Repetitions:           10,
-			Seed:                  42,
+			SchemaVersion:          SuiteSchemaVersion,
+			ID:                     "fixture",
+			PromptFile:             "/suite/prompt.md",
+			HarnessKind:            "fake",
+			HarnessExecutable:      "/tools/fake-harness",
+			HarnessSHA256:          SHA256([]byte("harness")),
+			ArtifactManifestSHA256: SHA256([]byte("artifact-manifest")),
+			GitExecutable:          "/usr/bin/git",
+			GitExecutableSHA256:    SHA256([]byte("git")),
+			Model:                  "gpt-5.2-codex",
+			ExpectedModelRevision:  "gpt-5.2-codex@2026-08-01",
+			ReasoningEffort:        "medium",
+			PermissionProfile:      "read-only",
+			DeveloperInstructions:  "Answer using repository evidence.",
+			SourceRoot:             "/source",
+			SourceRevision:         strings.Repeat("1", 40),
+			SourceBaseRevision:     strings.Repeat("0", 40),
+			SourceTreeSHA256:       SHA256([]byte("tree")),
+			TimeoutMillis:          60_000,
+			Repetitions:            10,
+			Seed:                   42,
 		},
 		path:         "/suite/suite.json",
 		prompt:       prompt,

@@ -16,8 +16,8 @@ type staleTransaction struct {
 }
 
 type staleObject struct {
-	name string
 	info os.FileInfo
+	name string
 }
 
 // RecoverStale removes transaction directories abandoned by processes that no
@@ -25,7 +25,7 @@ type staleObject struct {
 // if any transaction is active, it returns ErrTransactionsActive without
 // scanning or removing staging entries. Recovery validates every entry before
 // deleting any of them and refuses unrecognized names or filesystem objects.
-func (store *Store) RecoverStale() error {
+func (store *Store) RecoverStale() (resultErr error) {
 	store.stateMu.RLock()
 	defer store.stateMu.RUnlock()
 	if store.closed {
@@ -39,27 +39,41 @@ func (store *Store) RecoverStale() error {
 	if err != nil {
 		return err
 	}
-	defer staging.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close CAS staging after recovery", staging)
+	}()
 	lock, lockInfo, err := openTransactionLock(staging)
 	if err != nil {
 		return err
 	}
 	if !sameFilesystem(stagingInfo, lockInfo) {
-		lock.Close()
-		return errors.New("CAS transaction lock is not on the staging filesystem")
+		return joinCloseError(
+			errors.New("CAS transaction lock is not on the staging filesystem"),
+			"close misplaced CAS transaction lock",
+			lock,
+		)
 	}
 	locked, err := tryLockTransactionExclusive(lock)
 	if err != nil {
-		lock.Close()
-		return fmt.Errorf("lock stale CAS recovery: %w", err)
+		return joinCloseError(
+			fmt.Errorf("lock stale CAS recovery: %w", err),
+			"close CAS transaction lock after lock failure",
+			lock,
+		)
 	}
 	if !locked {
-		lock.Close()
-		return ErrTransactionsActive
+		return joinCloseError(
+			ErrTransactionsActive,
+			"close active CAS transaction lock probe",
+			lock,
+		)
 	}
 	defer func() {
-		unlockTransaction(lock)
-		lock.Close()
+		resultErr = errors.Join(
+			resultErr,
+			wrapError("unlock stale CAS recovery", unlockTransaction(lock)),
+			wrapError("close stale CAS recovery lock", lock.Close()),
+		)
 	}()
 	if err := validateCanonicalTransactionLock(staging, lockInfo); err != nil {
 		return err
@@ -108,33 +122,48 @@ func (store *Store) inspectStaleTransactions(
 			return nil, err
 		}
 		if !sameFilesystem(stagingInfo, transactionInfo) {
-			transactionRoot.Close()
-			return nil, fmt.Errorf("%w: stale transaction is on another filesystem", ErrIntegrity)
+			return nil, joinCloseError(
+				fmt.Errorf("%w: stale transaction is on another filesystem", ErrIntegrity),
+				"close stale transaction on another filesystem",
+				transactionRoot,
+			)
 		}
 		objectNames, err := rootEntryNames(transactionRoot, hardMaxStaleObjects)
 		if err != nil {
-			transactionRoot.Close()
-			return nil, fmt.Errorf("list stale transaction %s: %w", name, err)
+			return nil, joinCloseError(
+				fmt.Errorf("list stale transaction %s: %w", name, err),
+				"close stale transaction after listing failure",
+				transactionRoot,
+			)
 		}
 		transaction := staleTransaction{name: name, info: transactionInfo}
 		for _, objectName := range objectNames {
 			if !validRandomEntryName(objectName, "object-") {
-				transactionRoot.Close()
-				return nil, fmt.Errorf(
-					"%w: unrecognized entry %q in stale transaction %s",
-					ErrIntegrity,
-					objectName,
-					name,
+				return nil, joinCloseError(
+					fmt.Errorf(
+						"%w: unrecognized entry %q in stale transaction %s",
+						ErrIntegrity,
+						objectName,
+						name,
+					),
+					"close stale transaction containing unrecognized entry",
+					transactionRoot,
 				)
 			}
 			objectInfo, err := transactionRoot.Lstat(objectName)
 			if err != nil {
-				transactionRoot.Close()
-				return nil, fmt.Errorf("lstat stale transaction object: %w", err)
+				return nil, joinCloseError(
+					fmt.Errorf("lstat stale transaction object: %w", err),
+					"close stale transaction after object lstat failure",
+					transactionRoot,
+				)
 			}
 			if err := store.validateStaleObject(objectName, objectInfo, transactionInfo); err != nil {
-				transactionRoot.Close()
-				return nil, err
+				return nil, joinCloseError(
+					err,
+					"close stale transaction containing invalid object",
+					transactionRoot,
+				)
 			}
 			transaction.objects = append(transaction.objects, staleObject{
 				name: objectName,
@@ -154,15 +183,18 @@ func (store *Store) removeStaleTransaction(
 	transaction staleTransaction,
 ) error {
 	transactionRoot, transactionInfo, err := openPrivateDirectory(staging, transaction.name)
-	if errors.Is(err, fs.ErrNotExist) {
+	if benignStaleTransactionAbsence(err) {
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if !os.SameFile(transaction.info, transactionInfo) {
-		transactionRoot.Close()
-		return fmt.Errorf("%w: stale transaction changed before cleanup", ErrIntegrity)
+		return joinCloseError(
+			fmt.Errorf("%w: stale transaction changed before cleanup", ErrIntegrity),
+			"close changed stale transaction",
+			transactionRoot,
+		)
 	}
 	for _, object := range transaction.objects {
 		current, err := transactionRoot.Lstat(object.name)
@@ -170,21 +202,36 @@ func (store *Store) removeStaleTransaction(
 			continue
 		}
 		if err != nil || !os.SameFile(object.info, current) {
-			transactionRoot.Close()
-			return fmt.Errorf("%w: stale object %s changed before cleanup", ErrIntegrity, object.name)
+			return joinCloseError(
+				errors.Join(
+					fmt.Errorf("%w: stale object %s changed before cleanup", ErrIntegrity, object.name),
+					err,
+				),
+				"close stale transaction containing changed object",
+				transactionRoot,
+			)
 		}
 		if err := store.validateStaleObject(object.name, current, transactionInfo); err != nil {
-			transactionRoot.Close()
-			return err
+			return joinCloseError(
+				err,
+				"close stale transaction containing invalid object",
+				transactionRoot,
+			)
 		}
 		if err := transactionRoot.Remove(object.name); err != nil {
-			transactionRoot.Close()
-			return fmt.Errorf("remove stale object %s: %w", object.name, err)
+			return joinCloseError(
+				fmt.Errorf("remove stale object %s: %w", object.name, err),
+				"close stale transaction after removal failure",
+				transactionRoot,
+			)
 		}
 	}
 	if err := syncRoot(transactionRoot); err != nil {
-		transactionRoot.Close()
-		return fmt.Errorf("sync stale transaction cleanup: %w", err)
+		return joinCloseError(
+			fmt.Errorf("sync stale transaction cleanup: %w", err),
+			"close stale transaction after sync failure",
+			transactionRoot,
+		)
 	}
 	if err := transactionRoot.Close(); err != nil {
 		return fmt.Errorf("close stale transaction cleanup root: %w", err)
@@ -211,6 +258,10 @@ func (store *Store) validateStaleObject(
 		return fmt.Errorf("%w: stale object %s is on another filesystem", ErrIntegrity, name)
 	}
 	return nil
+}
+
+func benignStaleTransactionAbsence(err error) bool {
+	return errors.Is(err, fs.ErrNotExist) && !errors.Is(err, ErrIntegrity)
 }
 
 func rootEntryNames(root *os.Root, maximum int) ([]string, error) {

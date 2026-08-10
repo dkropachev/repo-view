@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -23,24 +24,27 @@ const (
 	OfflineLocalProxyCapability = harness.OfflineLocalProxyCapability
 
 	responsesPath = "/v1/responses"
-	layoutSchema  = "tokenbench.codex-runtime-layout/v2"
+	layoutSchema  = "tokenbench.codex-runtime-layout/v3"
 )
 
 // RuntimeLayout is the code-owned, publishable launch layout shared by the
-// Codex adapter and lifecycle. All values are identical for both arms.
+// Codex adapter and lifecycle. ToolboxRoot is the sole PATH directory and is
+// disjoint from all writable runtime directories. All values are identical for
+// both arms.
 type RuntimeLayout struct {
 	ProxyURL             string `json:"proxy_url"`
 	Home                 string `json:"home"`
 	CodexHome            string `json:"codex_home"`
 	Temp                 string `json:"temp"`
 	ConfigLock           string `json:"config_lock"`
+	ToolboxRoot          string `json:"toolbox_root"`
 	LocalProxyCapability string `json:"local_proxy_capability"`
 }
 
 // Validate checks the exact v0.144.0 runtime layout contract.
 func (layout RuntimeLayout) Validate() error {
 	if !harness.ValidLocalProxyCapability(layout.LocalProxyCapability) {
-		return errors.New("Codex runtime local proxy capability is not canonical")
+		return errors.New("codex runtime local proxy capability is not canonical")
 	}
 	proxy, err := url.Parse(layout.ProxyURL)
 	if err != nil {
@@ -49,10 +53,10 @@ func (layout RuntimeLayout) Validate() error {
 	if proxy.Scheme != "http" || proxy.Hostname() != "127.0.0.1" ||
 		proxy.Port() == "" || proxy.Path != "/v1" || proxy.RawPath != "" ||
 		proxy.RawQuery != "" || proxy.Fragment != "" || proxy.User != nil {
-		return errors.New("Codex proxy URL must be canonical http://127.0.0.1:PORT/v1")
+		return errors.New("codex proxy URL must be canonical http://127.0.0.1:PORT/v1")
 	}
 	if canonical := "http://" + net.JoinHostPort(proxy.Hostname(), proxy.Port()) + "/v1"; layout.ProxyURL != canonical {
-		return fmt.Errorf("Codex proxy URL is not canonical: got %q, want %q", layout.ProxyURL, canonical)
+		return fmt.Errorf("codex proxy URL is not canonical: got %q, want %q", layout.ProxyURL, canonical)
 	}
 
 	paths := []struct {
@@ -63,18 +67,22 @@ func (layout RuntimeLayout) Validate() error {
 		{"CODEX_HOME", layout.CodexHome},
 		{"TMPDIR", layout.Temp},
 		{"config lock", layout.ConfigLock},
+		{"PATH toolbox", layout.ToolboxRoot},
 	}
 	for _, path := range paths {
 		if !validText(path.value) || !filepath.IsAbs(path.value) ||
 			filepath.Clean(path.value) != path.value || isFilesystemRoot(path.value) {
-			return fmt.Errorf("Codex runtime %s must be an absolute, clean, non-root path", path.name)
+			return fmt.Errorf("codex runtime %s must be an absolute, clean, non-root path", path.name)
 		}
+	}
+	if strings.ContainsRune(layout.ToolboxRoot, os.PathListSeparator) {
+		return errors.New("codex runtime PATH toolbox must be exactly one directory")
 	}
 	for first := range paths {
 		for second := first + 1; second < len(paths); second++ {
 			if pathsOverlap(paths[first].value, paths[second].value) {
 				return fmt.Errorf(
-					"Codex runtime paths %s and %s overlap",
+					"codex runtime paths %s and %s overlap",
 					paths[first].name,
 					paths[second].name,
 				)
@@ -92,6 +100,7 @@ func (layout RuntimeLayout) Environment() map[string]string {
 		"CODEX_HOME":        layout.CodexHome,
 		"CODEX_SQLITE_HOME": filepath.Join(layout.CodexHome, "sqlite"),
 		"HOME":              layout.Home,
+		"PATH":              layout.ToolboxRoot,
 		"TMPDIR":            layout.Temp,
 	}
 }
@@ -103,6 +112,7 @@ func (layout RuntimeLayout) ConfigAssignments() []string {
 		"openai_base_url=" + tomlString(layout.ProxyURL),
 		"debug.config_lockfile.export_dir=" + tomlString(layout.ConfigLock),
 		"debug.config_lockfile.save_fields_resolved_from_model_catalog=true",
+		"shell_environment_policy.set={PATH=" + tomlString(layout.ToolboxRoot) + "}",
 	}
 }
 

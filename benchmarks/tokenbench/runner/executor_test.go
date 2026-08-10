@@ -71,6 +71,44 @@ func TestExecutorRejectsLimitsOutsidePublicationSchema(t *testing.T) {
 	}
 }
 
+func TestFilesystemPolicyRejectsWritableProtectedOverlap(t *testing.T) {
+	tests := []struct {
+		name       string
+		writable   string
+		protected  string
+		shouldFail bool
+	}{
+		{name: "same path", writable: "/run/tokenbench", protected: "/run/tokenbench", shouldFail: true},
+		{name: "writable ancestor", writable: "/run/tokenbench", protected: "/run/tokenbench/snapshot", shouldFail: true},
+		{name: "protected ancestor", writable: "/run/tokenbench/state", protected: "/run/tokenbench", shouldFail: true},
+		{name: "lexical prefix is not ancestry", writable: "/run/tokenbench-a", protected: "/run/tokenbench-b", shouldFail: false},
+		{name: "siblings", writable: "/run/tokenbench/state", protected: "/run/tokenbench/snapshot", shouldFail: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateFilesystemPolicySeparation(
+				[]string{test.writable},
+				[]string{test.protected},
+				nil,
+			)
+			if test.shouldFail && err == nil {
+				t.Fatal("overlapping writable and protected policies were accepted")
+			}
+			if !test.shouldFail && err != nil {
+				t.Fatalf("disjoint policies were rejected: %v", err)
+			}
+		})
+	}
+
+	if err := validateFilesystemPolicySeparation(
+		[]string{"/run/tokenbench"},
+		nil,
+		[]string{"/run/tokenbench/tool"},
+	); err == nil {
+		t.Fatal("writable/executable overlap was accepted")
+	}
+}
+
 func TestExecutorTimeoutIsClassified(t *testing.T) {
 	executor, err := New(Config{WaitDelay: 50 * time.Millisecond})
 	if err != nil {
@@ -175,6 +213,88 @@ func TestPreparedAbortCallsLiveSessionAndCanRetry(t *testing.T) {
 	}
 }
 
+func TestExecutorCloseDetachesStateBeforeBlockingAndCanRetry(t *testing.T) {
+	root, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+	}()
+	closeFailure := errors.New("injected blocking close failure")
+	removeCalls := 0
+	manager := &cgroupManager{
+		root:        root,
+		active:      make(map[string]struct{}),
+		hostCreated: true,
+		removeHost: func(string) error {
+			removeCalls++
+			if removeCalls == 1 {
+				close(entered)
+				<-release
+				return closeFailure
+			}
+			return nil
+		},
+	}
+	executor := &Executor{
+		active:      make(map[*preparedExecution]struct{}),
+		containment: manager,
+	}
+	firstClose := make(chan error, 1)
+	go func() {
+		firstClose <- executor.Close(context.Background())
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close() did not reach the blocking descriptor close")
+	}
+	executor.mu.Lock()
+	detached := executor.containment == nil
+	closed := executor.closed
+	executor.mu.Unlock()
+	if !closed || !detached {
+		t.Fatalf("Close() state while blocked: closed=%t detached=%t", closed, detached)
+	}
+	if executor.Publishable() {
+		t.Fatal("closing executor remained publishable")
+	}
+	if _, err := executor.ConformancePolicy(); err == nil {
+		t.Fatal("closing executor exposed a conformance policy")
+	}
+	close(release)
+	released = true
+	if err := <-firstClose; !errors.Is(err, closeFailure) {
+		t.Fatalf("first Close() error = %v, want injected failure", err)
+	}
+	executor.mu.Lock()
+	restored := executor.containment == manager
+	fullyClosed := executor.fullyClosed
+	executor.mu.Unlock()
+	if !restored || fullyClosed {
+		t.Fatalf(
+			"failed Close() state: restored=%t fully_closed=%t",
+			restored,
+			fullyClosed,
+		)
+	}
+	if err := executor.Close(context.Background()); err != nil {
+		t.Fatalf("retry Close(): %v", err)
+	}
+	executor.mu.Lock()
+	fullyClosed = executor.fullyClosed
+	executor.mu.Unlock()
+	if removeCalls != 2 || !fullyClosed {
+		t.Fatalf("retry Close() state: remove_calls=%d fully_closed=%t", removeCalls, fullyClosed)
+	}
+}
+
 func TestExecutorLifecycleProducesBoundedArtifacts(t *testing.T) {
 	lifecycle := &lifecycleFixture{}
 	executor, err := New(Config{Lifecycle: lifecycle})
@@ -223,6 +343,96 @@ func TestExecutorRejectsLifecycleArtifactsBeforeReturningRaw(t *testing.T) {
 	var integrity *IntegrityError
 	if !errors.As(err, &integrity) || integrity.Stage != "validate arm artifacts" {
 		t.Fatalf("Execute() error = %T %v, want artifact IntegrityError", err, err)
+	}
+}
+
+var errFinishWithInvalidArtifacts = errors.New("finish failed after invalid capture")
+
+type invalidArtifactFailureLifecycle struct{}
+
+func (invalidArtifactFailureLifecycle) Identity() string {
+	return "invalid-artifact-failure-lifecycle/v1"
+}
+
+func (invalidArtifactFailureLifecycle) BeginArm(
+	context.Context,
+	ExecutionRequest,
+) (ArmSession, error) {
+	return invalidArtifactFailureSession{}, nil
+}
+
+type invalidArtifactFailureSession struct{}
+
+func (invalidArtifactFailureSession) Finish(
+	context.Context,
+	ExecutionRequest,
+	harness.RawExecution,
+) ([]harness.Artifact, error) {
+	return []harness.Artifact{{
+		Name: "must-not-be-attached",
+	}}, errFinishWithInvalidArtifacts
+}
+
+func (invalidArtifactFailureSession) Abort(context.Context) error { return nil }
+
+func TestExecutorJoinsFinishErrorWithInvalidArtifacts(t *testing.T) {
+	executor, err := New(Config{Lifecycle: invalidArtifactFailureLifecycle{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := runPrepared(context.Background(), executor, helperRequest(t, "echo"))
+	if !errors.Is(err, errFinishWithInvalidArtifacts) {
+		t.Fatalf("Execute() error = %v, want joined Finish error", err)
+	}
+	var integrity *IntegrityError
+	if !errors.As(err, &integrity) || integrity.Stage != "validate arm artifacts" {
+		t.Fatalf("Execute() error = %T %v, want artifact IntegrityError", err, err)
+	}
+	if len(raw.Artifacts) != 0 {
+		t.Fatalf("Execute() attached invalid artifacts: %#v", raw.Artifacts)
+	}
+	if !strings.Contains(err.Error(), "finish arm lifecycle") {
+		t.Fatalf("Execute() error omitted Finish stage: %v", err)
+	}
+}
+
+type failingEvidenceLifecycle struct{}
+
+func (failingEvidenceLifecycle) Identity() string { return "failing-evidence-lifecycle/v1" }
+
+func (failingEvidenceLifecycle) BeginArm(
+	context.Context,
+	ExecutionRequest,
+) (ArmSession, error) {
+	return failingEvidenceSession{}, nil
+}
+
+type failingEvidenceSession struct{}
+
+func (failingEvidenceSession) Finish(
+	context.Context,
+	ExecutionRequest,
+	harness.RawExecution,
+) ([]harness.Artifact, error) {
+	return []harness.Artifact{{
+		Name:      "partial-evidence",
+		MediaType: "application/octet-stream",
+		Data:      []byte("retained"),
+	}}, errors.New("paired capture drift")
+}
+
+func (failingEvidenceSession) Abort(context.Context) error { return nil }
+
+func TestExecutorRetainsLifecycleEvidenceWhenFinishFails(t *testing.T) {
+	executor, err := New(Config{Lifecycle: failingEvidenceLifecycle{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := runPrepared(context.Background(), executor, helperRequest(t, "echo"))
+	var integrity *IntegrityError
+	if !errors.As(err, &integrity) || integrity.Stage != "finish arm lifecycle" ||
+		len(raw.Artifacts) != 1 || string(raw.Artifacts[0].Data) != "retained" {
+		t.Fatalf("Execute() = (%#v, %T %v), want retained evidence and integrity error", raw.Artifacts, err, err)
 	}
 }
 
@@ -518,10 +728,143 @@ func TestRunnerHelperProcess(t *testing.T) {
 			bindErr,
 			unixErr,
 		)
+	case "exact-network-policy":
+		runExactNetworkPolicyHelper()
+	case "exact-connect-bpf":
+		runExactConnectBPFHelper()
 	default:
 		os.Exit(4)
 	}
 	os.Exit(0)
+}
+
+func runExactNetworkPolicyHelper() {
+	port, err := strconv.Atoi(os.Getenv("TOKENBENCH_ALLOWED_PORT"))
+	if err != nil || port <= 0 || port > 65535 {
+		fmt.Fprintf(os.Stderr, "invalid allowed port %q", os.Getenv("TOKENBENCH_ALLOWED_PORT"))
+		os.Exit(3)
+	}
+	allowed, allowedErr := net.DialTimeout(
+		"tcp4",
+		net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		time.Second,
+	)
+	if allowed != nil {
+		_ = allowed.Close()
+	}
+	otherPort := port%65535 + 1
+	checks := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "other address",
+			err:  dialProbeError("tcp4", net.JoinHostPort("127.0.0.2", strconv.Itoa(port))),
+		},
+		{
+			name: "other port",
+			err:  dialProbeError("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(otherPort))),
+		},
+		{
+			name: "IPv6",
+			err:  dialProbeError("tcp6", net.JoinHostPort("::1", strconv.Itoa(port))),
+		},
+	}
+	listener, bindErr := net.Listen("tcp4", "127.0.0.1:0")
+	if listener != nil {
+		_ = listener.Close()
+	}
+	listenSocket, socketErr := unix.Socket(
+		unix.AF_INET,
+		unix.SOCK_STREAM|unix.SOCK_CLOEXEC,
+		unix.IPPROTO_TCP,
+	)
+	var listenErr error
+	if socketErr == nil {
+		listenErr = unix.Listen(listenSocket, 1)
+		_ = unix.Close(listenSocket)
+	}
+	socketPair, socketPairErr := unix.Socketpair(
+		unix.AF_UNIX,
+		unix.SOCK_STREAM|unix.SOCK_CLOEXEC,
+		0,
+	)
+	if socketPairErr == nil {
+		_ = unix.Close(socketPair[0])
+		_ = unix.Close(socketPair[1])
+	}
+	if allowedErr != nil || socketErr != nil || !errors.Is(bindErr, unix.EPERM) ||
+		!errors.Is(listenErr, unix.EPERM) || !errors.Is(socketPairErr, unix.EPERM) {
+		fmt.Fprintf(
+			os.Stderr,
+			"allowed=%v bind=%v socket=%v listen=%v socketpair=%v",
+			allowedErr,
+			bindErr,
+			socketErr,
+			listenErr,
+			socketPairErr,
+		)
+		os.Exit(3)
+	}
+	for _, check := range checks {
+		if !errors.Is(check.err, unix.EPERM) && !errors.Is(check.err, unix.EACCES) {
+			fmt.Fprintf(os.Stderr, "%s connect error = %v, want a policy denial", check.name, check.err)
+			os.Exit(3)
+		}
+	}
+	fmt.Println("exact-network-ok")
+}
+
+func runExactConnectBPFHelper() {
+	port, err := strconv.Atoi(os.Getenv("TOKENBENCH_ALLOWED_PORT"))
+	if err != nil || port <= 0 || port > 65535 {
+		fmt.Fprintf(os.Stderr, "invalid allowed port %q", os.Getenv("TOKENBENCH_ALLOWED_PORT"))
+		os.Exit(3)
+	}
+	allowed, allowedErr := net.DialTimeout(
+		"tcp4",
+		net.JoinHostPort("127.0.0.1", strconv.Itoa(port)),
+		time.Second,
+	)
+	if allowed != nil {
+		_ = allowed.Close()
+	}
+	checks := []struct {
+		name string
+		err  error
+	}{
+		{
+			name: "other address",
+			err:  dialProbeError("tcp4", net.JoinHostPort("127.0.0.2", strconv.Itoa(port))),
+		},
+		{
+			name: "other port",
+			err:  dialProbeError("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port%65535+1))),
+		},
+		{
+			name: "IPv6",
+			err:  dialProbeError("tcp6", net.JoinHostPort("::1", strconv.Itoa(port))),
+		},
+	}
+	if allowedErr != nil {
+		fmt.Fprintf(os.Stderr, "allowed connect error = %v", allowedErr)
+		os.Exit(3)
+	}
+	for _, check := range checks {
+		if !errors.Is(check.err, unix.EPERM) {
+			fmt.Fprintf(os.Stderr, "%s connect error = %v, want EPERM", check.name, check.err)
+			os.Exit(3)
+		}
+	}
+	fmt.Println("exact-bpf-connect-ok")
+}
+
+func dialProbeError(network, address string) error {
+	connection, err := net.DialTimeout(network, address, time.Second)
+	if connection != nil {
+		_ = connection.Close()
+	}
+	return err
 }
 
 func spawnEscapedHelper() {

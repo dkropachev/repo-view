@@ -30,13 +30,15 @@ func (store *Store) verifyObject(
 	ctx context.Context,
 	ref ObjectRef,
 	destination io.Writer,
-) error {
+) (resultErr error) {
 	hexDigest := ref.hexDigest()
 	shard, _, err := store.openShard(hexDigest, false)
 	if err != nil {
-		return fmt.Errorf("%w: open object shard: %v", ErrIntegrity, err)
+		return fmt.Errorf("%w: open object shard: %w", ErrIntegrity, err)
 	}
-	defer shard.Close()
+	defer func() {
+		resultErr = joinCloseError(resultErr, "close object shard after verification", shard)
+	}()
 	return verifyFileAt(ctx, shard, hexDigest[2:], ref, destination)
 }
 
@@ -49,7 +51,7 @@ func verifyFileAt(
 ) error {
 	before, err := directory.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("%w: lstat object %s: %v", ErrIntegrity, name, err)
+		return fmt.Errorf("%w: lstat object %s: %w", ErrIntegrity, name, err)
 	}
 	if err := validateObjectInfo(name, before); err != nil {
 		return err
@@ -57,12 +59,12 @@ func verifyFileAt(
 
 	object, err := directory.Open(name)
 	if err != nil {
-		return fmt.Errorf("%w: open object %s: %v", ErrIntegrity, name, err)
+		return fmt.Errorf("%w: open object %s: %w", ErrIntegrity, name, err)
 	}
 	opened, err := object.Stat()
 	if err != nil {
 		object.Close()
-		return fmt.Errorf("%w: stat opened object %s: %v", ErrIntegrity, name, err)
+		return fmt.Errorf("%w: stat opened object %s: %w", ErrIntegrity, name, err)
 	}
 	if err := validateObjectInfo(name, opened); err != nil {
 		object.Close()
@@ -112,7 +114,7 @@ func verifyFileAt(
 
 	after, err := directory.Lstat(name)
 	if err != nil {
-		return fmt.Errorf("%w: re-lstat object %s: %v", ErrIntegrity, name, err)
+		return fmt.Errorf("%w: re-lstat object %s: %w", ErrIntegrity, name, err)
 	}
 	if err := validateObjectInfo(name, after); err != nil {
 		return err
@@ -150,7 +152,7 @@ func validateObjectInfo(name string, info os.FileInfo) error {
 func sameObjectMetadata(first, second os.FileInfo) bool {
 	return first.Mode() == second.Mode() &&
 		first.Size() == second.Size() &&
-		first.ModTime() == second.ModTime()
+		first.ModTime().Equal(second.ModTime())
 }
 
 func digestAndCopy(

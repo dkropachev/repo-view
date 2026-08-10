@@ -19,7 +19,7 @@ const (
 // ExecutionRequest is the complete, already-approved process and invocation
 // presented to the runner. Callers must convert their publication-layer type
 // explicitly at this trust boundary.
-type ExecutionRequest struct {
+type ExecutionRequest struct { //nolint:govet,nolintlint // Preserve the versioned canonical JSON field order.
 	Arm        Arm                 `json:"arm"`
 	Repetition int                 `json:"repetition"`
 	Invocation harness.Invocation  `json:"invocation"`
@@ -34,6 +34,18 @@ type ExecutorIdentity struct {
 	ConfigSHA256 string `json:"config_sha256"`
 }
 
+// ConformancePolicyIdentity exposes the exact non-secret filesystem images
+// and allowlists enforced by a conformant executor. It is audit data, not an
+// authority bit: Pair.Execute cross-binds it to its live snapshot capability.
+type ConformancePolicyIdentity struct {
+	SchemaVersion             string   `json:"schema_version"`
+	CommonMCPExecutable       string   `json:"common_mcp_executable"`
+	CommonMCPExecutableSHA256 string   `json:"common_mcp_executable_sha256"`
+	ArmInitExecutableSHA256   string   `json:"arm_init_executable_sha256"`
+	ReadOnlyPaths             []string `json:"read_only_paths"`
+	ExecutablePaths           []string `json:"executable_paths"`
+}
+
 // PreparedExecution is an opaque, single-use execution capability bound to
 // one approved runner request.
 type PreparedExecution interface {
@@ -45,8 +57,8 @@ type PreparedExecution interface {
 // captured evidence. Publication code should stop the pair when errors.As
 // finds this concrete type.
 type IntegrityError struct {
-	Stage string
 	Err   error
+	Stage string
 }
 
 // NewIntegrityError constructs a typed fail-closed runner error.

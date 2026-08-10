@@ -37,7 +37,11 @@ func TestPinnedGitExecutableRejectsAtomicPathSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer runner.close()
+	defer func() {
+		if err := runner.close(); err != nil {
+			t.Errorf("close Git runner: %v", err)
+		}
+	}()
 
 	marker := filepath.Join(directory, "substituted-executable-ran")
 	maliciousPath := filepath.Join(directory, "malicious-git")
