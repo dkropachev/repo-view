@@ -3091,3 +3091,22 @@ func writeSourceChecksumFixture(t *testing.T, runDir, recordedRoot string) {
 		t.Fatal(err)
 	}
 }
+
+func TestReadRegularSnapshotRejectsOversizedFilesBeforeReading(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "oversized")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maximumRegularSnapshotBytes + 1); err != nil {
+		_ = file.Close()
+		t.Skipf("sparse files unavailable: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readRegularSnapshot(path); err == nil ||
+		!strings.Contains(err.Error(), "regular snapshot exceeds") {
+		t.Fatalf("oversized snapshot error = %v", err)
+	}
+}

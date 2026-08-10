@@ -14,26 +14,29 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/dkropachev/repo-view/internal/experimentsuite"
 )
 
 type options struct {
-	repoRoot       string
-	manifestPath   string
-	resolutionPath string
-	evidenceRoot   string
-	caseIDs        string
-	outputDir      string
-	repairAttempt  string
-	maxLevel       int
-	judgeRepeats   int
-	skipAnalyze    bool
-	skipQuality    bool
-	allowMissing   bool
+	repoRoot          string
+	manifestPath      string
+	resolutionPath    string
+	evidenceRoot      string
+	caseIDs           string
+	outputDir         string
+	repairAttempt     string
+	maxLevel          int
+	judgeRepeats      int
+	skipAnalyze       bool
+	skipQuality       bool
+	allowMissing      bool
+	preparationBudget *evidencePreparationBudget
 }
 
 type caseResult struct {
@@ -78,9 +81,11 @@ const (
 )
 
 type evidencePreparationOutcome struct {
-	err      error
-	analysis string
-	quality  string
+	err         error
+	evidenceDir string
+	workspace   *evidencePreparationWorkspace
+	analysis    string
+	quality     string
 }
 
 type evidencePreparationKey struct {
@@ -105,6 +110,7 @@ type strictQualityReplayConfig struct {
 
 type evidencePreparationTracker struct {
 	outcomes map[string]evidencePreparationOutcome
+	sources  map[string]evidenceTreeSnapshot
 }
 
 func (tracker *evidencePreparationTracker) record(
@@ -127,6 +133,61 @@ func (tracker *evidencePreparationTracker) modes() (string, string) {
 		quality[outcome.quality] = true
 	}
 	return aggregateEvidenceStageMode(analysis), aggregateEvidenceStageMode(quality)
+}
+
+func (tracker *evidencePreparationTracker) recordSource(
+	workspace *evidencePreparationWorkspace,
+) error {
+	if workspace == nil {
+		return nil
+	}
+	return tracker.recordSourceSnapshot(workspace.source, workspace.sourceSnapshot)
+}
+
+func (tracker *evidencePreparationTracker) recordSourceSnapshot(
+	source string,
+	snapshot evidenceTreeSnapshot,
+) error {
+	if tracker.sources == nil {
+		tracker.sources = make(map[string]evidenceTreeSnapshot)
+	}
+	if existing, ok := tracker.sources[source]; ok {
+		if !evidenceSnapshotsEqual(existing, snapshot) {
+			return fmt.Errorf(
+				"canonical evidence changed between staging snapshots: %s",
+				source,
+			)
+		}
+		return nil
+	}
+	tracker.sources[source] = snapshot
+	return nil
+}
+
+func (tracker *evidencePreparationTracker) verifySources() error {
+	paths := make([]string, 0, len(tracker.sources))
+	for path := range tracker.sources {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	var verifyErr error
+	for _, path := range paths {
+		current, err := snapshotEvidenceTree(path)
+		if err != nil {
+			verifyErr = appendPreparationError(
+				verifyErr,
+				fmt.Errorf("recheck canonical evidence %s: %w", path, err),
+			)
+			continue
+		}
+		if !evidenceSnapshotsEqual(tracker.sources[path], current) {
+			verifyErr = appendPreparationError(
+				verifyErr,
+				fmt.Errorf("canonical evidence changed before publication: %s", path),
+			)
+		}
+	}
+	return verifyErr
 }
 
 func aggregateEvidenceStageMode(modes map[string]bool) string {
@@ -155,7 +216,10 @@ func run(ctx context.Context, args []string) int {
 		usage()
 		return 0
 	}
-	command := args[0]
+	command, compatibilityAlias := normalizeCommand(args[0])
+	if compatibilityAlias {
+		fmt.Fprintln(os.Stderr, "warning: command \"reply\" is a compatibility alias for \"replay\"")
+	}
 	switch command {
 	case "list", "replay", "resolve", "live", "repair":
 	default:
@@ -315,6 +379,18 @@ func run(ctx context.Context, args []string) int {
 	} else {
 		opts.outputDir = resolve(opts.repoRoot, opts.outputDir)
 	}
+	if command == "replay" || command == "resolve" {
+		if err := rejectEvidenceOutputOverlap(
+			opts.outputDir,
+			opts.evidenceRoot,
+			selected,
+			selectedResolutions,
+			command,
+		); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+	}
 	if err := prepareOutputDir(opts.outputDir); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -357,6 +433,18 @@ func run(ctx context.Context, args []string) int {
 		result.ResolutionManifest = opts.resolutionPath
 		result.ResolutionManifestSHA256 = resolutionManifestSHA256
 	}
+	if command == "replay" || command == "resolve" {
+		if err := preparation.verifySources(); err != nil {
+			result.Cases = failPreparedEvidenceResults(
+				result.Cases,
+				fmt.Errorf(
+					"verify canonical evidence immediately before publication: %w",
+					err,
+				),
+			)
+			result.Passed = false
+		}
+	}
 	if err := writeResults(opts.outputDir, result); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -368,12 +456,103 @@ func run(ctx context.Context, args []string) int {
 	return 0
 }
 
+func normalizeCommand(command string) (string, bool) {
+	if command == "reply" {
+		return "replay", true
+	}
+	return command, false
+}
+
+func rejectEvidenceOutputOverlap(
+	outputDir string,
+	evidenceRoot string,
+	cases []experimentsuite.Case,
+	resolutions []experimentsuite.ResolutionCase,
+	command string,
+) error {
+	evidenceDirs := make(map[string]bool)
+	for _, testCase := range cases {
+		evidenceDirs[filepath.Join(
+			evidenceRoot,
+			filepath.FromSlash(testCase.Evidence),
+		)] = true
+	}
+	if command == "resolve" {
+		for _, resolution := range resolutions {
+			evidenceDirs[filepath.Join(
+				evidenceRoot,
+				filepath.FromSlash(resolution.Evidence),
+			)] = true
+		}
+	}
+	for evidenceDir := range evidenceDirs {
+		relative, err := filepath.Rel(evidenceDir, outputDir)
+		if err != nil {
+			return fmt.Errorf(
+				"compare output and selected evidence directories: %w",
+				err,
+			)
+		}
+		if relative == "." ||
+			(!filepath.IsAbs(relative) && relative != ".." &&
+				!strings.HasPrefix(relative, ".."+string(filepath.Separator))) {
+			return fmt.Errorf(
+				"output directory must not equal or be inside selected evidence: "+
+					"output=%s evidence=%s",
+				outputDir,
+				evidenceDir,
+			)
+		}
+		if err := rejectPhysicalEvidenceOutputOverlap(outputDir, evidenceDir); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func rejectPhysicalEvidenceOutputOverlap(outputDir, evidenceDir string) error {
+	evidenceInfo, err := os.Stat(evidenceDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("inspect selected evidence directory %s: %w", evidenceDir, err)
+	}
+	if !evidenceInfo.IsDir() {
+		return nil
+	}
+	for ancestor := filepath.Dir(outputDir); ; ancestor = filepath.Dir(ancestor) {
+		ancestorInfo, err := os.Stat(ancestor)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return fmt.Errorf("inspect output ancestor %s: %w", ancestor, err)
+			}
+		} else if ancestorInfo.IsDir() && os.SameFile(evidenceInfo, ancestorInfo) {
+			return fmt.Errorf(
+				"output directory has a physical ancestor equal to selected evidence: "+
+					"output=%s ancestor=%s evidence=%s",
+				outputDir,
+				ancestor,
+				evidenceDir,
+			)
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			break
+		}
+	}
+	return nil
+}
+
 func replay(
 	ctx context.Context,
 	opts options,
 	cases []experimentsuite.Case,
 	tracker *evidencePreparationTracker,
 ) []caseResult {
+	if opts.preparationBudget == nil {
+		opts.preparationBudget = newEvidencePreparationBudget()
+	}
 	prepared := make(map[evidencePreparationKey]evidencePreparationOutcome)
 	var results []caseResult
 	for _, testCase := range cases {
@@ -402,7 +581,7 @@ func replay(
 			results = append(results, result)
 			continue
 		}
-		if err := prepareEvidence(
+		preparedRunDir, err := prepareEvidenceRun(
 			ctx,
 			opts,
 			runDir,
@@ -410,13 +589,14 @@ func replay(
 			testCase.QualityAggregateSHA256,
 			prepared,
 			tracker,
-		); err != nil {
+		)
+		if err != nil {
 			result.Error = err.Error()
 			results = append(results, result)
 			continue
 		}
 		result.Checks = experimentsuite.ValidateTrackedEvidenceProvenance(
-			runDir,
+			preparedRunDir,
 			testCase.Assertions,
 			testCase.SourceChecksumSHA256,
 			testCase.QualityAggregateSHA256,
@@ -426,7 +606,7 @@ func replay(
 		results = append(results, result)
 		printCaseResult(result)
 	}
-	return results
+	return finalizePreparedEvidence(results, prepared)
 }
 
 type goTestOutcome struct {
@@ -447,6 +627,9 @@ func resolveCases(
 	resolutions []experimentsuite.ResolutionCase,
 	tracker *evidencePreparationTracker,
 ) []caseResult {
+	if opts.preparationBudget == nil {
+		opts.preparationBudget = newEvidencePreparationBudget()
+	}
 	resolutionByID := make(map[string]experimentsuite.ResolutionCase, len(resolutions))
 	for _, resolution := range resolutions {
 		resolutionByID[resolution.ID] = resolution
@@ -473,7 +656,8 @@ func resolveCases(
 			Evidence:                 runDir,
 			QualityProvenance:        resolution.QualityProvenance,
 		}
-		for _, evidence := range []struct {
+		preparedEvidenceDirs := []string{fixtureRunDir, runDir}
+		for index, evidence := range []struct {
 			dir        string
 			provenance string
 			digest     string
@@ -505,7 +689,7 @@ func resolveCases(
 				}
 				break
 			}
-			if err := prepareEvidence(
+			preparedRunDir, err := prepareEvidenceRun(
 				ctx,
 				opts,
 				evidenceDir,
@@ -513,10 +697,12 @@ func resolveCases(
 				evidence.digest,
 				prepared,
 				tracker,
-			); err != nil {
+			)
+			if err != nil {
 				result.Error = err.Error()
 				break
 			}
+			preparedEvidenceDirs[index] = preparedRunDir
 		}
 		if result.Error != "" {
 			result.CurrentStatus = resolutionStatus(
@@ -552,7 +738,7 @@ func resolveCases(
 			prefixChecks(
 				"Fixture evidence: ",
 				experimentsuite.ValidateTrackedEvidenceProvenance(
-					fixtureRunDir,
+					preparedEvidenceDirs[0],
 					testCase.Assertions,
 					testCase.SourceChecksumSHA256,
 					testCase.QualityAggregateSHA256,
@@ -565,7 +751,7 @@ func resolveCases(
 			prefixChecks(
 				"Current resolution: ",
 				experimentsuite.ValidateTrackedEvidenceProvenance(
-					runDir,
+					preparedEvidenceDirs[1],
 					resolution.Assertions,
 					resolution.SourceChecksumSHA256,
 					resolution.QualityAggregateSHA256,
@@ -575,7 +761,7 @@ func resolveCases(
 		)
 		fixtureMetrics, fixtureMetricErr :=
 			experimentsuite.SummarizeTrackedEvidenceProvenance(
-				fixtureRunDir,
+				preparedEvidenceDirs[0],
 				resolution.FixtureMetricCases,
 				testCase.QualityAggregateSHA256,
 				testCase.QualityProvenance,
@@ -585,7 +771,7 @@ func resolveCases(
 			result.Error = "fixture metrics: " + fixtureMetricErr.Error()
 		}
 		metrics, metricErr := experimentsuite.SummarizeTrackedEvidenceProvenance(
-			runDir,
+			preparedEvidenceDirs[1],
 			resolution.MetricCases,
 			resolution.QualityAggregateSHA256,
 			resolution.QualityProvenance,
@@ -610,7 +796,7 @@ func resolveCases(
 		results = append(results, result)
 		printCaseResult(result)
 	}
-	return results
+	return finalizePreparedEvidence(results, prepared)
 }
 
 func prepareEvidence(
@@ -622,13 +808,41 @@ func prepareEvidence(
 	prepared map[evidencePreparationKey]evidencePreparationOutcome,
 	tracker *evidencePreparationTracker,
 ) error {
+	_, err := prepareEvidenceRun(
+		ctx,
+		opts,
+		runDir,
+		qualityProvenance,
+		qualityDigest,
+		prepared,
+		tracker,
+	)
+	return err
+}
+
+func prepareEvidenceRun(
+	ctx context.Context,
+	opts options,
+	runDir string,
+	qualityProvenance string,
+	qualityDigest string,
+	prepared map[evidencePreparationKey]evidencePreparationOutcome,
+	tracker *evidencePreparationTracker,
+) (string, error) {
 	switch qualityProvenance {
 	case "strict-current", "legacy-unisolated-attested", "non-strict":
 	default:
-		return fmt.Errorf("unsupported quality provenance %q", qualityProvenance)
+		return "", fmt.Errorf("unsupported quality provenance %q", qualityProvenance)
 	}
 	if err := ensureRealDirectoryPath(runDir); err != nil {
-		return fmt.Errorf("unsafe evidence directory: %w", err)
+		return "", fmt.Errorf("unsafe evidence directory: %w", err)
+	}
+	canonicalSnapshot, err := snapshotEvidenceTree(runDir)
+	if err != nil {
+		return "", fmt.Errorf("bounded canonical evidence preflight: %w", err)
+	}
+	if err := tracker.recordSourceSnapshot(runDir, canonicalSnapshot); err != nil {
+		return "", err
 	}
 	verifiedConfig, err := experimentsuite.ReadQualityReplayConfig(
 		runDir,
@@ -636,7 +850,11 @@ func prepareEvidence(
 		qualityProvenance,
 	)
 	if err != nil {
-		return fmt.Errorf("verify tracked quality aggregate before preparation: %w", err)
+		return "", fmt.Errorf(
+			"verify immutable tracked quality aggregate before staging "+
+				"(replay/resolve will not repair canonical evidence): %w",
+			err,
+		)
 	}
 	strictConfig := strictQualityReplayConfig{
 		qualityDigest:  verifiedConfig.AggregateSHA256,
@@ -657,14 +875,36 @@ func prepareEvidence(
 		enforce:           strictConfig.enforce,
 	}
 	if outcome, done := prepared[preparationKey]; done {
-		return outcome.err
+		return outcome.evidenceDir, outcome.err
 	}
 	outcome := evidencePreparationOutcome{
-		analysis: evidenceStageNotRun,
-		quality:  evidenceStageNotRun,
+		evidenceDir: runDir,
+		analysis:    evidenceStageNotRun,
+		quality:     evidenceStageNotRun,
 	}
+	var workspace *evidencePreparationWorkspace
+	if !opts.skipAnalyze || !opts.skipQuality {
+		if opts.preparationBudget == nil {
+			opts.preparationBudget = newEvidencePreparationBudget()
+		}
+		workspace, outcome.err = stageEvidenceForPreparation(
+			opts.outputDir,
+			runDir,
+			opts.preparationBudget,
+		)
+		if outcome.err != nil {
+			outcome.err = fmt.Errorf("stage evidence for preparation: %w", outcome.err)
+		} else {
+			outcome.evidenceDir = workspace.runDir
+			outcome.workspace = workspace
+			if err := tracker.recordSource(workspace); err != nil {
+				outcome.err = err
+			}
+		}
+	}
+	workingRunDir := outcome.evidenceDir
 	if !opts.skipAnalyze {
-		if err := ensureRealDirectoryPath(runDir); err != nil {
+		if err := ensureRealDirectoryPath(workingRunDir); err != nil {
 			outcome.err = fmt.Errorf("unsafe evidence directory before analysis: %w", err)
 		}
 	}
@@ -674,20 +914,31 @@ func prepareEvidence(
 			ctx,
 			opts.repoRoot,
 			filepath.Join(opts.repoRoot, "experiments/lsp-replacement/analyze.sh"),
-			runDir,
+			workingRunDir,
 		)
 	} else if outcome.err == nil && opts.skipAnalyze {
-		if _, err := os.Stat(filepath.Join(runDir, "metrics.json")); err != nil {
+		if _, err := os.Stat(filepath.Join(workingRunDir, "metrics.json")); err != nil {
 			outcome.err = fmt.Errorf("reuse evidence analysis: %w", err)
 		} else {
 			outcome.analysis = evidenceStageReused
 		}
 	}
+	if outcome.err == nil && workspace != nil && !opts.skipAnalyze {
+		analyzedSnapshot, err := snapshotEvidenceTree(workingRunDir)
+		if err != nil {
+			outcome.err = fmt.Errorf("validate analyzed evidence bounds: %w", err)
+		} else if err := workspace.resizeReservation(analyzedSnapshot); err != nil {
+			outcome.err = fmt.Errorf(
+				"reserve analyzed evidence against suite budget: %w",
+				err,
+			)
+		}
+	}
 	if outcome.err == nil && !opts.skipQuality {
-		if err := ensureRealDirectoryPath(runDir); err != nil {
+		if err := ensureRealDirectoryPath(workingRunDir); err != nil {
 			outcome.err = fmt.Errorf("unsafe evidence directory before quality aggregation: %w", err)
 		}
-		qualityArgs := []string{runDir}
+		qualityArgs := []string{workingRunDir}
 		var qualityEnvironment []string
 		if outcome.err == nil && qualityProvenance == "strict-current" {
 			qualityArgs = append(
@@ -721,16 +972,719 @@ func prepareEvidence(
 		}
 	} else if outcome.err == nil {
 		if _, err := os.Stat(
-			filepath.Join(runDir, "quality", "quality.json"),
+			filepath.Join(workingRunDir, "quality", "quality.json"),
 		); err != nil {
 			outcome.err = fmt.Errorf("reuse quality aggregation: %w", err)
 		} else {
 			outcome.quality = evidenceStageReused
 		}
 	}
+	if workspace != nil {
+		if err := workspace.verifySourceUnchanged(); err != nil {
+			outcome.err = appendPreparationError(outcome.err, err)
+		}
+		var regeneratedSnapshot evidenceTreeSnapshot
+		if outcome.err == nil {
+			regeneratedSnapshot, err = snapshotEvidenceTree(workingRunDir)
+			if err != nil {
+				outcome.err = fmt.Errorf(
+					"validate regenerated evidence bounds: %w",
+					err,
+				)
+			}
+		}
+		if outcome.err == nil {
+			if err := workspace.resizeReservation(regeneratedSnapshot); err != nil {
+				outcome.err = fmt.Errorf(
+					"reserve regenerated evidence against suite budget: %w",
+					err,
+				)
+			}
+		}
+		if outcome.err == nil {
+			regeneratedConfig, err := experimentsuite.ReadQualityReplayConfig(
+				workingRunDir,
+				strictConfig.qualityDigest,
+				qualityProvenance,
+			)
+			if err != nil {
+				outcome.err = fmt.Errorf(
+					"verify regenerated quality aggregate in staging: %w",
+					err,
+				)
+			} else if regeneratedConfig != verifiedConfig {
+				outcome.err = fmt.Errorf(
+					"regenerated quality replay configuration changed in staging",
+				)
+			}
+		}
+		if outcome.err != nil {
+			if err := cleanupEvidencePreparationWorkspace(workspace); err != nil {
+				workspace.budget.poison(err)
+				outcome.err = appendPreparationError(
+					outcome.err,
+					fmt.Errorf("clean failed staged evidence: %w", err),
+				)
+			} else {
+				outcome.workspace = nil
+			}
+		}
+	}
 	prepared[preparationKey] = outcome
 	tracker.record(runDir, outcome)
-	return outcome.err
+	return outcome.evidenceDir, outcome.err
+}
+
+const (
+	maximumEvidencePreparationEntries    = 100_000
+	maximumEvidencePreparationDepth      = 64
+	maximumEvidencePreparationPathBytes  = 4_096
+	maximumEvidencePreparationFileBytes  = int64(512 << 20)
+	maximumEvidencePreparationTreeBytes  = int64(2 << 30)
+	maximumEvidencePreparationStages     = 128
+	maximumEvidencePreparationAllEntries = 250_000
+	maximumEvidencePreparationAllBytes   = int64(4 << 30)
+	evidencePreparationStagePrefix       = ".repo-view-evidence-preparation-"
+)
+
+type evidenceTreeEntry struct {
+	Path   string `json:"path"`
+	Kind   string `json:"kind"`
+	SHA256 string `json:"sha256,omitempty"`
+	Size   int64  `json:"size"`
+	Mode   uint32 `json:"mode"`
+}
+
+type evidenceTreeSnapshot struct {
+	canonical  []byte
+	entries    []evidenceTreeEntry
+	totalBytes int64
+}
+
+type evidencePreparationReservation struct {
+	entries int
+	bytes   int64
+	active  bool
+}
+
+type evidencePreparationBudget struct {
+	mu             sync.Mutex
+	maximumStages  int
+	maximumEntries int
+	maximumBytes   int64
+	stages         int
+	entries        int
+	bytes          int64
+	poisoned       error
+}
+
+func newEvidencePreparationBudget() *evidencePreparationBudget {
+	return newEvidencePreparationBudgetWithLimits(
+		maximumEvidencePreparationStages,
+		maximumEvidencePreparationAllEntries,
+		maximumEvidencePreparationAllBytes,
+	)
+}
+
+func newEvidencePreparationBudgetWithLimits(
+	maximumStages int,
+	maximumEntries int,
+	maximumBytes int64,
+) *evidencePreparationBudget {
+	return &evidencePreparationBudget{
+		maximumStages:  maximumStages,
+		maximumEntries: maximumEntries,
+		maximumBytes:   maximumBytes,
+	}
+}
+
+func (budget *evidencePreparationBudget) reserve(
+	snapshot evidenceTreeSnapshot,
+) (*evidencePreparationReservation, error) {
+	if budget == nil {
+		return nil, fmt.Errorf("evidence staging budget is unavailable")
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if budget.poisoned != nil {
+		return nil, fmt.Errorf(
+			"evidence staging budget is unavailable after cleanup failure: %w",
+			budget.poisoned,
+		)
+	}
+	if budget.maximumStages < 1 || budget.maximumEntries < 1 ||
+		budget.maximumBytes < 1 {
+		return nil, fmt.Errorf("evidence staging budget has invalid limits")
+	}
+	neededEntries := len(snapshot.entries)
+	if budget.stages >= budget.maximumStages {
+		return nil, fmt.Errorf(
+			"evidence staging budget exceeds %d stages",
+			budget.maximumStages,
+		)
+	}
+	if neededEntries > budget.maximumEntries-budget.entries {
+		return nil, fmt.Errorf(
+			"evidence staging budget exceeds %d total entries",
+			budget.maximumEntries,
+		)
+	}
+	if snapshot.totalBytes > budget.maximumBytes-budget.bytes {
+		return nil, fmt.Errorf(
+			"evidence staging budget exceeds %d total bytes",
+			budget.maximumBytes,
+		)
+	}
+	budget.stages++
+	budget.entries += neededEntries
+	budget.bytes += snapshot.totalBytes
+	return &evidencePreparationReservation{
+		entries: neededEntries,
+		bytes:   snapshot.totalBytes,
+		active:  true,
+	}, nil
+}
+
+func (budget *evidencePreparationBudget) release(
+	reservation *evidencePreparationReservation,
+) error {
+	if reservation == nil {
+		return nil
+	}
+	if budget == nil {
+		return fmt.Errorf("evidence staging budget is unavailable during cleanup")
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if !reservation.active {
+		return nil
+	}
+	if budget.stages < 1 || budget.entries < reservation.entries ||
+		budget.bytes < reservation.bytes {
+		return fmt.Errorf("evidence staging budget accounting underflow")
+	}
+	budget.stages--
+	budget.entries -= reservation.entries
+	budget.bytes -= reservation.bytes
+	reservation.active = false
+	return nil
+}
+
+func (budget *evidencePreparationBudget) resize(
+	reservation *evidencePreparationReservation,
+	snapshot evidenceTreeSnapshot,
+) error {
+	if reservation == nil {
+		return fmt.Errorf("evidence staging reservation is inactive")
+	}
+	if budget == nil {
+		return fmt.Errorf("evidence staging budget is unavailable")
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if !reservation.active {
+		return fmt.Errorf("evidence staging reservation is inactive")
+	}
+	if budget.poisoned != nil {
+		return fmt.Errorf(
+			"evidence staging budget is unavailable after cleanup failure: %w",
+			budget.poisoned,
+		)
+	}
+	if budget.maximumStages < 1 || budget.maximumEntries < 1 ||
+		budget.maximumBytes < 1 {
+		return fmt.Errorf("evidence staging budget has invalid limits")
+	}
+	if budget.stages < 1 || budget.stages > budget.maximumStages ||
+		budget.entries < reservation.entries || budget.bytes < reservation.bytes {
+		return fmt.Errorf("evidence staging budget accounting underflow")
+	}
+	otherEntries := budget.entries - reservation.entries
+	otherBytes := budget.bytes - reservation.bytes
+	neededEntries := len(snapshot.entries)
+	if neededEntries > budget.maximumEntries-otherEntries {
+		return fmt.Errorf(
+			"evidence staging budget exceeds %d total entries after regeneration",
+			budget.maximumEntries,
+		)
+	}
+	if snapshot.totalBytes > budget.maximumBytes-otherBytes {
+		return fmt.Errorf(
+			"evidence staging budget exceeds %d total bytes after regeneration",
+			budget.maximumBytes,
+		)
+	}
+	budget.entries = otherEntries + neededEntries
+	budget.bytes = otherBytes + snapshot.totalBytes
+	reservation.entries = neededEntries
+	reservation.bytes = snapshot.totalBytes
+	return nil
+}
+
+func (budget *evidencePreparationBudget) poison(cause error) {
+	if budget == nil || cause == nil {
+		return
+	}
+	budget.mu.Lock()
+	defer budget.mu.Unlock()
+	if budget.poisoned == nil {
+		budget.poisoned = cause
+	}
+}
+
+type evidencePreparationWorkspace struct {
+	root           string
+	runDir         string
+	source         string
+	sourceSnapshot evidenceTreeSnapshot
+	budget         *evidencePreparationBudget
+	reservation    *evidencePreparationReservation
+}
+
+func stageEvidenceForPreparation(
+	parent string,
+	source string,
+	budget *evidencePreparationBudget,
+) (_ *evidencePreparationWorkspace, returnErr error) {
+	sourceSnapshot, err := snapshotEvidenceTree(source)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot canonical evidence: %w", err)
+	}
+	reservation, err := budget.reserve(sourceSnapshot)
+	if err != nil {
+		return nil, err
+	}
+	if parent == "" {
+		parent = os.TempDir()
+	}
+	parent, err = filepath.Abs(parent)
+	if err != nil {
+		return nil, appendPreparationError(
+			fmt.Errorf("resolve staging parent: %w", err),
+			budget.release(reservation),
+		)
+	}
+	parent = filepath.Clean(parent)
+	if err := ensureRealDirectoryPath(parent); err != nil {
+		return nil, appendPreparationError(
+			fmt.Errorf("unsafe staging parent: %w", err),
+			budget.release(reservation),
+		)
+	}
+	root, err := os.MkdirTemp(parent, evidencePreparationStagePrefix)
+	if err != nil {
+		return nil, appendPreparationError(
+			fmt.Errorf("create evidence staging directory: %w", err),
+			budget.release(reservation),
+		)
+	}
+	defer func() {
+		if returnErr != nil {
+			cleanupErr := os.RemoveAll(root)
+			returnErr = appendPreparationError(returnErr, cleanupErr)
+			if cleanupErr != nil {
+				budget.poison(cleanupErr)
+				return
+			}
+			releaseErr := budget.release(reservation)
+			returnErr = appendPreparationError(returnErr, releaseErr)
+			if releaseErr != nil {
+				budget.poison(releaseErr)
+			}
+		}
+	}()
+	runDir := filepath.Join(root, "run")
+	if err := os.Mkdir(runDir, 0o700); err != nil {
+		return nil, fmt.Errorf("create staged evidence root: %w", err)
+	}
+	if err := copyEvidenceSnapshot(source, runDir, sourceSnapshot); err != nil {
+		return nil, fmt.Errorf("copy canonical evidence into staging: %w", err)
+	}
+	stagedSnapshot, err := snapshotEvidenceTree(runDir)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot staged evidence: %w", err)
+	}
+	if !evidenceSnapshotsEqual(sourceSnapshot, stagedSnapshot) {
+		return nil, fmt.Errorf("staged evidence differs from canonical snapshot")
+	}
+	currentSource, err := snapshotEvidenceTree(source)
+	if err != nil {
+		return nil, fmt.Errorf("recheck canonical evidence after staging: %w", err)
+	}
+	if !evidenceSnapshotsEqual(sourceSnapshot, currentSource) {
+		return nil, fmt.Errorf("canonical evidence changed while it was staged")
+	}
+	return &evidencePreparationWorkspace{
+		root:           root,
+		runDir:         runDir,
+		source:         source,
+		sourceSnapshot: sourceSnapshot,
+		budget:         budget,
+		reservation:    reservation,
+	}, nil
+}
+
+func (workspace *evidencePreparationWorkspace) verifySourceUnchanged() error {
+	current, err := snapshotEvidenceTree(workspace.source)
+	if err != nil {
+		return fmt.Errorf("recheck canonical evidence after preparation: %w", err)
+	}
+	if !evidenceSnapshotsEqual(workspace.sourceSnapshot, current) {
+		return fmt.Errorf("canonical evidence changed during staged preparation")
+	}
+	return nil
+}
+
+func (workspace *evidencePreparationWorkspace) resizeReservation(
+	snapshot evidenceTreeSnapshot,
+) error {
+	if workspace == nil {
+		return fmt.Errorf("evidence staging workspace is unavailable")
+	}
+	return workspace.budget.resize(workspace.reservation, snapshot)
+}
+
+func snapshotEvidenceTree(root string) (evidenceTreeSnapshot, error) {
+	if err := ensureRealDirectoryPath(root); err != nil {
+		return evidenceTreeSnapshot{}, err
+	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return evidenceTreeSnapshot{}, err
+	}
+	var entries []evidenceTreeEntry
+	var totalBytes int64
+	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == root {
+			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 ||
+				!os.SameFile(rootInfo, info) {
+				return fmt.Errorf("evidence root changed identity: %s", root)
+			}
+			return nil
+		}
+		if len(entries) >= maximumEvidencePreparationEntries {
+			return fmt.Errorf(
+				"evidence tree exceeds %d entries",
+				maximumEvidencePreparationEntries,
+			)
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if relative == "." || relative == "" || filepath.IsAbs(relative) ||
+			filepath.Clean(relative) != relative || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("invalid evidence-relative path %q", relative)
+		}
+		relative = filepath.ToSlash(relative)
+		if len(relative) > maximumEvidencePreparationPathBytes {
+			return fmt.Errorf("evidence path is too long: %q", relative)
+		}
+		if strings.Count(relative, "/")+1 > maximumEvidencePreparationDepth {
+			return fmt.Errorf(
+				"evidence path exceeds maximum depth %d: %q",
+				maximumEvidencePreparationDepth,
+				relative,
+			)
+		}
+		entry := evidenceTreeEntry{
+			Path: relative,
+			Mode: uint32(info.Mode().Perm()),
+		}
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("evidence tree contains symlink: %s", path)
+		case info.IsDir():
+			entry.Kind = "directory"
+		case info.Mode().IsRegular():
+			if info.Size() < 0 || info.Size() > maximumEvidencePreparationFileBytes {
+				return fmt.Errorf(
+					"evidence file exceeds %d bytes: %s",
+					maximumEvidencePreparationFileBytes,
+					path,
+				)
+			}
+			if info.Size() > maximumEvidencePreparationTreeBytes-totalBytes {
+				return fmt.Errorf(
+					"evidence tree exceeds %d bytes",
+					maximumEvidencePreparationTreeBytes,
+				)
+			}
+			entry.Kind = "file"
+			entry.Size = info.Size()
+			entry.SHA256, err = digestEvidenceFile(path, info, nil)
+			if err != nil {
+				return err
+			}
+			totalBytes += info.Size()
+		default:
+			return fmt.Errorf("evidence tree contains special file: %s", path)
+		}
+		entries = append(entries, entry)
+		return nil
+	})
+	if err != nil {
+		return evidenceTreeSnapshot{}, err
+	}
+	rootAfter, err := os.Lstat(root)
+	if err != nil {
+		return evidenceTreeSnapshot{}, err
+	}
+	if !rootAfter.IsDir() || rootAfter.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(rootInfo, rootAfter) {
+		return evidenceTreeSnapshot{}, fmt.Errorf(
+			"evidence root changed while it was read: %s",
+			root,
+		)
+	}
+	canonical, err := json.Marshal(entries)
+	if err != nil {
+		return evidenceTreeSnapshot{}, fmt.Errorf("encode evidence snapshot: %w", err)
+	}
+	return evidenceTreeSnapshot{
+		canonical:  canonical,
+		entries:    entries,
+		totalBytes: totalBytes,
+	}, nil
+}
+
+func copyEvidenceSnapshot(
+	source string,
+	destination string,
+	snapshot evidenceTreeSnapshot,
+) error {
+	var directories []evidenceTreeEntry
+	for _, entry := range snapshot.entries {
+		target := filepath.Join(destination, filepath.FromSlash(entry.Path))
+		switch entry.Kind {
+		case "directory":
+			if err := os.Mkdir(target, 0o700); err != nil {
+				return err
+			}
+			directories = append(directories, entry)
+		case "file":
+			sourcePath := filepath.Join(source, filepath.FromSlash(entry.Path))
+			info, err := os.Lstat(sourcePath)
+			if err != nil {
+				return err
+			}
+			if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 ||
+				info.Size() != entry.Size || uint32(info.Mode().Perm()) != entry.Mode {
+				return fmt.Errorf("evidence file changed before copy: %s", sourcePath)
+			}
+			output, err := os.OpenFile(
+				target,
+				os.O_CREATE|os.O_EXCL|os.O_WRONLY,
+				0o600,
+			)
+			if err != nil {
+				return err
+			}
+			digest, copyErr := digestEvidenceFile(sourcePath, info, output)
+			closeErr := output.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+			if digest != entry.SHA256 {
+				return fmt.Errorf("evidence file changed while copied: %s", sourcePath)
+			}
+			if err := os.Chmod(target, os.FileMode(entry.Mode)); err != nil {
+				return err
+			}
+		default:
+			return fmt.Errorf("unsupported evidence snapshot entry kind %q", entry.Kind)
+		}
+	}
+	for index := len(directories) - 1; index >= 0; index-- {
+		entry := directories[index]
+		target := filepath.Join(destination, filepath.FromSlash(entry.Path))
+		if err := os.Chmod(target, os.FileMode(entry.Mode)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func digestEvidenceFile(
+	path string,
+	expected os.FileInfo,
+	copyTo io.Writer,
+) (string, error) {
+	if err := ensureRealDirectoryPath(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		!os.SameFile(expected, before) || before.Size() != expected.Size() ||
+		before.Mode().Perm() != expected.Mode().Perm() {
+		return "", fmt.Errorf("evidence file changed identity: %s", path)
+	}
+	input, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer input.Close()
+	opened, err := input.Stat()
+	if err != nil {
+		return "", err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) ||
+		opened.Size() != before.Size() || opened.Mode().Perm() != before.Mode().Perm() {
+		return "", fmt.Errorf("evidence file changed while opened: %s", path)
+	}
+	hasher := sha256.New()
+	writers := []io.Writer{hasher}
+	if copyTo != nil {
+		writers = append(writers, copyTo)
+	}
+	written, err := io.Copy(
+		io.MultiWriter(writers...),
+		io.LimitReader(input, before.Size()+1),
+	)
+	if err != nil {
+		return "", err
+	}
+	if written != before.Size() {
+		return "", fmt.Errorf("evidence file size changed while read: %s", path)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		return "", err
+	}
+	if after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!os.SameFile(before, after) || after.Size() != before.Size() ||
+		after.Mode().Perm() != before.Mode().Perm() {
+		return "", fmt.Errorf("evidence file changed after read: %s", path)
+	}
+	if err := ensureRealDirectoryPath(filepath.Dir(path)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func evidenceSnapshotsEqual(left, right evidenceTreeSnapshot) bool {
+	return bytes.Equal(left.canonical, right.canonical)
+}
+
+func cleanupPreparedEvidence(
+	prepared map[evidencePreparationKey]evidencePreparationOutcome,
+) error {
+	roots := make(map[string]bool)
+	var cleanupErr error
+	for _, outcome := range prepared {
+		workspace := outcome.workspace
+		if workspace == nil || roots[workspace.root] {
+			continue
+		}
+		roots[workspace.root] = true
+		if err := cleanupEvidencePreparationWorkspace(workspace); err != nil {
+			cleanupErr = appendPreparationError(
+				cleanupErr,
+				err,
+			)
+		}
+	}
+	return cleanupErr
+}
+
+func cleanupEvidencePreparationWorkspace(
+	workspace *evidencePreparationWorkspace,
+) error {
+	if workspace == nil {
+		return nil
+	}
+	root := workspace.root
+	if !filepath.IsAbs(root) || filepath.Clean(root) != root ||
+		filepath.Dir(root) == root ||
+		!strings.HasPrefix(filepath.Base(root), evidencePreparationStagePrefix) {
+		return fmt.Errorf("refusing to remove invalid evidence staging root: %s", root)
+	}
+	if err := os.RemoveAll(root); err != nil {
+		return fmt.Errorf("remove evidence staging root %s: %w", root, err)
+	}
+	if err := workspace.budget.release(workspace.reservation); err != nil {
+		return fmt.Errorf("release evidence staging budget for %s: %w", root, err)
+	}
+	return nil
+}
+
+func verifyPreparedEvidenceSources(
+	prepared map[evidencePreparationKey]evidencePreparationOutcome,
+) error {
+	roots := make(map[string]bool)
+	var verifyErr error
+	for _, outcome := range prepared {
+		workspace := outcome.workspace
+		if workspace == nil || roots[workspace.root] {
+			continue
+		}
+		roots[workspace.root] = true
+		if err := workspace.verifySourceUnchanged(); err != nil {
+			verifyErr = appendPreparationError(
+				verifyErr,
+				fmt.Errorf("final canonical evidence verification for %s: %w", workspace.source, err),
+			)
+		}
+	}
+	return verifyErr
+}
+
+func finalizePreparedEvidence(
+	results []caseResult,
+	prepared map[evidencePreparationKey]evidencePreparationOutcome,
+) []caseResult {
+	finalErr := verifyPreparedEvidenceSources(prepared)
+	if cleanupErr := cleanupPreparedEvidence(prepared); cleanupErr != nil {
+		finalErr = appendPreparationError(
+			finalErr,
+			fmt.Errorf("clean staged evidence: %w", cleanupErr),
+		)
+	}
+	if verifyErr := verifyPreparedEvidenceSources(prepared); verifyErr != nil {
+		finalErr = appendPreparationError(
+			finalErr,
+			fmt.Errorf("verify canonical evidence after staging cleanup: %w", verifyErr),
+		)
+	}
+	if finalErr == nil {
+		return results
+	}
+	return failPreparedEvidenceResults(
+		results,
+		fmt.Errorf("finalize staged evidence: %w", finalErr),
+	)
+}
+
+func failPreparedEvidenceResults(results []caseResult, err error) []caseResult {
+	for index := range results {
+		results[index].Passed = false
+		results[index].Skipped = false
+		if results[index].Error != "" {
+			results[index].Error += "; "
+		}
+		results[index].Error += err.Error()
+	}
+	return results
+}
+
+func appendPreparationError(current, next error) error {
+	if next == nil {
+		return current
+	}
+	if current == nil {
+		return next
+	}
+	return fmt.Errorf("%w; %w", current, next)
 }
 
 func strictQualityReplayEnvironment(config strictQualityReplayConfig) []string {
@@ -2263,6 +3217,7 @@ func usage() {
 		"Commands:",
 		"  list    list simple-to-complex accepted and rejected cases",
 		"  replay  regenerate and validate local fixture evidence",
+		"  reply   compatibility alias for replay",
 		"  resolve verify every retained failed case against current code and evidence",
 		"  live    rerun live-enabled accepted cases with Codex and quality judges",
 		"  repair  rerun failed cases with staged token and quality promotion gates",

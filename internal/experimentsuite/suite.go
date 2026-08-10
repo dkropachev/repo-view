@@ -3368,6 +3368,12 @@ func readRegularSnapshot(path string) ([]byte, error) {
 	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("not a regular file")
 	}
+	if before.Size() < 0 || before.Size() > maximumRegularSnapshotBytes {
+		return nil, fmt.Errorf(
+			"regular snapshot exceeds %d bytes",
+			maximumRegularSnapshotBytes,
+		)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -3377,14 +3383,20 @@ func readRegularSnapshot(path string) ([]byte, error) {
 		_ = file.Close()
 		return nil, err
 	}
-	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) ||
+		opened.Size() != before.Size() || opened.Mode() != before.Mode() ||
+		!opened.ModTime().Equal(before.ModTime()) {
 		_ = file.Close()
 		return nil, fmt.Errorf("file identity changed while opening")
 	}
-	content, err := io.ReadAll(file)
+	content, err := io.ReadAll(io.LimitReader(file, before.Size()+1))
 	if err != nil {
 		_ = file.Close()
 		return nil, err
+	}
+	if int64(len(content)) != before.Size() {
+		_ = file.Close()
+		return nil, fmt.Errorf("file size changed while reading")
 	}
 	finished, err := file.Stat()
 	if err != nil {
@@ -3405,7 +3417,9 @@ func readRegularSnapshot(path string) ([]byte, error) {
 	}
 	if !after.Mode().IsRegular() ||
 		after.Mode()&os.ModeSymlink != 0 ||
-		!os.SameFile(opened, after) {
+		!os.SameFile(opened, after) ||
+		after.Size() != opened.Size() || after.Mode() != opened.Mode() ||
+		!after.ModTime().Equal(opened.ModTime()) {
 		_ = file.Close()
 		return nil, fmt.Errorf("file identity changed while reading")
 	}
@@ -3414,6 +3428,8 @@ func readRegularSnapshot(path string) ([]byte, error) {
 	}
 	return content, nil
 }
+
+const maximumRegularSnapshotBytes = int64(64 << 20)
 
 func sha256Bytes(content []byte) string {
 	digest := sha256.Sum256(content)

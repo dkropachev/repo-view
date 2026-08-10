@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -450,7 +453,18 @@ func TestWriteResultsRecordsEvidencePreparationModes(t *testing.T) {
 	}
 }
 
-func TestReplayRecordsNotRunForMissingAllowedEvidence(t *testing.T) {
+func TestReplyIsReplayCompatibilityAlias(t *testing.T) {
+	command, alias := normalizeCommand("reply")
+	if command != "replay" || !alias {
+		t.Fatalf("normalizeCommand(reply) = %q, %v", command, alias)
+	}
+	command, alias = normalizeCommand("resolve")
+	if command != "resolve" || alias {
+		t.Fatalf("normalizeCommand(resolve) = %q, %v", command, alias)
+	}
+}
+
+func TestReplyWarnsRecordsReplayAndMissingEvidenceModes(t *testing.T) {
 	repoRoot := t.TempDir()
 	manifestPath := filepath.Join(repoRoot, "cases.json")
 	manifest := experimentsuite.Manifest{
@@ -480,16 +494,21 @@ func TestReplayRecordsNotRunForMissingAllowedEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	outputDir := filepath.Join(repoRoot, "output")
-	status := run(context.Background(), []string{
-		"replay",
-		"--repo-root", repoRoot,
-		"--manifest", manifestPath,
-		"--evidence-root", filepath.Join(repoRoot, "evidence"),
-		"--output", outputDir,
-		"--allow-missing",
+	status, stderr := runCapturingStderr(t, func() int {
+		return run(context.Background(), []string{
+			"reply",
+			"--repo-root", repoRoot,
+			"--manifest", manifestPath,
+			"--evidence-root", filepath.Join(repoRoot, "evidence"),
+			"--output", outputDir,
+			"--allow-missing",
+		})
 	})
 	if status != 0 {
 		t.Fatalf("run() status = %d, want 0", status)
+	}
+	if !strings.Contains(stderr, "compatibility alias for \"replay\"") {
+		t.Fatalf("reply warning = %q", stderr)
 	}
 	var result suiteResult
 	content, err := os.ReadFile(filepath.Join(outputDir, "results.json"))
@@ -498,6 +517,9 @@ func TestReplayRecordsNotRunForMissingAllowedEvidence(t *testing.T) {
 	}
 	if err := json.Unmarshal(content, &result); err != nil {
 		t.Fatal(err)
+	}
+	if result.Command != "replay" {
+		t.Fatalf("recorded command = %q, want replay", result.Command)
 	}
 	if result.EvidenceAnalysis != evidenceStageNotRun ||
 		result.QualityAggregation != evidenceStageNotRun {
@@ -513,6 +535,100 @@ func TestReplayRecordsNotRunForMissingAllowedEvidence(t *testing.T) {
 			"recorded manifest digest = %q, want digest of loaded bytes",
 			result.ManifestSHA256,
 		)
+	}
+}
+
+func TestRunRejectsOutputInsideSelectedEvidenceBeforeCreation(t *testing.T) {
+	repoRoot := t.TempDir()
+	evidenceRoot := filepath.Join(repoRoot, "evidence")
+	runDir := filepath.Join(evidenceRoot, "selected", "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, runDir, "canonical.txt", "unchanged\n")
+	manifest := experimentsuite.Manifest{
+		SchemaVersion: 1,
+		Cases: []experimentsuite.Case{{
+			ID:                     "selected",
+			Level:                  1,
+			Complexity:             "fixture",
+			Outcome:                "accepted",
+			Evidence:               "selected/run",
+			SourceChecksumSHA256:   strings.Repeat("1", 64),
+			QualityAggregateSHA256: strings.Repeat("2", 64),
+			Assertions: []experimentsuite.Assertion{{
+				Description: "unreached",
+				Source:      "metrics.case",
+				Field:       "completed",
+				Operator:    "eq",
+				Value:       true,
+			}},
+		}},
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(repoRoot, "cases.json")
+	if err := os.WriteFile(manifestPath, manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := snapshotEvidenceTree(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(runDir, "suite-output")
+	status, stderr := runCapturingStderr(t, func() int {
+		return run(context.Background(), []string{
+			"replay",
+			"--repo-root", repoRoot,
+			"--manifest", manifestPath,
+			"--evidence-root", evidenceRoot,
+			"--output", outputDir,
+		})
+	})
+	if status != 2 {
+		t.Fatalf("run() status = %d, want 2; stderr=%s", status, stderr)
+	}
+	if !strings.Contains(stderr, "must not equal or be inside selected evidence") {
+		t.Fatalf("overlap error = %q", stderr)
+	}
+	if _, err := os.Lstat(outputDir); !os.IsNotExist(err) {
+		t.Fatalf("overlapping output was created: %v", err)
+	}
+	after, err := snapshotEvidenceTree(runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !evidenceSnapshotsEqual(before, after) {
+		t.Fatal("canonical evidence changed while rejecting overlapping output")
+	}
+}
+
+func TestRejectEvidenceOutputOverlapDetectsPhysicalAlias(t *testing.T) {
+	evidenceRoot := t.TempDir()
+	evidenceDir := filepath.Join(evidenceRoot, "selected", "run")
+	if err := os.MkdirAll(evidenceDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasRoot := t.TempDir()
+	alias := filepath.Join(aliasRoot, "evidence-alias")
+	if err := os.Symlink(evidenceDir, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	outputDir := filepath.Join(alias, "suite-output")
+	err := rejectEvidenceOutputOverlap(
+		outputDir,
+		evidenceRoot,
+		[]experimentsuite.Case{{Evidence: "selected/run"}},
+		nil,
+		"replay",
+	)
+	if err == nil || !strings.Contains(err.Error(), "physical ancestor") {
+		t.Fatalf("physical output alias error = %v", err)
+	}
+	if _, err := os.Lstat(outputDir); !os.IsNotExist(err) {
+		t.Fatalf("physical-alias output was created: %v", err)
 	}
 }
 
@@ -843,6 +959,404 @@ func TestPrepareEvidenceVerifiesAggregateBeforeInvokingScripts(t *testing.T) {
 	}
 }
 
+func TestStagedEvidencePreparationLeavesCanonicalTreeByteIdentical(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		exitStatus  int
+		wantFailure bool
+	}{
+		{name: "successful regeneration"},
+		{name: "failed regeneration", exitStatus: 17, wantFailure: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			canonical := filepath.Join(t.TempDir(), "canonical")
+			if err := os.Mkdir(canonical, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, canonical, "input.jsonl", "canonical input\n")
+			nested := filepath.Join(canonical, "quality")
+			if err := os.Mkdir(nested, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, nested, "quality.json", "canonical quality\n")
+			if err := os.Chmod(filepath.Join(nested, "quality.json"), 0o640); err != nil {
+				t.Fatal(err)
+			}
+
+			before, err := snapshotEvidenceTree(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := stageEvidenceForPreparation(
+				t.TempDir(),
+				canonical,
+				newEvidencePreparationBudget(),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if workspace.runDir == canonical {
+				t.Fatal("staged preparation returned the canonical evidence directory")
+			}
+
+			script := filepath.Join(t.TempDir(), "regenerate.sh")
+			scriptBody := fmt.Sprintf(
+				"#!/bin/sh\nset -eu\nprintf 'regenerated\\n' > \"$1/input.jsonl\"\nprintf 'partial\\n' > \"$1/generated.txt\"\nexit %d\n",
+				testCase.exitStatus,
+			)
+			if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			commandErr := runCommandWithStdout(
+				context.Background(),
+				filepath.Dir(script),
+				io.Discard,
+				script,
+				workspace.runDir,
+			)
+			if (commandErr != nil) != testCase.wantFailure {
+				t.Fatalf("regeneration error = %v, want failure %v", commandErr, testCase.wantFailure)
+			}
+			if err := workspace.verifySourceUnchanged(); err != nil {
+				t.Fatal(err)
+			}
+			after, err := snapshotEvidenceTree(canonical)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !evidenceSnapshotsEqual(before, after) {
+				t.Fatal("canonical evidence tree changed during staged regeneration")
+			}
+			canonicalInput, err := os.ReadFile(filepath.Join(canonical, "input.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(canonicalInput) != "canonical input\n" {
+				t.Fatalf("canonical input = %q", canonicalInput)
+			}
+			stagedInput, err := os.ReadFile(filepath.Join(workspace.runDir, "input.jsonl"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(stagedInput) != "regenerated\n" {
+				t.Fatalf("staged input = %q", stagedInput)
+			}
+			if err := cleanupPreparedEvidence(map[evidencePreparationKey]evidencePreparationOutcome{
+				{}: {workspace: workspace},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(workspace.root); !os.IsNotExist(err) {
+				t.Fatalf("staging root survived cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestStageEvidenceForPreparationRejectsSymlinksAndOversizedFiles(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		canonical := t.TempDir()
+		target := filepath.Join(t.TempDir(), "target")
+		writeTestFile(t, filepath.Dir(target), filepath.Base(target), "outside\n")
+		if err := os.Symlink(target, filepath.Join(canonical, "linked")); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		_, err := stageEvidenceForPreparation(
+			t.TempDir(),
+			canonical,
+			newEvidencePreparationBudget(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "contains symlink") {
+			t.Fatalf("stage symlink error = %v", err)
+		}
+	})
+
+	t.Run("oversized file", func(t *testing.T) {
+		canonical := t.TempDir()
+		path := filepath.Join(canonical, "oversized.jsonl")
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(maximumEvidencePreparationFileBytes + 1); err != nil {
+			_ = file.Close()
+			t.Skipf("sparse files unavailable: %v", err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		_, err = stageEvidenceForPreparation(
+			t.TempDir(),
+			canonical,
+			newEvidencePreparationBudget(),
+		)
+		if err == nil || !strings.Contains(err.Error(), "file exceeds") {
+			t.Fatalf("stage oversized file error = %v", err)
+		}
+	})
+}
+
+func TestEvidencePreparationBudgetIsGlobalAndReleasedOnlyAtCleanup(t *testing.T) {
+	for _, testCase := range []struct {
+		name           string
+		maximumStages  int
+		maximumEntries int
+		maximumBytes   int64
+		wantError      string
+	}{
+		{
+			name:           "stage count",
+			maximumStages:  1,
+			maximumEntries: 10,
+			maximumBytes:   100,
+			wantError:      "stages",
+		},
+		{
+			name:           "total entries",
+			maximumStages:  2,
+			maximumEntries: 1,
+			maximumBytes:   100,
+			wantError:      "total entries",
+		},
+		{
+			name:           "total bytes",
+			maximumStages:  2,
+			maximumEntries: 10,
+			maximumBytes:   7,
+			wantError:      "total bytes",
+		},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			firstSource := t.TempDir()
+			secondSource := t.TempDir()
+			writeTestFile(t, firstSource, "evidence.txt", "1234")
+			writeTestFile(t, secondSource, "evidence.txt", "5678")
+			stagingParent := t.TempDir()
+			budget := newEvidencePreparationBudgetWithLimits(
+				testCase.maximumStages,
+				testCase.maximumEntries,
+				testCase.maximumBytes,
+			)
+			first, err := stageEvidenceForPreparation(
+				stagingParent,
+				firstSource,
+				budget,
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := stageEvidenceForPreparation(
+				stagingParent,
+				secondSource,
+				budget,
+			); err == nil || !strings.Contains(err.Error(), testCase.wantError) {
+				t.Fatalf("second stage error = %v, want %q", err, testCase.wantError)
+			}
+			entries, err := os.ReadDir(stagingParent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 1 || entries[0].Name() != filepath.Base(first.root) {
+				t.Fatalf("staging roots after exhaustion = %v, want only %s", entries, first.root)
+			}
+			if err := cleanupEvidencePreparationWorkspace(first); err != nil {
+				t.Fatal(err)
+			}
+			second, err := stageEvidenceForPreparation(
+				stagingParent,
+				secondSource,
+				budget,
+			)
+			if err != nil {
+				t.Fatalf("stage after cleanup: %v", err)
+			}
+			if err := cleanupEvidencePreparationWorkspace(second); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestEvidencePreparationBudgetReconcilesRegeneratedTrees(t *testing.T) {
+	firstSource := t.TempDir()
+	secondSource := t.TempDir()
+	writeTestFile(t, firstSource, "evidence.txt", "1234")
+	writeTestFile(t, secondSource, "evidence.txt", "5678")
+	stagingParent := t.TempDir()
+	budget := newEvidencePreparationBudgetWithLimits(2, 10, 10)
+	first, err := stageEvidenceForPreparation(stagingParent, firstSource, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(first.runDir, "evidence.txt"),
+		[]byte("12345678"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	regenerated, err := snapshotEvidenceTree(first.runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.resizeReservation(regenerated); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stageEvidenceForPreparation(
+		stagingParent,
+		secondSource,
+		budget,
+	); err == nil || !strings.Contains(err.Error(), "total bytes") {
+		t.Fatalf("stage after regenerated growth error = %v", err)
+	}
+	if err := cleanupEvidencePreparationWorkspace(first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := stageEvidenceForPreparation(stagingParent, secondSource, budget)
+	if err != nil {
+		t.Fatalf("stage after regenerated cleanup: %v", err)
+	}
+	if err := cleanupEvidencePreparationWorkspace(second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestEvidencePreparationBudgetRejectsRegeneratedGrowthAtomically(t *testing.T) {
+	source := t.TempDir()
+	writeTestFile(t, source, "evidence.txt", "1234")
+	budget := newEvidencePreparationBudgetWithLimits(1, 10, 6)
+	workspace, err := stageEvidenceForPreparation(t.TempDir(), source, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspace.runDir, "evidence.txt"),
+		[]byte("12345678"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	regenerated, err := snapshotEvidenceTree(workspace.runDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := workspace.resizeReservation(regenerated); err == nil ||
+		!strings.Contains(err.Error(), "after regeneration") {
+		t.Fatalf("regenerated growth error = %v", err)
+	}
+	if err := cleanupEvidencePreparationWorkspace(workspace); err != nil {
+		t.Fatalf("cleanup after rejected growth: %v", err)
+	}
+}
+
+func TestEvidencePreparationBudgetPoisonStopsLaterStages(t *testing.T) {
+	source := t.TempDir()
+	writeTestFile(t, source, "evidence.txt", "1234")
+	snapshot, err := snapshotEvidenceTree(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := newEvidencePreparationBudgetWithLimits(2, 10, 100)
+	reservation, err := budget.reserve(snapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget.poison(errors.New("cleanup failed"))
+	if _, err := budget.reserve(snapshot); err == nil ||
+		!strings.Contains(err.Error(), "unavailable after cleanup failure") {
+		t.Fatalf("reserve after cleanup poison error = %v", err)
+	}
+	if err := budget.resize(reservation, snapshot); err == nil ||
+		!strings.Contains(err.Error(), "unavailable after cleanup failure") {
+		t.Fatalf("resize after cleanup poison error = %v", err)
+	}
+	if err := budget.release(reservation); err != nil {
+		t.Fatalf("release after cleanup poison: %v", err)
+	}
+}
+
+func TestEvidencePreparationTrackerRejectsMutationBeforePublication(t *testing.T) {
+	canonical := t.TempDir()
+	writeTestFile(t, canonical, "evidence.txt", "original\n")
+	snapshot, err := snapshotEvidenceTree(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tracker := evidencePreparationTracker{}
+	if err := tracker.recordSourceSnapshot(canonical, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(canonical, "evidence.txt"),
+		[]byte("changed\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := tracker.verifySources(); err == nil ||
+		!strings.Contains(err.Error(), "changed before publication") {
+		t.Fatalf("publication verification error = %v", err)
+	}
+}
+
+func TestFinalPreparationVerificationRejectsLateCanonicalMutation(t *testing.T) {
+	canonical := t.TempDir()
+	writeTestFile(t, canonical, "evidence.txt", "original\n")
+	budget := newEvidencePreparationBudget()
+	workspace, err := stageEvidenceForPreparation(t.TempDir(), canonical, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(canonical, "evidence.txt"),
+		[]byte("changed\n"),
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	results := finalizePreparedEvidence(
+		[]caseResult{{ID: "late-mutation", Passed: true}},
+		map[evidencePreparationKey]evidencePreparationOutcome{
+			{}: {workspace: workspace},
+		},
+	)
+	if len(results) != 1 || results[0].Passed ||
+		!strings.Contains(results[0].Error, "canonical evidence changed") {
+		t.Fatalf("late mutation results = %+v", results)
+	}
+	if _, err := os.Lstat(workspace.root); !os.IsNotExist(err) {
+		t.Fatalf("staging root survived finalization: %v", err)
+	}
+}
+
+func TestPreparationCleanupFailureFlipsPassingResults(t *testing.T) {
+	canonical := t.TempDir()
+	writeTestFile(t, canonical, "evidence.txt", "original\n")
+	snapshot, err := snapshotEvidenceTree(canonical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidRoot := t.TempDir()
+	workspace := &evidencePreparationWorkspace{
+		root:           invalidRoot,
+		source:         canonical,
+		sourceSnapshot: snapshot,
+	}
+	results := finalizePreparedEvidence(
+		[]caseResult{{ID: "cleanup", Passed: true}},
+		map[evidencePreparationKey]evidencePreparationOutcome{
+			{}: {workspace: workspace},
+		},
+	)
+	if len(results) != 1 || results[0].Passed ||
+		!strings.Contains(results[0].Error, "refusing to remove invalid") {
+		t.Fatalf("cleanup failure results = %+v", results)
+	}
+	if _, err := os.Stat(invalidRoot); err != nil {
+		t.Fatalf("invalid cleanup root was removed: %v", err)
+	}
+}
+
 func TestRepairAttemptRejectsIdentityMismatchBeforeQualityCommands(t *testing.T) {
 	repoRoot := t.TempDir()
 	scriptDir := filepath.Join(repoRoot, "experiments", "lsp-replacement")
@@ -954,4 +1468,27 @@ func writeTestFile(t *testing.T, dir, name, contents string) {
 	if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func runCapturingStderr(t *testing.T, callback func() int) (int, string) {
+	t.Helper()
+	capture, err := os.CreateTemp(t.TempDir(), "stderr-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stderr
+	os.Stderr = capture
+	defer func() {
+		os.Stderr = original
+	}()
+	status := callback()
+	os.Stderr = original
+	if err := capture.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(capture.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return status, string(content)
 }
