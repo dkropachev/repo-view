@@ -170,21 +170,12 @@ The evidence rejects four assumptions: more calls imply better quality; prose
 or mutable environment budgets enforce limits; static keyword coverage proves
 correctness; any cached dependency version is acceptable evidence.
 
-## Reproduce
+## Archived validation
 
-Replay accepted and rejected evidence without new model calls:
+The shell suite driver used to replay and resolve this historical evidence has
+been removed. Use `tokenbench` for new reproducible paired studies.
 
-```bash
-experiments/lsp-replacement/suite.sh replay
-```
-
-Verify every retained failure against current fixes and replacement evidence:
-
-```bash
-experiments/lsp-replacement/suite.sh resolve
-```
-
-Run a fresh candidate using the current canonical baseline:
+The historical fresh-run command was:
 
 ```bash
 experiments/lsp-replacement/run.sh \

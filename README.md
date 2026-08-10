@@ -160,11 +160,10 @@ The [reproduction harness](experiments/lsp-replacement/README.md) reruns any
 cohort and stores raw evidence, extracted answers, commands, and regenerated
 metrics under the ignored local evidence directory.
 The [deep-navigation report](experiments/lsp-replacement/deep-navigation-results.md)
-records current verified replacements and every retained regression case. Run
-`experiments/lsp-replacement/suite.sh replay` to validate all parked accepted
-and rejected evidence. Run
-`experiments/lsp-replacement/suite.sh resolve` to verify every retained
-failure against the current Go regressions and accepted replacement evidence.
+records the historical replacements and retained regression cases. The old
+shell suite driver has been removed; new reproducible comparisons belong in
+[`tokenbench`](benchmarks/tokenbench/README.md), whose evidence and parity
+contracts fail closed.
 
 ## Validation
 

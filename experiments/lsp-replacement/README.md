@@ -3,71 +3,13 @@
 This harness reruns the controlled Codex baseline versus `repo-view` comparison
 and keeps all evidence in this repository without committing raw session data.
 
-## Regression Suite
+## Archived regression suite
 
-Replay every accepted and rejected case from local evidence, regenerate its
-metrics, call graphs, and deterministic quality results, re-aggregate parked
-judge outputs, and check the retained outcome:
-
-```bash
-experiments/lsp-replacement/suite.sh replay
-```
-
-Verify that every retained rejection is addressed by the current Go
-implementation and accepted replacement evidence:
-
-```bash
-experiments/lsp-replacement/suite.sh resolve
-```
-
-Generate and judge a fresh replacement for one failed case:
-
-```bash
-experiments/lsp-replacement/suite.sh repair \
-  --case 05-rejected-bounded-cost-regression \
-  --judge-repeats 2
-```
-
-`replay` proves each fixture failure signature remains reproducible. `resolve`
-instead runs named Go regression tests, checks exact current quality criteria,
-and publishes current token, per-tool, and call-graph statistics for all cases.
-`repair` stages deterministic and source-judge gates, retains failed attempts,
-and rejects any candidate with non-positive token savings or worse quality.
-
-The default suite is ordered from the one-call explanation through every
-rejected deep fixture and the accepted verified deep workload. A rejected
-case passes replay when its fixture rejection signature is reproduced; it is
-not reclassified as an accepted result.
-
-List cases or run a subset:
-
-```bash
-experiments/lsp-replacement/suite.sh list
-experiments/lsp-replacement/suite.sh replay --max-level 6
-experiments/lsp-replacement/suite.sh replay \
-  --case 10-rejected-wrong-dependency-semantics,16-deep-verified-accepted
-```
-
-Live reruns are enabled only for accepted cases. They invoke Codex and two
-source-grounded judges per task by default:
-
-```bash
-experiments/lsp-replacement/suite.sh live \
-  --case 01-simple-explain-accepted
-experiments/lsp-replacement/suite.sh live \
-  --case 16-deep-verified-accepted \
-  --judge-repeats 2
-```
-
-Each live case pins `source`, full target `commit`, `prompt_commit`, full
-`base`, and `model_mode`. The suite passes those values explicitly and rejects
-the result unless its manifest records the same source repository, target,
-prompt, base, and routing mode.
-
-Suite definitions and machine-checkable expectations are tracked in
-`suite/cases.json`; current causes, fixes, and proof obligations are tracked in
-`suite/resolutions.json`. Results are stored locally under
-`evidence/suites/RUN_ID/` as `results.json` and `summary.md`.
+The former shell regression-suite driver has been removed. The manifests and
+reports under `suite/` remain historical artifacts; they are not a supported
+compatibility or reproduction surface. Use
+[`tokenbench`](../../benchmarks/tokenbench/README.md) for new paired runs,
+verification, replay, and signed evidence.
 
 ## Run
 
