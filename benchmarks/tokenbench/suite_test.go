@@ -200,6 +200,116 @@ func TestSuiteRequiresStructuredImmutableModelRevision(t *testing.T) {
 	}
 }
 
+func TestSuiteRejectsTimeoutDurationOverflow(t *testing.T) {
+	t.Parallel()
+	suite := validLoadedSuite().suite
+	suite.TimeoutMillis = 1<<63 - 1
+	if err := suite.Validate(); err == nil {
+		t.Fatal("overflowing timeout was accepted")
+	}
+}
+
+func TestSuiteRejectsPracticalResourceBounds(t *testing.T) {
+	t.Parallel()
+	tests := map[string]func(*Suite){
+		"repetitions": func(suite *Suite) { suite.Repetitions = maxRepetitions + 1 },
+		"timeout":     func(suite *Suite) { suite.TimeoutMillis = maximumTimeoutMillis + 1 },
+		"id":          func(suite *Suite) { suite.ID = strings.Repeat("a", maximumSuiteIDBytes+1) },
+		"prompt path": func(suite *Suite) {
+			suite.PromptFile = strings.Repeat("p", maximumSuitePathBytes+1)
+		},
+		"harness kind": func(suite *Suite) {
+			suite.HarnessKind = strings.Repeat("h", maximumHarnessKindBytes+1)
+		},
+		"harness path": func(suite *Suite) {
+			suite.HarnessExecutable = "/" + strings.Repeat("h", maximumSuitePathBytes)
+		},
+		"git path": func(suite *Suite) {
+			suite.GitExecutable = "/" + strings.Repeat("g", maximumSuitePathBytes)
+		},
+		"model": func(suite *Suite) {
+			suite.Model = strings.Repeat("m", maximumModelBytes+1)
+			suite.ExpectedModelRevision = suite.Model + "@2026-08-01"
+		},
+		"model revision": func(suite *Suite) {
+			suite.ExpectedModelRevision = suite.Model + "@" +
+				strings.Repeat("2", maximumModelRevisionBytes)
+		},
+		"reasoning effort": func(suite *Suite) {
+			suite.ReasoningEffort = strings.Repeat("r", maximumReasoningEffortBytes+1)
+		},
+		"developer instructions": func(suite *Suite) {
+			suite.DeveloperInstructions = strings.Repeat("d", maximumInstructionsBytes+1)
+		},
+		"developer NUL": func(suite *Suite) {
+			suite.DeveloperInstructions = "instruction\x00suffix"
+		},
+		"source root": func(suite *Suite) {
+			suite.SourceRoot = strings.Repeat("s", maximumSuitePathBytes+1)
+		},
+	}
+	for name, mutate := range tests {
+		name, mutate := name, mutate
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			suite := validLoadedSuite().suite
+			mutate(&suite)
+			if err := suite.Validate(); err == nil {
+				t.Fatal("suite beyond practical bound was accepted")
+			}
+		})
+	}
+}
+
+func TestLoadSuiteRejectsOversizedSuiteAndPromptBeforeAllocation(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	oversizedSuite := filepath.Join(directory, "oversized-suite.json")
+	file, err := os.OpenFile(oversizedSuite, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maximumSuiteBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSuite(oversizedSuite); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized suite error = %v, want byte limit", err)
+	}
+
+	promptPath := filepath.Join(directory, "prompt.md")
+	prompt, err := os.OpenFile(promptPath, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prompt.Truncate(maximumPromptBytes + 1); err != nil {
+		_ = prompt.Close()
+		t.Fatal(err)
+	}
+	if err := prompt.Close(); err != nil {
+		t.Fatal(err)
+	}
+	suite := validLoadedSuite().suite
+	suite.PromptFile = "prompt.md"
+	suite.SourceRoot = "source"
+	raw, err := json.Marshal(suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	suitePath := filepath.Join(directory, "suite.json")
+	if err := os.WriteFile(suitePath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadSuite(suitePath); err == nil ||
+		!strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized prompt error = %v, want byte limit", err)
+	}
+}
+
 func TestSuiteSchemaHasNoArmOrToolConfiguration(t *testing.T) {
 	t.Parallel()
 	typeInfo := reflect.TypeFor[Suite]()

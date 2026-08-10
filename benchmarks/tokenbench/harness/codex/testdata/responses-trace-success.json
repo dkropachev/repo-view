@@ -1,0 +1,139 @@
+{
+  "schema_version": "tokenbench.codex.responses-trace/v1",
+  "first_request": {
+    "model": "gpt-5.4",
+    "non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tools": [
+      {
+        "kind": "command",
+        "name": "exec_command",
+        "wire_type": "function",
+        "strict": true,
+        "description_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "input_schema_sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      {
+        "kind": "mcp_support",
+        "name": "list_mcp_resources",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "input_schema_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      },
+      {
+        "kind": "mcp_support",
+        "name": "list_mcp_resource_templates",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "input_schema_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      },
+      {
+        "kind": "mcp_support",
+        "name": "read_mcp_resource",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "input_schema_sha256": "abababababababababababababababababababababababababababababababab"
+      },
+      {
+        "kind": "mcp",
+        "name": "repo_view.changed",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+        "input_schema_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      },
+      {
+        "kind": "mcp",
+        "name": "repo_view.find",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "input_schema_sha256": "6666666666666666666666666666666666666666666666666666666666666666"
+      },
+      {
+        "kind": "mcp",
+        "name": "repo_view.inspect",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+        "input_schema_sha256": "8888888888888888888888888888888888888888888888888888888888888888"
+      },
+      {
+        "kind": "mcp",
+        "name": "repo_view.outline",
+        "wire_type": "function",
+        "strict": false,
+        "description_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+        "input_schema_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    ]
+  },
+  "responses": [
+    {
+      "request_model": "gpt-5.4",
+      "request_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "response_model": "gpt-5.4-2026-03-05",
+      "provider_model_header": "gpt-5.4-2026-03-05",
+      "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "outputs": [
+        {
+          "type": "tool_call",
+          "wire_sha256": "1313131313131313131313131313131313131313131313131313131313131313",
+          "payload_sha256": "521013d0d35074d0ae8f69d0b54b20a7c5b46e727de40c4434811bf38f0c1538",
+          "kind": "command",
+          "name": "exec_command"
+        },
+        {
+          "type": "tool_call",
+          "wire_sha256": "1414141414141414141414141414141414141414141414141414141414141414",
+          "payload_sha256": "16bd2b354b5228b655cb7c5bc341fb96cf3fe5ac8395ecb0e2e136d1558ab584",
+          "kind": "mcp",
+          "name": "repo_view.inspect"
+        }
+      ],
+      "usage": {
+        "input_tokens": 6,
+        "cached_input_tokens": 2,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 3,
+        "reasoning_tokens": 1
+      },
+      "reasoning_included": true
+    },
+    {
+      "request_model": "gpt-5.4",
+      "request_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
+      "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "response_model": "gpt-5.4-2026-03-05",
+      "provider_model_header": "gpt-5.4-2026-03-05",
+      "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
+      "outputs": [
+        {
+          "type": "reasoning",
+          "wire_sha256": "1616161616161616161616161616161616161616161616161616161616161616",
+          "payload_sha256": "cd7190efa7b7d721bb920dc616d68803dbc6e897fefc9586ba7a3be306cd74c1",
+          "kind": "",
+          "name": ""
+        },
+        {
+          "type": "assistant_message",
+          "wire_sha256": "1717171717171717171717171717171717171717171717171717171717171717",
+          "payload_sha256": "97b38b2ebda1ca4cf4ea291005d97d07c7053db2aed3ef866c04b49ecfb3448d",
+          "kind": "",
+          "name": ""
+        }
+      ],
+      "usage": {
+        "input_tokens": 4,
+        "cached_input_tokens": 0,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 2,
+        "reasoning_tokens": 0
+      },
+      "reasoning_included": true
+    }
+  ]
+}

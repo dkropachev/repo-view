@@ -2,7 +2,9 @@ package repoview
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path"
@@ -13,12 +15,23 @@ import (
 	"unicode/utf8"
 )
 
-// Match the JavaScript backend's 8 MiB source budget, with one Scanner-sized
-// margin for a line terminator and read-ahead.
-const maximumSourceLineBytes = (8 << 20) + bufio.MaxScanTokenSize
+const (
+	// Match the JavaScript backend's 8 MiB per-line budget, with one
+	// Scanner-sized margin for a line terminator and read-ahead. The other
+	// limits make repository traversal and source reads fail closed instead of
+	// allowing an MCP request to consume unbounded memory or time.
+	maximumSourceLineBytes   = (8 << 20) + bufio.MaxScanTokenSize
+	maximumSourceFileBytes   = 64 << 20
+	maximumSourceTreeBytes   = 1 << 30
+	maximumSourceTreeEntries = 100_000
+	maximumRepositoryDepth   = 128
+	maximumRepositoryPathLen = 4_096
+)
 
 type RepoView struct {
-	root string
+	pinnedGit *gitExecutableIdentity
+	root      string
+	ctx       context.Context
 }
 
 func New(root string) (*RepoView, error) {
@@ -37,16 +50,86 @@ func New(root string) (*RepoView, error) {
 	if !info.IsDir() {
 		return nil, fmt.Errorf("repository root is not a directory: %s", root)
 	}
-	return &RepoView{root: filepath.Clean(resolved)}, nil
+	return &RepoView{
+		root: filepath.Clean(resolved),
+		ctx:  context.Background(),
+	}, nil
+}
+
+// WithContext returns an independent view whose filesystem walks, source
+// scans, and Git subprocesses are canceled with ctx. RepoView values returned
+// by New are safe to use as immutable templates for concurrent request-local
+// clones.
+func (r *RepoView) WithContext(ctx context.Context) *RepoView {
+	clone := *r
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	clone.ctx = ctx
+	return &clone
+}
+
+func (r *RepoView) operationContext() context.Context {
+	if r.ctx == nil {
+		return context.Background()
+	}
+	return r.ctx
+}
+
+func (r *RepoView) checkContext() error {
+	select {
+	case <-r.operationContext().Done():
+		return r.operationContext().Err()
+	default:
+		return nil
+	}
+}
+
+// NewWithGit constructs a repository view whose Git-backed operations use one
+// exact executable. The path and SHA-256 are verified at construction and
+// immediately before and after every Git subprocess. Non-Git navigation has
+// the same behavior as New.
+func NewWithGit(root, executable, expectedSHA256 string) (*RepoView, error) {
+	view, err := New(root)
+	if err != nil {
+		return nil, err
+	}
+	identity, err := newGitExecutableIdentity(executable, expectedSHA256)
+	if err != nil {
+		return nil, err
+	}
+	view.pinnedGit = &identity
+	return view, nil
 }
 
 func (r *RepoView) sourceFiles() ([]string, error) {
 	extensions := defaultExtensions()
 	excludes := defaultExcludes()
 	var paths []string
+	var sourceBytes int64
+	entries := 0
 	err := filepath.WalkDir(r.root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if err := r.checkContext(); err != nil {
+			return err
+		}
+		entries++
+		if entries > maximumSourceTreeEntries {
+			return fmt.Errorf(
+				"repository tree exceeds %d entries",
+				maximumSourceTreeEntries,
+			)
+		}
+		relative, err := filepath.Rel(r.root, path)
+		if err != nil {
+			return fmt.Errorf("resolve repository path: %w", err)
+		}
+		relative = filepath.ToSlash(relative)
+		if len(relative) > maximumRepositoryPathLen ||
+			strings.Count(relative, "/") > maximumRepositoryDepth {
+			return fmt.Errorf("repository path exceeds traversal limits: %q", relative)
 		}
 		name := d.Name()
 		if d.IsDir() {
@@ -63,6 +146,20 @@ func (r *RepoView) sourceFiles() ([]string, error) {
 			return err
 		}
 		if info.Mode().IsRegular() && extensions[filepath.Ext(path)] {
+			if info.Size() < 0 || info.Size() > maximumSourceFileBytes {
+				return fmt.Errorf(
+					"source file exceeds %d bytes: %s",
+					maximumSourceFileBytes,
+					relative,
+				)
+			}
+			if sourceBytes > maximumSourceTreeBytes-info.Size() {
+				return fmt.Errorf(
+					"repository source exceeds %d bytes",
+					maximumSourceTreeBytes,
+				)
+			}
+			sourceBytes += info.Size()
 			paths = append(paths, path)
 		}
 		return nil
@@ -92,7 +189,7 @@ func (r *RepoView) readRelativeLines(relative string) ([]string, string, error) 
 	if err != nil {
 		return nil, "", err
 	}
-	lines, err := readLines(fullPath)
+	lines, err := readLinesContext(r.operationContext(), fullPath)
 	if err != nil {
 		return nil, "", err
 	}
@@ -143,12 +240,26 @@ func (r *RepoView) resolveRegularPath(relative string) (string, string, error) {
 }
 
 func readLines(path string) ([]string, error) {
+	return readLinesContext(context.Background(), path)
+}
+
+func readLinesContext(ctx context.Context, path string) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
 	}
 	if !before.Mode().IsRegular() || before.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("source path is not a regular file: %s", path)
+	}
+	if before.Size() < 0 || before.Size() > maximumSourceFileBytes {
+		return nil, fmt.Errorf(
+			"source file exceeds %d bytes: %s",
+			maximumSourceFileBytes,
+			path,
+		)
 	}
 	file, err := os.Open(path)
 	if err != nil {
@@ -164,10 +275,16 @@ func readLines(path string) ([]string, error) {
 		return nil, fmt.Errorf("source file changed while opening: %s", path)
 	}
 
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(io.LimitReader(file, maximumSourceFileBytes+1))
 	scanner.Buffer(make([]byte, 1024), maximumSourceLineBytes)
 	var lines []string
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			_ = file.Close()
+			return nil, ctx.Err()
+		default:
+		}
 		lines = append(lines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {

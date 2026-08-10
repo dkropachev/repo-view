@@ -140,15 +140,11 @@ func TestExternalAdapterRejectsInvalidConfigurationStrings(t *testing.T) {
 	t.Parallel()
 	base := func() Config {
 		return Config{
-			Environment: map[string]string{"LANG": "C"},
+			Environment: map[string]string{},
 			Arguments:   []string{"--adapter"},
-			CommitmentKey: []byte(strings.Repeat(
-				"k",
-				minimumKeyBytes,
-			)),
-			Command: os.Args[0],
-			Kind:    "external-fixture",
-			Timeout: time.Second,
+			Command:     os.Args[0],
+			Kind:        "external-fixture",
+			Timeout:     time.Second,
 		}
 	}
 	for name, mutate := range map[string]func(*Config){
@@ -167,11 +163,11 @@ func TestExternalAdapterRejectsInvalidConfigurationStrings(t *testing.T) {
 		"environment value NUL": func(config *Config) {
 			config.Environment = map[string]string{"KEY": "bad\x00value"}
 		},
-		"environment without commitment key": func(config *Config) {
-			config.CommitmentKey = nil
+		"environment prohibited": func(config *Config) {
+			config.Environment = map[string]string{"KEY": "value"}
 		},
-		"short commitment key": func(config *Config) {
-			config.CommitmentKey = []byte("too short")
+		"commitment key prohibited": func(config *Config) {
+			config.CommitmentKey = []byte(strings.Repeat("k", 32))
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -301,6 +297,21 @@ func TestExternalAdapterRejectsStderr(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "stderr") {
 		t.Fatalf("expected stderr error, got %v", err)
 	}
+	if strings.Contains(err.Error(), "credential-looking-stderr-value") {
+		t.Fatal("external adapter stderr leaked into the parent error")
+	}
+}
+
+func TestExternalAdapterRejectsChildErrorWithoutLeakingIt(t *testing.T) {
+	t.Parallel()
+	adapter := helperAdapter(t, "response-error")
+	_, err := adapter.Resolve(context.Background(), harness.ResolveRequest{})
+	if err == nil || !strings.Contains(err.Error(), "reported an error") {
+		t.Fatalf("expected fixed child error, got %v", err)
+	}
+	if strings.Contains(err.Error(), "credential-looking-response-value") {
+		t.Fatal("external adapter response error leaked into the parent error")
+	}
 }
 
 func TestExternalAdapterRejectsDuplicateResponseKeys(t *testing.T) {
@@ -324,15 +335,11 @@ func TestExternalAdapterRejectsInvalidUTF8Response(t *testing.T) {
 func TestExternalAdapterOutputLimit(t *testing.T) {
 	t.Parallel()
 	adapter, err := New(Config{
-		Environment: map[string]string{
-			"TOKENBENCH_PROCESS_HELPER": "overflow",
-		},
-		CommitmentKey: []byte(strings.Repeat("k", minimumKeyBytes)),
-		Arguments:     []string{"-test.run=TestExternalAdapterHelperProcess"},
-		Command:       os.Args[0],
-		Kind:          "external-fixture",
-		Timeout:       5 * time.Second,
-		MaxOutput:     64,
+		Arguments: []string{"-test.run=TestExternalAdapterHelperProcess", "--", "overflow"},
+		Command:   os.Args[0],
+		Kind:      "external-fixture",
+		Timeout:   5 * time.Second,
+		MaxOutput: 64,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -353,9 +360,6 @@ func TestExternalAdapterBoundsDescendantPipeWait(t *testing.T) {
 	if err == nil {
 		t.Fatal("adapter descendant holding stdio pipes was accepted")
 	}
-	if !strings.Contains(err.Error(), "WaitDelay") {
-		t.Fatalf("adapter failed before exercising bounded pipe wait: %v", err)
-	}
 	if elapsed := time.Since(started); elapsed > 2*time.Second {
 		t.Fatalf("adapter pipe wait exceeded hard bound: %s: %v", elapsed, err)
 	}
@@ -364,14 +368,10 @@ func TestExternalAdapterBoundsDescendantPipeWait(t *testing.T) {
 func helperAdapter(t *testing.T, mode string) *Adapter {
 	t.Helper()
 	adapter, err := New(Config{
-		Environment: map[string]string{
-			"TOKENBENCH_PROCESS_HELPER": mode,
-		},
-		CommitmentKey: []byte(strings.Repeat("k", minimumKeyBytes)),
-		Arguments:     []string{"-test.run=TestExternalAdapterHelperProcess"},
-		Command:       os.Args[0],
-		Kind:          "external-fixture",
-		Timeout:       5 * time.Second,
+		Arguments: []string{"-test.run=TestExternalAdapterHelperProcess", "--", mode},
+		Command:   os.Args[0],
+		Kind:      "external-fixture",
+		Timeout:   5 * time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -380,12 +380,18 @@ func helperAdapter(t *testing.T, mode string) *Adapter {
 }
 
 func TestExternalAdapterHelperProcess(t *testing.T) {
-	mode := os.Getenv("TOKENBENCH_PROCESS_HELPER")
+	mode := ""
+	for index, argument := range os.Args {
+		if argument == "--" && index+1 < len(os.Args) {
+			mode = os.Args[index+1]
+			break
+		}
+	}
 	if mode == "" {
 		return
 	}
 	if mode == "stderr" {
-		_, _ = os.Stderr.WriteString("unexpected diagnostic")
+		_, _ = os.Stderr.WriteString("credential-looking-stderr-value")
 	}
 	if mode == "overflow" {
 		_, _ = os.Stdout.WriteString(strings.Repeat("x", 1024))
@@ -424,6 +430,13 @@ func TestExternalAdapterHelperProcess(t *testing.T) {
 		version = "wrong/v1"
 	}
 	response := wireResponse{ProtocolVersion: version}
+	if mode == "response-error" {
+		response.Error = "credential-looking-response-value"
+		if err := json.NewEncoder(os.Stdout).Encode(response); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
 	if mode == "check-cwd" {
 		current, cwdErr := os.Getwd()
 		if cwdErr != nil {

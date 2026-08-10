@@ -12,8 +12,23 @@ import (
 
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
+	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
 )
+
+func TestCurrentRunnerIdentityUsesPinnedRunningImage(t *testing.T) {
+	want, err := selfexec.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, digest, err := currentRunnerIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != want.Path || digest != want.SHA256 {
+		t.Fatalf("currentRunnerIdentity() = (%q, %q), want (%q, %q)", path, digest, want.Path, want.SHA256)
+	}
+}
 
 func TestResolvePairDiffIsExactlyRepoViewMCP(t *testing.T) {
 	t.Parallel()
@@ -90,6 +105,7 @@ func TestPrepareSuiteRejectsUncheckedHarness(t *testing.T) {
 	}
 	loaded.suite.HarnessExecutable = path
 	loaded.suite.HarnessSHA256 = SHA256([]byte("claimed"))
+	loaded = bindFixtureSuiteJSON(t, loaded)
 	if _, err := PrepareSuite(context.Background(), loaded, fake.Adapter{}); err == nil ||
 		!strings.Contains(err.Error(), "digest mismatch") {
 		t.Fatalf("expected harness digest error, got %v", err)
@@ -254,10 +270,6 @@ func TestParityRejectsOpaqueCommonEscapeHatches(t *testing.T) {
 			baseline.Arguments = []string{"--config", "mcp_servers.oracle=..."}
 			candidate.Arguments = append([]string(nil), baseline.Arguments...)
 		},
-		"environment": func(baseline, candidate *harness.Invocation) {
-			baseline.Environment = map[string]string{"HARNESS_CONFIG": "/oracle"}
-			candidate.Environment = cloneMap(baseline.Environment)
-		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -307,6 +319,27 @@ func TestResolvedPlanDetectsTampering(t *testing.T) {
 	}
 }
 
+func TestResolvedPlanRejectsSharedHiddenCommonArguments(t *testing.T) {
+	t.Parallel()
+	plan := mustPlan(t)
+	plan.RenderedProcesses.Baseline.Argv = append(
+		plan.RenderedProcesses.Baseline.Argv,
+		"--hidden-common-override",
+	)
+	plan.RenderedProcesses.Candidate.Argv = append(
+		append(
+			[]string(nil),
+			plan.RenderedProcesses.Baseline.Argv...,
+		),
+		plan.RenderedProcesses.CandidateMCPArguments...,
+	)
+	plan.RenderedProcessesSHA256 = mustJSONSHA256(t, plan.RenderedProcesses)
+	if err := plan.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "code-owned fake common process") {
+		t.Fatalf("shared hidden common argv was accepted: %v", err)
+	}
+}
+
 func TestResolvedPlanRejectsRequestedResolvedModelMismatch(t *testing.T) {
 	t.Parallel()
 	plan := mustPlan(t)
@@ -314,8 +347,49 @@ func TestResolvedPlanRejectsRequestedResolvedModelMismatch(t *testing.T) {
 	plan.Candidate.RequestedModel = "other-model"
 	recommitPlan(t, &plan)
 	if err := plan.Validate(); err == nil ||
-		!strings.Contains(err.Error(), "does not match requested model") {
+		!strings.Contains(err.Error(), "does not match plan") {
 		t.Fatalf("requested/resolved model mismatch was accepted: %v", err)
+	}
+}
+
+func TestResolvedPlanBindsRelativePathsToSuiteOrigin(t *testing.T) {
+	t.Parallel()
+	plan := mustPlan(t)
+	authored, err := decodeEmbeddedSuite(plan.SuiteJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	origin := filepath.Dir(plan.SuitePath)
+	authored.PromptFile, err = filepath.Rel(origin, plan.ResolvedSuite.PromptFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authored.SourceRoot, err = filepath.Rel(origin, plan.ResolvedSuite.SourceRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.SuiteJSON, err = json.Marshal(authored)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.SuiteSHA256 = SHA256(plan.SuiteJSON)
+	if err := plan.Validate(); err != nil {
+		t.Fatalf("relative-path plan is invalid before rebinding: %v", err)
+	}
+	plan.SuitePath = filepath.Join(filepath.Dir(plan.SuitePath), "moved", "suite.json")
+	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "resolved suite") {
+		t.Fatalf("suite-origin rebinding was accepted: %v", err)
+	}
+
+	plan = mustPlan(t)
+	plan.ResolvedSuite.SourceRoot = "/different-source"
+	digest, err := JSONSHA256(plan.ResolvedSuite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.ResolvedSuiteSHA256 = digest
+	if err := plan.Validate(); err == nil || !strings.Contains(err.Error(), "authored suite") {
+		t.Fatalf("resolved source rebinding was accepted: %v", err)
 	}
 }
 
@@ -418,6 +492,55 @@ func TestPairBuildRejectsResolvedAdapterIdentityDrift(t *testing.T) {
 	}
 }
 
+func TestAdapterOwnedCommonEnvironmentIsEqualAcrossArms(t *testing.T) {
+	t.Parallel()
+	adapter := &environmentAdapter{environment: map[string]string{
+		"LANG": "C.UTF-8",
+		"TZ":   "UTC",
+	}}
+	pair, _ := buildReadyPair(t, adapter)
+	processes, err := pair.Build(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(processes.Baseline.Environment, adapter.environment) ||
+		!reflect.DeepEqual(processes.Baseline.Environment, processes.Candidate.Environment) {
+		t.Fatalf("common environment was not preserved: %+v", processes)
+	}
+}
+
+func TestPairBuildRejectsCommonEnvironmentDrift(t *testing.T) {
+	t.Parallel()
+	adapter := &environmentAdapter{
+		environment: map[string]string{"LANG": "C.UTF-8"},
+		drift:       true,
+	}
+	pair, _ := buildReadyPair(t, adapter)
+	if _, err := pair.Build(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "environment changed") {
+		t.Fatalf("adapter environment drift was accepted: %v", err)
+	}
+}
+
+type environmentAdapter struct {
+	fake.Adapter
+	environment map[string]string
+	calls       int
+	drift       bool
+}
+
+func (adapter *environmentAdapter) CommonEnvironment(
+	_ context.Context,
+	_ harness.ResolveRequest,
+) (map[string]string, error) {
+	adapter.calls++
+	result := cloneMap(adapter.environment)
+	if adapter.drift && adapter.calls > 1 {
+		result["TZ"] = "UTC"
+	}
+	return result, nil
+}
+
 type driftingIdentityAdapter struct {
 	fake.Adapter
 	resolveCount int
@@ -494,10 +617,10 @@ func buildReadyPair(t *testing.T, adapter harness.Adapter) (Pair, string) {
 			Seed:                  1,
 		},
 		path:         filepath.Join(directory, "suite.json"),
-		sha256:       SHA256([]byte("suite")),
 		prompt:       prompt,
 		promptSHA256: SHA256(prompt),
 	}
+	loaded = bindFixtureSuiteJSON(t, loaded)
 	prepared, err := PrepareSuite(context.Background(), loaded, adapter)
 	if err != nil {
 		t.Fatal(err)
@@ -655,9 +778,10 @@ func preparedSuiteFixture(loaded LoadedSuite) PreparedSuite {
 		panic(err)
 	}
 	return PreparedSuite{
-		identity: identity,
-		loaded:   loaded,
-		adapter:  adapter,
+		identity:    identity,
+		environment: map[string]string{},
+		loaded:      loaded,
+		adapter:     adapter,
 		source: source.Snapshot{
 			GitExecutable:       "/usr/bin/git",
 			GitExecutableSHA256: SHA256([]byte("git")),
@@ -677,7 +801,7 @@ func repoViewToolFixture() RepoViewTool {
 
 func validLoadedSuite() LoadedSuite {
 	prompt := []byte("Explain the change.\n")
-	return LoadedSuite{
+	loaded := LoadedSuite{
 		suite: Suite{
 			SchemaVersion:         SuiteSchemaVersion,
 			ID:                    "fixture",
@@ -701,8 +825,25 @@ func validLoadedSuite() LoadedSuite {
 			Seed:                  42,
 		},
 		path:         "/suite/suite.json",
-		sha256:       SHA256([]byte("suite")),
 		prompt:       prompt,
 		promptSHA256: SHA256(prompt),
 	}
+	raw, err := json.Marshal(loaded.suite)
+	if err != nil {
+		panic(err)
+	}
+	loaded.raw = raw
+	loaded.sha256 = SHA256(raw)
+	return loaded
+}
+
+func bindFixtureSuiteJSON(t *testing.T, loaded LoadedSuite) LoadedSuite {
+	t.Helper()
+	raw, err := json.Marshal(loaded.suite)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded.raw = raw
+	loaded.sha256 = SHA256(raw)
+	return loaded
 }

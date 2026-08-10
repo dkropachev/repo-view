@@ -12,13 +12,27 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
 )
 
 // SuiteSchemaVersion is the only authored suite schema accepted by this
 // implementation.
 const SuiteSchemaVersion = "tokenbench.suite/v1"
 
-const maxRepetitions = 1<<31 - 1
+const (
+	maxRepetitions              = 100
+	maximumSuiteBytes           = 1 << 20
+	maximumPromptBytes          = 1 << 20
+	maximumSuiteIDBytes         = 128
+	maximumModelBytes           = 128
+	maximumModelRevisionBytes   = 256
+	maximumHarnessKindBytes     = 64
+	maximumReasoningEffortBytes = 64
+	maximumInstructionsBytes    = 64 << 10
+	maximumSuitePathBytes       = 4_096
+	maximumTimeoutMillis        = int64(2 * 60 * 60 * 1_000)
+)
 
 // Suite is deliberately a single common specification. It has no arm fields,
 // no tool registry, and no arbitrary per-arm extension map.
@@ -49,6 +63,7 @@ type Suite struct {
 // The raw digest makes later plans commit to what was actually parsed.
 type LoadedSuite struct {
 	path         string
+	raw          []byte
 	sha256       string
 	promptSHA256 string
 	prompt       []byte
@@ -70,6 +85,11 @@ func (loaded LoadedSuite) Digest() string {
 	return loaded.sha256
 }
 
+// Raw returns a defensive copy of the exact authored suite JSON bytes.
+func (loaded LoadedSuite) Raw() []byte {
+	return append([]byte(nil), loaded.raw...)
+}
+
 // Prompt returns a defensive copy of the exact task bytes.
 func (loaded LoadedSuite) Prompt() []byte {
 	return append([]byte(nil), loaded.prompt...)
@@ -88,7 +108,13 @@ func LoadSuite(path string) (LoadedSuite, error) {
 	if err != nil {
 		return LoadedSuite{}, fmt.Errorf("resolve suite path: %w", err)
 	}
-	raw, err := readStableRegularFile(absPath)
+	if len(absPath) > maximumSuitePathBytes {
+		return LoadedSuite{}, fmt.Errorf(
+			"suite path exceeds %d bytes",
+			maximumSuitePathBytes,
+		)
+	}
+	raw, err := readStableRegularFileLimited(absPath, maximumSuiteBytes)
 	if err != nil {
 		return LoadedSuite{}, fmt.Errorf("read suite: %w", err)
 	}
@@ -118,7 +144,17 @@ func LoadSuite(path string) (LoadedSuite, error) {
 	base := filepath.Dir(absPath)
 	suite.PromptFile = resolveRelative(base, suite.PromptFile)
 	suite.SourceRoot = resolveRelative(base, suite.SourceRoot)
-	prompt, err := readStableRegularFile(suite.PromptFile)
+	if len(suite.PromptFile) > maximumSuitePathBytes ||
+		len(suite.SourceRoot) > maximumSuitePathBytes {
+		return LoadedSuite{}, fmt.Errorf(
+			"resolved suite paths must not exceed %d bytes",
+			maximumSuitePathBytes,
+		)
+	}
+	prompt, err := readStableRegularFileLimited(
+		suite.PromptFile,
+		maximumPromptBytes,
+	)
 	if err != nil {
 		return LoadedSuite{}, fmt.Errorf("snapshot prompt: %w", err)
 	}
@@ -128,10 +164,14 @@ func LoadSuite(path string) (LoadedSuite, error) {
 	if !utf8.Valid(prompt) {
 		return LoadedSuite{}, errors.New("prompt must be valid UTF-8")
 	}
+	if bytes.IndexByte(prompt, 0) >= 0 {
+		return LoadedSuite{}, errors.New("prompt must not contain NUL")
+	}
 
 	return LoadedSuite{
 		suite:        suite,
 		path:         absPath,
+		raw:          append([]byte(nil), raw...),
 		sha256:       SHA256(raw),
 		prompt:       prompt,
 		promptSHA256: SHA256(prompt),
@@ -192,18 +232,28 @@ func (suite Suite) Validate() error {
 		return errors.New("suite id must not have leading or trailing whitespace")
 	case !validIdentifier(suite.ID, true):
 		return errors.New("suite id contains invalid characters")
+	case len(suite.ID) > maximumSuiteIDBytes:
+		return fmt.Errorf("suite id must not exceed %d bytes", maximumSuiteIDBytes)
 	case suite.PromptFile == "":
 		return errors.New("prompt_file is required")
+	case len(suite.PromptFile) > maximumSuitePathBytes:
+		return fmt.Errorf("prompt_file must not exceed %d bytes", maximumSuitePathBytes)
 	case suite.HarnessKind == "":
 		return errors.New("harness_kind is required")
+	case len(suite.HarnessKind) > maximumHarnessKindBytes:
+		return fmt.Errorf("harness_kind must not exceed %d bytes", maximumHarnessKindBytes)
 	case suite.HarnessExecutable == "":
 		return errors.New("harness_executable is required")
+	case len(suite.HarnessExecutable) > maximumSuitePathBytes:
+		return fmt.Errorf("harness_executable must not exceed %d bytes", maximumSuitePathBytes)
 	case !filepath.IsAbs(suite.HarnessExecutable):
 		return errors.New("harness_executable must be an absolute path")
 	case filepath.Clean(suite.HarnessExecutable) != suite.HarnessExecutable:
 		return errors.New("harness_executable must be a canonical path")
 	case !ValidSHA256(suite.HarnessSHA256):
 		return errors.New("harness_sha256 must be a lowercase SHA-256 digest")
+	case len(suite.GitExecutable) > maximumSuitePathBytes:
+		return fmt.Errorf("git_executable must not exceed %d bytes", maximumSuitePathBytes)
 	case !filepath.IsAbs(suite.GitExecutable):
 		return errors.New("git_executable must be an absolute path")
 	case filepath.Clean(suite.GitExecutable) != suite.GitExecutable:
@@ -212,16 +262,37 @@ func (suite Suite) Validate() error {
 		return errors.New("git_executable_sha256 must be a lowercase SHA-256 digest")
 	case !isPinnedModel(suite.Model):
 		return fmt.Errorf("model %q is not an explicit model selection", suite.Model)
+	case len(suite.Model) > maximumModelBytes:
+		return fmt.Errorf("model must not exceed %d bytes", maximumModelBytes)
 	case !validModelRevision(suite.ExpectedModelRevision):
 		return errors.New("expected_model_revision must be an immutable model identity")
+	case len(suite.ExpectedModelRevision) > maximumModelRevisionBytes:
+		return fmt.Errorf(
+			"expected_model_revision must not exceed %d bytes",
+			maximumModelRevisionBytes,
+		)
 	case !strings.HasPrefix(suite.ExpectedModelRevision, suite.Model+"@"):
 		return errors.New("expected_model_revision must begin with model followed by @")
 	case suite.ReasoningEffort == "":
 		return errors.New("reasoning_effort is required")
+	case len(suite.ReasoningEffort) > maximumReasoningEffortBytes:
+		return fmt.Errorf(
+			"reasoning_effort must not exceed %d bytes",
+			maximumReasoningEffortBytes,
+		)
 	case suite.PermissionProfile != "read-only":
 		return errors.New("permission_profile must be read-only")
+	case len(suite.DeveloperInstructions) > maximumInstructionsBytes:
+		return fmt.Errorf(
+			"developer_instructions must not exceed %d bytes",
+			maximumInstructionsBytes,
+		)
+	case strings.ContainsRune(suite.DeveloperInstructions, '\x00'):
+		return errors.New("developer_instructions must not contain NUL")
 	case suite.SourceRoot == "":
 		return errors.New("source_root is required")
+	case len(suite.SourceRoot) > maximumSuitePathBytes:
+		return fmt.Errorf("source_root must not exceed %d bytes", maximumSuitePathBytes)
 	case !validGitObjectID(suite.SourceRevision):
 		return errors.New("source_revision must be a full lowercase Git object id")
 	case !validGitObjectID(suite.SourceBaseRevision):
@@ -230,6 +301,10 @@ func (suite Suite) Validate() error {
 		return errors.New("source_tree_sha256 must be a lowercase SHA-256 digest")
 	case suite.TimeoutMillis <= 0:
 		return errors.New("timeout_millis must be positive")
+	case suite.TimeoutMillis > harness.MaxTimeoutMillis:
+		return errors.New("timeout_millis exceeds the representable duration")
+	case suite.TimeoutMillis > maximumTimeoutMillis:
+		return fmt.Errorf("timeout_millis must not exceed %d", maximumTimeoutMillis)
 	case suite.Repetitions <= 0:
 		return errors.New("repetitions must be positive")
 	case suite.Repetitions > maxRepetitions:
@@ -325,6 +400,16 @@ func resolveRelative(base, path string) string {
 }
 
 func readStableRegularFile(path string) ([]byte, error) {
+	return readStableRegularFileLimited(path, maximumPromptBytes)
+}
+
+func readStableRegularFileLimited(
+	path string,
+	maximumBytes int64,
+) (content []byte, resultErr error) {
+	if maximumBytes < 0 {
+		return nil, errors.New("regular file byte limit must be nonnegative")
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return nil, err
@@ -332,11 +417,22 @@ func readStableRegularFile(path string) ([]byte, error) {
 	if !before.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
+	if before.Size() < 0 || before.Size() > maximumBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, maximumBytes)
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() {
+		if closeErr := file.Close(); closeErr != nil {
+			resultErr = errors.Join(
+				resultErr,
+				fmt.Errorf("close %s: %w", path, closeErr),
+			)
+			content = nil
+		}
+	}()
 	opened, err := file.Stat()
 	if err != nil {
 		return nil, err
@@ -344,9 +440,12 @@ func readStableRegularFile(path string) ([]byte, error) {
 	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
 		return nil, fmt.Errorf("%s changed before it was opened", path)
 	}
-	content, err := io.ReadAll(file)
+	content, err = io.ReadAll(io.LimitReader(file, maximumBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(content)) > maximumBytes {
+		return nil, fmt.Errorf("%s exceeds %d bytes", path, maximumBytes)
 	}
 	openedAfter, err := file.Stat()
 	if err != nil {
@@ -358,6 +457,7 @@ func readStableRegularFile(path string) ([]byte, error) {
 	}
 	if !os.SameFile(before, openedAfter) || !os.SameFile(before, after) ||
 		before.Size() != openedAfter.Size() || before.Size() != after.Size() ||
+		before.Mode() != openedAfter.Mode() || before.Mode() != after.Mode() ||
 		!before.ModTime().Equal(openedAfter.ModTime()) ||
 		!before.ModTime().Equal(after.ModTime()) {
 		return nil, fmt.Errorf("%s changed while it was read", path)

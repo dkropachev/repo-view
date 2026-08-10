@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,87 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestBoundedCommandOutputRejectsOverflowWithoutGrowing(t *testing.T) {
+	t.Parallel()
+	output := &boundedCommandOutput{limit: 4}
+	written, err := output.Write([]byte("abcdef"))
+	if written != 4 || !errors.Is(err, errGitCommandOutputLimit) {
+		t.Fatalf("Write = (%d, %v), want (4, output limit)", written, err)
+	}
+	if got := output.String(); got != "abcd" {
+		t.Fatalf("buffer = %q, want abcd", got)
+	}
+	if written, err = output.Write([]byte("x")); written != 0 ||
+		!errors.Is(err, errGitCommandOutputLimit) {
+		t.Fatalf("second Write = (%d, %v), want (0, output limit)", written, err)
+	}
+}
+
+func TestReadStableRegularIsCanceledAndSizeBounded(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(path, []byte("bounded"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, _, err := readStableRegularContext(ctx, path, 64); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled read error = %v, want context.Canceled", err)
+	}
+	if _, _, err := readStableRegularContext(
+		context.Background(),
+		path,
+		3,
+	); err == nil || !strings.Contains(err.Error(), "exceeds 3 bytes") {
+		t.Fatalf("bounded read error = %v, want byte limit", err)
+	}
+}
+
+func TestSourceRelativePathLimits(t *testing.T) {
+	t.Parallel()
+	valid := strings.Repeat("a/", maximumSourcePathDepth) + "file"
+	if err := validateSourceRelativePath(valid); err != nil {
+		t.Fatalf("valid boundary path rejected: %v", err)
+	}
+	tooDeep := "a/" + valid
+	if err := validateSourceRelativePath(tooDeep); err == nil {
+		t.Fatal("path beyond maximum depth was accepted")
+	}
+	tooLong := strings.Repeat("a", maximumSourcePathBytes+1)
+	if err := validateSourceRelativePath(tooLong); err == nil {
+		t.Fatal("path beyond maximum byte length was accepted")
+	}
+}
+
+func TestCloseGitRunnerPreservesOperationAndCloseErrors(t *testing.T) {
+	t.Parallel()
+	operationErr := errors.New("operation failed")
+	closeErr := errors.New("close failed")
+	closeCalls := 0
+	runner := gitRunner{closeFn: func() error {
+		closeCalls++
+		return closeErr
+	}}
+
+	resultErr := operationErr
+	closeGitRunner(runner, &resultErr)
+	if !errors.Is(resultErr, operationErr) || !errors.Is(resultErr, closeErr) {
+		t.Fatalf("close result did not preserve both errors: %v", resultErr)
+	}
+	if closeCalls != 1 {
+		t.Fatalf("close calls = %d, want 1", closeCalls)
+	}
+
+	resultErr = nil
+	closeGitRunner(runner, &resultErr)
+	if !errors.Is(resultErr, closeErr) {
+		t.Fatalf("successful operation hid close failure: %v", resultErr)
+	}
+	if closeCalls != 2 {
+		t.Fatalf("close calls = %d, want 2", closeCalls)
+	}
+}
 
 func TestVerifyCleanStandaloneSource(t *testing.T) {
 	t.Parallel()
@@ -319,6 +401,7 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer runner.close()
 	t.Setenv("PATH", replacementPath)
 	output, err := runner.output(
 		context.Background(),
@@ -355,6 +438,7 @@ func TestGitRunnerRejectsExecutableMutation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer runner.close()
 	content[len(content)/2] ^= 0xff
 	if err := os.WriteFile(gitCopy, content, 0o700); err != nil {
 		t.Fatal(err)
@@ -627,6 +711,7 @@ func expectedSource(
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer git.close()
 	return Expected{
 		Root:                root,
 		Revision:            revision,

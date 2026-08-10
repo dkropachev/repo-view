@@ -7,6 +7,8 @@ import (
 	"reflect"
 
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
 )
 
 // ProcessPair contains adapter-built target processes after the second parity
@@ -72,6 +74,13 @@ func renderPair(
 			"adapter returned an empty MCP encoding",
 		)
 	}
+	if err := validateTreatmentEncoding(
+		baseline.HarnessIdentity.Kind,
+		registration,
+		expectedMCPArguments,
+	); err != nil {
+		return ProcessPair{}, err
+	}
 	candidateProcess := cloneProcessSpec(baselineProcess)
 	candidateProcess.Argv = append(candidateProcess.Argv, expectedMCPArguments...)
 	if err := harness.ValidateProcessSpec(candidateProcess); err != nil {
@@ -105,6 +114,13 @@ func validateProcessPair(
 		processes.Baseline.TimeoutMillis != baseline.TimeoutMillis {
 		return errors.New("rendered baseline does not match the approved common invocation")
 	}
+	if err := validateCommonProcessEncoding(
+		baseline.HarnessIdentity.Kind,
+		baseline,
+		processes.Baseline,
+	); err != nil {
+		return err
+	}
 	if !reflect.DeepEqual(processes.Baseline.Stdin, processes.Candidate.Stdin) ||
 		!reflect.DeepEqual(processes.Baseline.Environment, processes.Candidate.Environment) ||
 		processes.Baseline.Directory != processes.Candidate.Directory ||
@@ -125,6 +141,67 @@ func validateProcessPair(
 	}
 	if len(baseline.MCPServers) != 0 || len(candidate.MCPServers) != 1 {
 		return errors.New("rendered pair does not correspond to approved MCP cardinality")
+	}
+	if err := validateTreatmentEncoding(
+		baseline.HarnessIdentity.Kind,
+		candidate.MCPServers[0],
+		processes.CandidateMCPArguments,
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateCommonProcessEncoding(
+	harnessKind string,
+	invocation harness.Invocation,
+	process harness.ProcessSpec,
+) error {
+	switch harnessKind {
+	case "codex":
+		if err := harnesscodex.ValidateCanonicalProcess(invocation, process); err != nil {
+			return fmt.Errorf("validate code-owned Codex common process: %w", err)
+		}
+	case "fake":
+		if err := fake.ValidateCanonicalProcess(invocation, process); err != nil {
+			return fmt.Errorf("validate code-owned fake common process: %w", err)
+		}
+	default:
+		return fmt.Errorf(
+			"harness kind %q has no code-owned common-process validator",
+			harnessKind,
+		)
+	}
+	return nil
+}
+
+func validateTreatmentEncoding(
+	harnessKind string,
+	server harness.MCPServer,
+	observed []string,
+) error {
+	var (
+		expected []string
+		err      error
+	)
+	switch harnessKind {
+	case "codex":
+		expected, err = harnesscodex.CanonicalMCPArguments(server)
+	case "fake":
+		expected, err = fake.CanonicalMCPArguments(server)
+	default:
+		return fmt.Errorf(
+			"harness kind %q has no code-owned repo_view treatment encoder",
+			harnessKind,
+		)
+	}
+	if err != nil {
+		return fmt.Errorf("validate code-owned repo_view treatment encoding: %w", err)
+	}
+	if !reflect.DeepEqual(observed, expected) {
+		return errors.New(
+			"candidate argv suffix differs from the code-owned repo_view treatment encoding",
+		)
 	}
 	return nil
 }

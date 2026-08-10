@@ -5,7 +5,6 @@ package process
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,7 +26,6 @@ const (
 	protocolVersion  = "tokenbench.external-adapter/v1"
 	bridgeVersion    = "tokenbench.process-bridge/v1"
 	defaultMaxOutput = 8 << 20
-	minimumKeyBytes  = 32
 	defaultWaitDelay = 250 * time.Millisecond
 )
 
@@ -69,12 +67,10 @@ func New(config Config) (*Adapter, error) {
 		return nil, errors.New("external adapter kind contains invalid text")
 	case config.Timeout <= 0:
 		return nil, errors.New("external adapter timeout must be positive")
-	case len(config.CommitmentKey) != 0 && len(config.CommitmentKey) < minimumKeyBytes:
-		return nil, errors.New("external adapter commitment key must be at least 32 bytes")
-	case len(config.Environment) != 0 && len(config.CommitmentKey) < minimumKeyBytes:
-		return nil, errors.New(
-			"external adapter environment requires a secret commitment key",
-		)
+	case len(config.Environment) != 0:
+		return nil, errors.New("external adapter environment is prohibited")
+	case len(config.CommitmentKey) != 0:
+		return nil, errors.New("external adapter secret commitment keys are prohibited")
 	}
 	for index, argument := range config.Arguments {
 		if !validString(argument) {
@@ -250,11 +246,6 @@ func configurationSHA256(
 	if err != nil {
 		return "", fmt.Errorf("encode external adapter configuration: %w", err)
 	}
-	if len(config.CommitmentKey) != 0 {
-		digest := hmac.New(sha256.New, config.CommitmentKey)
-		_, _ = digest.Write(raw)
-		return hex.EncodeToString(digest.Sum(nil)), nil
-	}
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:]), nil
 }
@@ -394,17 +385,10 @@ func (adapter *Adapter) call(
 		if errors.Is(callContext.Err(), context.DeadlineExceeded) {
 			return wireResponse{}, errors.New("external adapter timed out")
 		}
-		return wireResponse{}, fmt.Errorf(
-			"external adapter failed: %w: %s",
-			runErr,
-			strings.TrimSpace(stderr.buffer.String()),
-		)
+		return wireResponse{}, errors.New("external adapter process failed")
 	}
 	if stderr.buffer.Len() != 0 {
-		return wireResponse{}, fmt.Errorf(
-			"external adapter wrote to stderr: %s",
-			strings.TrimSpace(stderr.buffer.String()),
-		)
+		return wireResponse{}, errors.New("external adapter wrote to stderr")
 	}
 	if !utf8.Valid(stdout.buffer.Bytes()) {
 		return wireResponse{}, errors.New(
@@ -439,7 +423,7 @@ func (adapter *Adapter) call(
 		return wireResponse{}, err
 	}
 	if response.Error != "" {
-		return wireResponse{}, fmt.Errorf("external adapter: %s", response.Error)
+		return wireResponse{}, errors.New("external adapter reported an error")
 	}
 	return response, nil
 }

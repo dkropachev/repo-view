@@ -1,12 +1,55 @@
 package repoview
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRequestContextCancelsNavigation(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "found.go", "package demo\nfunc Helper() {}\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := mustView(t, root).WithContext(ctx).Find(
+		"Helper",
+		Options{Return: ReturnLocations},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Find error = %v, want context cancellation", err)
+	}
+}
+
+func TestSourceFileByteLimitAppliesToWalkAndDirectRead(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "oversized.go")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maximumSourceFileBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	view := mustView(t, root)
+	if _, err := view.Find("Helper", Options{Return: ReturnLocations}); err == nil ||
+		!strings.Contains(err.Error(), "source file exceeds") {
+		t.Fatalf("Find error = %v, want source byte limit", err)
+	}
+	if _, err := view.Outline("oversized.go", Options{}); err == nil ||
+		!strings.Contains(err.Error(), "source file exceeds") {
+		t.Fatalf("Outline error = %v, want source byte limit", err)
+	}
+}
 
 func TestFindReturnsLocations(t *testing.T) {
 	root := t.TempDir()

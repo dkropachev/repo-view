@@ -105,9 +105,7 @@ func validateInvocation(invocation harness.Invocation) error {
 	case !utf8.Valid(invocation.Prompt):
 		return errors.New("prompt must be valid UTF-8")
 	case invocation.Environment == nil:
-		return errors.New("process environment must be a canonical empty object")
-	case len(invocation.Environment) != 0:
-		return errors.New("authored process environment is not allowed")
+		return errors.New("process environment must be a canonical object")
 	case invocation.Arguments == nil:
 		return errors.New("harness arguments must be a canonical empty array")
 	case len(invocation.Arguments) != 0:
@@ -159,6 +157,9 @@ func validateInvocation(invocation harness.Invocation) error {
 	case invocation.TimeoutMillis <= 0:
 		return errors.New("timeout must be positive")
 	}
+	if err := harness.ValidatePublishableEnvironment(invocation.Environment); err != nil {
+		return err
+	}
 	if err := harness.ValidateIdentity(invocation.HarnessIdentity); err != nil {
 		return err
 	}
@@ -184,6 +185,8 @@ func validateRepoViewRegistration(
 		"mcp",
 		"--root", invocation.WorkingDirectory,
 		"--base", invocation.SourceBaseRevision,
+		"--git", invocation.GitExecutable,
+		"--git-sha256", invocation.GitExecutableSHA256,
 	}
 	switch {
 	case registration.Name != "repo_view":

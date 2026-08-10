@@ -1,6 +1,8 @@
 package repoview
 
 import (
+	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -8,10 +10,52 @@ import (
 	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 )
+
+const (
+	maximumGitOutputBytes = 64 << 20
+	maximumGitErrorBytes  = 64 << 10
+)
+
+var errGitOutputLimit = errors.New("git output exceeds the configured limit")
+
+type boundedOutputBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (buffer *boundedOutputBuffer) Write(content []byte) (int, error) {
+	remaining := buffer.limit - buffer.Len()
+	if remaining <= 0 {
+		return 0, errGitOutputLimit
+	}
+	if len(content) > remaining {
+		written, _ := buffer.Buffer.Write(content[:remaining])
+		return written, errGitOutputLimit
+	}
+	return buffer.Buffer.Write(content)
+}
+
+type gitExecutableCloseError struct {
+	operation error
+	close     error
+}
+
+func (failure *gitExecutableCloseError) Error() string {
+	return fmt.Sprintf(
+		"git invocation and pinned executable close failed: %v; %v",
+		failure.operation,
+		failure.close,
+	)
+}
+
+func (failure *gitExecutableCloseError) Unwrap() []error {
+	return []error{failure.operation, failure.close}
+}
 
 type Return string
 
@@ -116,6 +160,9 @@ type ChangedResponse struct {
 }
 
 func (r *RepoView) Find(symbol string, opts Options) (FindResponse, error) {
+	if err := r.checkContext(); err != nil {
+		return FindResponse{}, err
+	}
 	responses, err := r.FindMany([]string{symbol}, opts)
 	if err != nil {
 		return FindResponse{}, err
@@ -127,6 +174,9 @@ func (r *RepoView) Find(symbol string, opts Options) (FindResponse, error) {
 // Limit is shared fairly across the supplied symbols, matching the CLI's
 // batched find behavior.
 func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, error) {
+	if err := r.checkContext(); err != nil {
+		return nil, err
+	}
 	if len(symbols) == 0 {
 		return nil, fmt.Errorf("at least one symbol is required")
 	}
@@ -167,6 +217,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 	}
 
 	for _, path := range files {
+		if err := r.checkContext(); err != nil {
+			return nil, err
+		}
 		rel, _ := filepath.Rel(r.root, path)
 		rel = filepath.ToSlash(rel)
 		if opts.ChangedOnly && !changed[rel] {
@@ -287,6 +340,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		}
 
 		for stateIndex := range states {
+			if err := r.checkContext(); err != nil {
+				return nil, err
+			}
 			state := &states[stateIndex]
 			if opts.Limit > 0 && len(state.results) > opts.Limit {
 				continue
@@ -357,6 +413,9 @@ func fairResultLimit(remaining, remainingSelectors int) int {
 }
 
 func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, error) {
+	if err := r.checkContext(); err != nil {
+		return InspectResponse{}, err
+	}
 	requestedPath, lineNo, err := parseLocation(location)
 	if err != nil {
 		return InspectResponse{}, err
@@ -450,6 +509,9 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 }
 
 func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
+	if err := r.checkContext(); err != nil {
+		return OutlineResponse{}, err
+	}
 	opts = normalizeOptions(opts, ReturnLine)
 	if err := validateOptions(opts); err != nil {
 		return OutlineResponse{}, err
@@ -462,6 +524,9 @@ func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
 	definitions := language.sourceDefinitions(lines)
 	results := make([]Result, 0, len(definitions))
 	for _, definition := range definitions {
+		if err := r.checkContext(); err != nil {
+			return OutlineResponse{}, err
+		}
 		lineNo := definition.line
 		symbol := definition.symbol
 		result := r.resultForHit(symbol, "def", filepath.ToSlash(path), language, lines, lineNo, opts)
@@ -480,6 +545,9 @@ func (r *RepoView) Outline(path string, opts Options) (OutlineResponse, error) {
 }
 
 func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
+	if err := r.checkContext(); err != nil {
+		return ChangedResponse{}, err
+	}
 	opts = normalizeOptions(opts, ReturnContext)
 	if err := validateOptions(opts); err != nil {
 		return ChangedResponse{}, err
@@ -487,6 +555,14 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	baseCommit, err := r.resolveBase(opts.Base)
 	if err != nil {
 		return ChangedResponse{}, err
+	}
+	headCommit, err := r.gitText("rev-parse", "HEAD")
+	if err != nil {
+		return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
+	}
+	headSubject, err := r.gitText("show", "-s", "--format=%s", "HEAD")
+	if err != nil {
+		return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
 	}
 	files, err := r.changedFiles(baseCommit)
 	if err != nil {
@@ -496,11 +572,14 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		Root:        r.root,
 		Base:        opts.Base,
 		BaseCommit:  baseCommit,
-		HeadCommit:  r.gitOutput("rev-parse", "HEAD"),
-		HeadSubject: r.gitOutput("show", "-s", "--format=%s", "HEAD"),
+		HeadCommit:  headCommit,
+		HeadSubject: headSubject,
 	}
 	var selectedFiles []string
 	for _, rel := range files {
+		if err := r.checkContext(); err != nil {
+			return ChangedResponse{}, err
+		}
 		if matchPathFilters(rel, opts.PathGlobs, opts.ExcludeGlobs) {
 			selectedFiles = append(selectedFiles, rel)
 		}
@@ -515,6 +594,9 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	}
 	results := make([]Result, 0)
 	for _, rel := range selectedFiles {
+		if err := r.checkContext(); err != nil {
+			return ChangedResponse{}, err
+		}
 		language := languageForExtension(filepath.Ext(rel))
 		lines, cleanRel, err := r.readRelativeLines(rel)
 		if err != nil || len(lines) == 0 {
@@ -1218,8 +1300,7 @@ func (r *RepoView) changedPatch(
 	for _, args := range commands {
 		args = append(args, "--")
 		args = append(args, files...)
-		cmd := r.gitCommand(args...)
-		output, err := cmd.Output()
+		output, err := r.gitOutput(args...)
 		if err != nil {
 			return "", false, fmt.Errorf("read changed patch: %w", err)
 		}
@@ -1238,7 +1319,7 @@ func (r *RepoView) changedPatch(
 			if _, _, err := r.resolveRegularPath(rel); err != nil {
 				continue
 			}
-			cmd := r.gitCommand(
+			output, diffErr := r.gitOutput(
 				"diff",
 				"--no-index",
 				"--no-color",
@@ -1248,10 +1329,11 @@ func (r *RepoView) changedPatch(
 				os.DevNull,
 				rel,
 			)
-			output, diffErr := cmd.Output()
 			var exitErr *exec.ExitError
+			var closeErr *gitExecutableCloseError
 			if diffErr != nil &&
-				(!errors.As(diffErr, &exitErr) || exitErr.ExitCode() != 1) {
+				(errors.As(diffErr, &closeErr) ||
+					!errors.As(diffErr, &exitErr) || exitErr.ExitCode() != 1) {
 				return "", false, fmt.Errorf("read untracked patch for %s: %w", rel, diffErr)
 			}
 			if len(output) > 0 {
@@ -1268,8 +1350,7 @@ func (r *RepoView) changedPatch(
 }
 
 func (r *RepoView) gitFileList(args ...string) ([]string, error) {
-	cmd := r.gitCommand(args...)
-	output, err := cmd.Output()
+	output, err := r.gitOutput(args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1290,13 +1371,12 @@ func (r *RepoView) resolveBase(base string) (string, error) {
 		strings.ContainsAny(base, "\x00\n\r") {
 		return "", fmt.Errorf("invalid Git base revision %q", base)
 	}
-	cmd := r.gitCommand(
+	output, err := r.gitOutput(
 		"rev-parse",
 		"--verify",
 		"--end-of-options",
 		base+"^{commit}",
 	)
-	output, err := cmd.Output()
 	if err != nil {
 		return "", fmt.Errorf("resolve Git base revision %q: %w", base, err)
 	}
@@ -1307,13 +1387,26 @@ func (r *RepoView) resolveBase(base string) (string, error) {
 	return resolved, nil
 }
 
-func (r *RepoView) gitOutput(args ...string) string {
-	cmd := r.gitCommand(args...)
-	output, err := cmd.Output()
+// VerifyBaseCommit verifies that base names an existing ancestor of HEAD and
+// is already its canonical full object ID. It uses the pinned Git executable
+// when the view was constructed by NewWithGit.
+func (r *RepoView) VerifyBaseCommit(base string) error {
+	resolved, err := r.resolveBase(base)
 	if err != nil {
-		return ""
+		return err
 	}
-	return strings.TrimSpace(string(output))
+	if resolved != base {
+		return fmt.Errorf("git base commit resolved to %s, want %s", resolved, base)
+	}
+	if _, err := r.gitOutput("merge-base", "--is-ancestor", base, "HEAD"); err != nil {
+		return fmt.Errorf("git base commit is not an ancestor of HEAD: %w", err)
+	}
+	return nil
+}
+
+func (r *RepoView) gitText(args ...string) (string, error) {
+	output, err := r.gitOutput(args...)
+	return strings.TrimSpace(string(output)), err
 }
 
 func (r *RepoView) changedLines(rel, base string) ([]int, error) {
@@ -1328,8 +1421,7 @@ func (r *RepoView) changedLines(rel, base string) ([]int, error) {
 		args = append(args, base+"...HEAD")
 	}
 	args = append(args, "--", rel)
-	cmd := r.gitCommand(args...)
-	output, err := cmd.Output()
+	output, err := r.gitOutput(args...)
 	if err != nil {
 		return nil, fmt.Errorf("read changed lines for %s: %w", rel, err)
 	}
@@ -1345,8 +1437,7 @@ func (r *RepoView) changedLines(rel, base string) ([]int, error) {
 			"--",
 			rel,
 		}
-		cached := r.gitCommand(cachedArgs...)
-		cachedOutput, err := cached.Output()
+		cachedOutput, err := r.gitOutput(cachedArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("read staged changed lines for %s: %w", rel, err)
 		}
@@ -1356,8 +1447,19 @@ func (r *RepoView) changedLines(rel, base string) ([]int, error) {
 	return uniqueInts(lines), nil
 }
 
-func (r *RepoView) gitCommand(args ...string) *exec.Cmd {
+func (r *RepoView) gitOutput(args ...string) ([]byte, error) {
+	return r.gitOutputContext(r.operationContext(), args...)
+}
+
+func (r *RepoView) gitOutputContext(
+	ctx context.Context,
+	args ...string,
+) (output []byte, resultErr error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	safeArgs := []string{
+		"--literal-pathspecs",
 		"-c", "color.ui=false",
 		"-c", "core.fsmonitor=false",
 		"-c", "core.pager=cat",
@@ -1365,31 +1467,80 @@ func (r *RepoView) gitCommand(args ...string) *exec.Cmd {
 		"-c", "diff.external=",
 	}
 	safeArgs = append(safeArgs, args...)
-	cmd := exec.Command("git", safeArgs...)
+	var (
+		cmd       *exec.Cmd
+		pinnedGit *os.File
+		err       error
+	)
+	if r.pinnedGit == nil {
+		cmd = exec.CommandContext(ctx, "git", safeArgs...)
+	} else {
+		cmd, pinnedGit, err = r.pinnedGit.commandContext(ctx, safeArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("pin git executable for invocation: %w", err)
+		}
+		defer func() {
+			if closeErr := pinnedGit.Close(); closeErr != nil {
+				resultErr = &gitExecutableCloseError{
+					operation: resultErr,
+					close:     fmt.Errorf("close pinned git executable: %w", closeErr),
+				}
+				output = nil
+			}
+		}()
+	}
 	cmd.Dir = r.root
 	cmd.Env = isolatedGitEnvironment()
-	return cmd
+	stdout := &boundedOutputBuffer{limit: maximumGitOutputBytes}
+	stderr := &boundedOutputBuffer{limit: maximumGitErrorBytes}
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	commandErr := cmd.Run()
+	output = append([]byte(nil), stdout.Bytes()...)
+	if r.pinnedGit != nil {
+		if err := r.pinnedGit.verify(); err != nil {
+			return nil, fmt.Errorf("verify git executable after invocation: %w", err)
+		}
+	}
+	if commandErr != nil {
+		if stderr.Len() != 0 {
+			return output, fmt.Errorf(
+				"git %s: %w: %s",
+				strings.Join(args, " "),
+				commandErr,
+				bytes.TrimSpace(stderr.Bytes()),
+			)
+		}
+		return output, fmt.Errorf(
+			"git %s: %w",
+			strings.Join(args, " "),
+			commandErr,
+		)
+	}
+	return output, nil
 }
 
 func isolatedGitEnvironment() []string {
-	environment := make([]string, 0, len(os.Environ())+7)
-	for _, entry := range os.Environ() {
-		name, _, _ := strings.Cut(entry, "=")
-		if strings.HasPrefix(name, "GIT_") {
-			continue
-		}
-		environment = append(environment, entry)
-	}
-	return append(
-		environment,
+	environment := []string{
 		"GIT_ATTR_NOSYSTEM=1",
-		"GIT_CONFIG_GLOBAL="+os.DevNull,
+		"GIT_CONFIG_GLOBAL=" + os.DevNull,
+		"GIT_CONFIG_SYSTEM=" + os.DevNull,
 		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_LITERAL_PATHSPECS=1",
 		"GIT_NO_REPLACE_OBJECTS=1",
 		"GIT_OPTIONAL_LOCKS=0",
 		"GIT_PAGER=cat",
 		"GIT_TERMINAL_PROMPT=0",
-	)
+		"LANG=C",
+		"LC_ALL=C",
+		"TZ=UTC",
+	}
+	if runtime.GOOS == "windows" {
+		if systemRoot := os.Getenv("SystemRoot"); systemRoot != "" {
+			environment = append(environment, "SystemRoot="+systemRoot)
+		}
+	}
+	return environment
 }
 
 func parseChangedLineNumbers(patch string) []int {
