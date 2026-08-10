@@ -58,6 +58,8 @@ func run(args []string) int {
 		return runOutline(args[1:])
 	case "changed":
 		return runChanged(args[1:])
+	case "mcp":
+		return runMCP(args[1:])
 	default:
 		printUsage(os.Stderr)
 		return 2
@@ -1190,12 +1192,14 @@ Usage:
   repo-view inspect PATH:LINE... [options]
   repo-view outline PATH... [options]
   repo-view changed [options]
+  repo-view mcp [options]
 
 Commands:
   find      Exact symbol definitions and references; accepts multiple symbols.
   inspect   Enclosing scope, optionally imports or related results; accepts multiple locations.
   outline   Definitions in one or more files, in source order.
   changed   Git metadata, exact patch, and changed-source context.
+  mcp       Read-only stdio MCP server with changed, find, inspect, and outline tools.
 
 Return values:
   --return locations   Result metadata without source code.

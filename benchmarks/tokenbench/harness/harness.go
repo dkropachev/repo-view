@@ -8,13 +8,57 @@ package harness
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
+
+// OfflineLocalProxyCapability is an inert marker used only by offline audit
+// plans. Live runs commit the exact fresh runner-issued local capability in
+// both arms; publication is gated until the listener is closed, so that value
+// is an expired local capability by the time it enters signed evidence. It is
+// never an upstream provider credential.
+const OfflineLocalProxyCapability = "tokenbench-local-proxy/v1/offline-audit-only"
+
+const localProxyCapabilityPrefix = "tokenbench-local-proxy/v1/"
+
+// ValidLocalProxyCapability accepts either the explicit offline marker or one
+// canonical 256-bit per-lifecycle capability. This is syntax validation only;
+// publication authority separately proves the owning listener was closed.
+func ValidLocalProxyCapability(value string) bool {
+	if value == OfflineLocalProxyCapability {
+		return true
+	}
+	if !strings.HasPrefix(value, localProxyCapabilityPrefix) {
+		return false
+	}
+	encoded := strings.TrimPrefix(value, localProxyCapabilityPrefix)
+	decoded, err := base64.RawURLEncoding.DecodeString(encoded)
+	return err == nil && len(decoded) == sha256.Size &&
+		base64.RawURLEncoding.EncodeToString(decoded) == encoded
+}
+
+const (
+	// MaxRawStreamBytes is the schema-level bound for each captured stdout or
+	// stderr stream, independent of runner configuration.
+	MaxRawStreamBytes = 16 << 20
+	// MaxArtifactCount and MaxArtifactBytes bound sanitized runner artifacts.
+	MaxArtifactCount = 32
+	MaxArtifactBytes = 64 << 20
+	// MaxObservationToolCalls bounds normalized provider-issued tool calls.
+	MaxObservationToolCalls = 100000
+)
+
+// MaxTimeoutMillis is the largest millisecond timeout that can be converted to
+// time.Duration without overflow.
+const MaxTimeoutMillis = int64((1<<63 - 1) / time.Millisecond)
 
 // Adapter resolves harness identity, renders a process invocation, and decodes
 // raw execution output. Implementations must be deterministic for equal input.
@@ -24,6 +68,19 @@ type Adapter interface {
 	MCPArguments(context.Context, MCPServer) ([]string, error)
 	Build(context.Context, Invocation) (ProcessSpec, error)
 	Decode(context.Context, RawExecution) (Observation, error)
+}
+
+// CommonEnvironmentAdapter is an optional adapter capability for deriving the
+// complete, non-inherited target-process environment from common inputs. The
+// suite format cannot author this environment. Tokenbench calls the method once
+// while preparing a suite and again immediately before process construction;
+// the two results must be deeply equal. Adapters that do not implement this
+// interface receive a canonical empty environment.
+//
+// Returned values must be safe to publish in benchmark plans and evidence.
+// Live credentials belong in a runner-owned local proxy, never in this map.
+type CommonEnvironmentAdapter interface {
+	CommonEnvironment(context.Context, ResolveRequest) (map[string]string, error)
 }
 
 // ResolveRequest contains only common harness settings. There is no arm in the
@@ -114,12 +171,158 @@ type ProcessSpec struct {
 	TimeoutMillis int64             `json:"timeout_millis"`
 }
 
-// RawExecution is the exact output made available to a decoder.
-type RawExecution struct {
-	Stdout   []byte `json:"stdout"`
-	Stderr   []byte `json:"stderr"`
-	ExitCode int    `json:"exit_code"`
-	TimedOut bool   `json:"timed_out"`
+// Artifact is one sanitized runner-produced input made available to a decoder.
+// Typical examples are a provider-wire trace or an exported effective-config
+// lock. Artifacts must never contain credentials. Names are adapter contracts;
+// media types make their bytes independently inspectable.
+type Artifact struct {
+	Name      string `json:"name"`
+	MediaType string `json:"media_type"`
+	Data      []byte `json:"data"`
+}
+
+// RawExecution is the exact output and sanitized runner evidence made
+// available to a decoder. Limit flags are distinct from timeout/cancellation so
+// failed attempts remain classifiable instead of looking like model output.
+type RawExecution struct { //nolint:govet,nolintlint // Field order is the stable capture wire order.
+	Stdout          []byte           `json:"stdout"`
+	Stderr          []byte           `json:"stderr"`
+	Artifacts       []Artifact       `json:"artifacts"`
+	Resources       *ResourceOutcome `json:"resources"`
+	ExitCode        int              `json:"exit_code"`
+	LaunchFailed    bool             `json:"launch_failed"`
+	TimedOut        bool             `json:"timed_out"`
+	Cancelled       bool             `json:"cancelled"`
+	StdoutTruncated bool             `json:"stdout_truncated"`
+	StderrTruncated bool             `json:"stderr_truncated"`
+}
+
+// ResourceOutcome is the canonical cgroup-v2 accounting captured after an
+// arm's complete process subtree is empty and before its cgroup is deleted.
+// A nil pointer means the noncontained extension runner did not provide
+// kernel accounting; conformant contained execution always supplies one.
+type ResourceOutcome struct {
+	Version            string            `json:"version"`
+	CPUStat            []ResourceCounter `json:"cpu_stat"`
+	MemoryEvents       []ResourceCounter `json:"memory_events"`
+	MemoryEventsLocal  []ResourceCounter `json:"memory_events_local"`
+	PIDsEvents         []ResourceCounter `json:"pids_events"`
+	MemoryCurrentBytes uint64            `json:"memory_current_bytes"`
+	MemoryPeakBytes    uint64            `json:"memory_peak_bytes"`
+	PIDsCurrent        uint64            `json:"pids_current"`
+	PIDsPeak           uint64            `json:"pids_peak"`
+}
+
+// ResourceCounter is one sorted, unique, unsigned kernel counter.
+type ResourceCounter struct {
+	Name  string `json:"name"`
+	Value uint64 `json:"value"`
+}
+
+const ResourceOutcomeVersion = "tokenbench.cgroup-v2-resources/v1"
+
+// ValidateResourceOutcome enforces the publication-neutral canonical shape.
+// The runner additionally compares the exact counter key sets with the sets
+// committed by its cgroup policy identity.
+func ValidateResourceOutcome(outcome *ResourceOutcome) error {
+	if outcome == nil {
+		return errors.New("resource outcome is required")
+	}
+	if outcome.Version != ResourceOutcomeVersion {
+		return fmt.Errorf("unexpected resource outcome version %q", outcome.Version)
+	}
+	for _, counters := range []struct {
+		name     string
+		values   []ResourceCounter
+		required []string
+	}{
+		{"cpu.stat", outcome.CPUStat, []string{
+			"nr_periods", "nr_throttled", "system_usec", "throttled_usec", "usage_usec", "user_usec",
+		}},
+		{"memory.events", outcome.MemoryEvents, []string{"high", "low", "max", "oom", "oom_kill"}},
+		{"memory.events.local", outcome.MemoryEventsLocal, []string{"high", "low", "max", "oom", "oom_kill"}},
+		{"pids.events", outcome.PIDsEvents, []string{"max"}},
+	} {
+		if err := validateResourceCounters(counters.name, counters.values, counters.required); err != nil {
+			return err
+		}
+	}
+	if !sameResourceCounterNames(outcome.MemoryEvents, outcome.MemoryEventsLocal) {
+		return errors.New("memory.events and memory.events.local counter keys differ")
+	}
+	if outcome.MemoryPeakBytes < outcome.MemoryCurrentBytes {
+		return errors.New("memory peak is below memory current")
+	}
+	if outcome.PIDsPeak < outcome.PIDsCurrent {
+		return errors.New("pids peak is below pids current")
+	}
+	if outcome.PIDsCurrent != 0 {
+		return errors.New("resource outcome was captured before the process subtree became empty")
+	}
+	return nil
+}
+
+func validateResourceCounters(name string, counters []ResourceCounter, required []string) error {
+	if len(counters) == 0 || len(counters) > 64 {
+		return fmt.Errorf("%s counter set is empty or oversized", name)
+	}
+	for index, counter := range counters {
+		if len(counter.Name) == 0 || len(counter.Name) > 128 {
+			return fmt.Errorf("%s contains an invalid counter name", name)
+		}
+		for _, character := range counter.Name {
+			if character != '.' && character != '_' &&
+				(character < 'a' || character > 'z') &&
+				(character < '0' || character > '9') {
+				return fmt.Errorf("%s contains an invalid counter name", name)
+			}
+		}
+		if index != 0 && counters[index-1].Name >= counter.Name {
+			return fmt.Errorf("%s counters are not strictly sorted and unique", name)
+		}
+	}
+	for _, requiredName := range required {
+		if _, ok := ResourceCounterValue(counters, requiredName); !ok {
+			return fmt.Errorf("%s omitted required counter %s", name, requiredName)
+		}
+	}
+	return nil
+}
+
+func sameResourceCounterNames(left, right []ResourceCounter) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index].Name != right[index].Name {
+			return false
+		}
+	}
+	return true
+}
+
+// ResourceCounterValue returns one value from a validated sorted counter set.
+func ResourceCounterValue(counters []ResourceCounter, name string) (uint64, bool) {
+	index := sort.Search(len(counters), func(index int) bool {
+		return counters[index].Name >= name
+	})
+	if index == len(counters) || counters[index].Name != name {
+		return 0, false
+	}
+	return counters[index].Value, true
+}
+
+// CloneResourceOutcome returns a defensive deep copy.
+func CloneResourceOutcome(source *ResourceOutcome) *ResourceOutcome {
+	if source == nil {
+		return nil
+	}
+	clone := *source
+	clone.CPUStat = append([]ResourceCounter(nil), source.CPUStat...)
+	clone.MemoryEvents = append([]ResourceCounter(nil), source.MemoryEvents...)
+	clone.MemoryEventsLocal = append([]ResourceCounter(nil), source.MemoryEventsLocal...)
+	clone.PIDsEvents = append([]ResourceCounter(nil), source.PIDsEvents...)
+	return &clone
 }
 
 // Observation is the harness-neutral normalized result.
@@ -134,18 +337,19 @@ type Observation struct {
 // Usage preserves provider-reported categories. InputTokens includes cached
 // input when that is how the provider reports it; no pricing weights are used.
 type Usage struct {
-	InputTokens       int64 `json:"input_tokens"`
-	CachedInputTokens int64 `json:"cached_input_tokens"`
-	OutputTokens      int64 `json:"output_tokens"`
-	ReasoningTokens   int64 `json:"reasoning_tokens"`
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningTokens       int64 `json:"reasoning_tokens"`
 }
 
 // ValidateIdentity checks the fields required to stratify benchmark results.
 func ValidateIdentity(identity Identity) error {
 	switch {
-	case identity.Kind == "":
+	case !validBoundedText(identity.Kind, 128):
 		return errors.New("harness identity kind is required")
-	case identity.AdapterVersion == "":
+	case !validBoundedText(identity.AdapterVersion, 256):
 		return errors.New("harness adapter version is required")
 	case !validSHA256(identity.AdapterExecutableSHA256):
 		return errors.New("harness adapter executable digest is invalid")
@@ -155,19 +359,24 @@ func ValidateIdentity(identity Identity) error {
 		return errors.New("harness adapter configuration digest is invalid")
 	case !validSHA256(identity.ExecutableSHA256):
 		return errors.New("harness executable digest is invalid")
-	case identity.ExecutableVersion == "":
+	case !validBoundedText(identity.ExecutableVersion, 256):
 		return errors.New("harness executable version is required")
-	case identity.Model == "":
+	case !validBoundedText(identity.Model, 512):
 		return errors.New("resolved model identity is required")
-	case identity.ModelRevision == "":
+	case !validBoundedText(identity.ModelRevision, 512):
 		return errors.New("resolved immutable model revision is required")
-	case identity.ReasoningEffort == "":
+	case !validBoundedText(identity.ReasoningEffort, 128):
 		return errors.New("resolved reasoning effort is required")
-	case identity.DecoderSchema == "":
+	case !validBoundedText(identity.DecoderSchema, 256):
 		return errors.New("decoder schema is required")
 	default:
 		return nil
 	}
+}
+
+func validBoundedText(value string, maximum int) bool {
+	return value != "" && len(value) <= maximum && validText(value) &&
+		strings.TrimSpace(value) == value
 }
 
 func validSHA256(value string) bool {
@@ -181,6 +390,7 @@ func validSHA256(value string) bool {
 // ValidateUsage rejects arithmetic inputs that cannot be provider usage.
 func ValidateUsage(usage Usage) error {
 	if usage.InputTokens < 0 || usage.CachedInputTokens < 0 ||
+		usage.CacheWriteInputTokens < 0 ||
 		usage.OutputTokens < 0 || usage.ReasoningTokens < 0 {
 		return errors.New("usage counters must be nonnegative")
 	}
@@ -207,13 +417,31 @@ func ValidateProcessSpec(process ProcessSpec) error {
 		return errors.New("process directory must be an absolute path")
 	case process.TimeoutMillis <= 0:
 		return errors.New("process timeout must be positive")
+	case process.TimeoutMillis > MaxTimeoutMillis:
+		return errors.New("process timeout is invalid: exceeds the representable duration")
 	}
 	for index, argument := range process.Argv {
 		if !validText(argument) {
 			return fmt.Errorf("process argument %d contains invalid text", index)
 		}
 	}
-	for key, value := range process.Environment {
+	if process.Environment == nil {
+		return errors.New("process environment must be a canonical object")
+	}
+	if err := ValidateEnvironment(process.Environment); err != nil {
+		return err
+	}
+	return nil
+}
+
+// ValidateEnvironment validates a complete, non-inherited process
+// environment. It does not permit secrets merely because their syntax is
+// valid; the adapter contract additionally requires publishable values.
+func ValidateEnvironment(environment map[string]string) error {
+	if environment == nil {
+		return errors.New("process environment must be a canonical object")
+	}
+	for key, value := range environment {
 		if key == "" || strings.ContainsRune(key, '=') || !validText(key) {
 			return fmt.Errorf("invalid process environment key %q", key)
 		}
@@ -223,6 +451,104 @@ func ValidateProcessSpec(process ProcessSpec) error {
 				key,
 			)
 		}
+	}
+	return nil
+}
+
+// ValidatePublishableEnvironment applies the closed semantic policy used by
+// invocation plans. Unknown variables are rejected: syntax and a blacklist
+// cannot prove that a value is secret-free or unable to inject runtime code.
+func ValidatePublishableEnvironment(environment map[string]string) error {
+	if err := ValidateEnvironment(environment); err != nil {
+		return err
+	}
+	for key, value := range environment {
+		switch key {
+		case "LANG", "LC_ALL":
+			if value != "C" && value != "C.UTF-8" {
+				return fmt.Errorf("%s must be C or C.UTF-8", key)
+			}
+		case "TZ":
+			if value != "UTC" {
+				return errors.New("tz must be UTC")
+			}
+		case "USER", "LOGNAME":
+			if value != "tokenbench" {
+				return fmt.Errorf("%s must be tokenbench", key)
+			}
+		case "HOME", "CODEX_HOME", "CODEX_SQLITE_HOME", "TMPDIR":
+			if !canonicalAbsolutePath(value) {
+				return fmt.Errorf("%s must be an absolute canonical path", key)
+			}
+		case "PATH":
+			if err := validatePathList(value); err != nil {
+				return err
+			}
+		case "SHELL", "GIT_CONFIG_GLOBAL":
+			if !canonicalAbsolutePath(value) {
+				return fmt.Errorf("%s must be an absolute canonical path", key)
+			}
+		case "GIT_CONFIG_NOSYSTEM":
+			if value != "1" {
+				return errors.New("git_config_nosystem must be 1")
+			}
+		case "CODEX_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY":
+			if !ValidLocalProxyCapability(value) {
+				return fmt.Errorf("%s must contain only a canonical local proxy capability", key)
+			}
+		default:
+			return fmt.Errorf("process environment key %q is not in the closed publishable allowlist", key)
+		}
+	}
+	return nil
+}
+
+func canonicalAbsolutePath(value string) bool {
+	return filepath.IsAbs(value) && filepath.Clean(value) == value
+}
+
+func validatePathList(value string) error {
+	if value == "" {
+		return errors.New("path must not be empty")
+	}
+	for _, entry := range filepath.SplitList(value) {
+		if entry == "" || !canonicalAbsolutePath(entry) {
+			return fmt.Errorf("path entry %q is not an absolute canonical path", entry)
+		}
+	}
+	if strings.Contains(value, string(os.PathListSeparator)+string(os.PathListSeparator)) {
+		return errors.New("path contains an empty entry")
+	}
+	return nil
+}
+
+// ValidateArtifacts checks the generic artifact envelope. Adapters remain
+// responsible for validating the schema and content of artifacts they use.
+func ValidateArtifacts(artifacts []Artifact) error {
+	if artifacts == nil {
+		return errors.New("artifacts must be a canonical array")
+	}
+	if len(artifacts) > MaxArtifactCount {
+		return errors.New("artifact count exceeds 32")
+	}
+	seen := make(map[string]struct{}, len(artifacts))
+	total := 0
+	for index, artifact := range artifacts {
+		if !validText(artifact.Name) || artifact.Name == "" || len(artifact.Name) > 255 {
+			return fmt.Errorf("artifact %d has an invalid name", index)
+		}
+		if !validText(artifact.MediaType) || artifact.MediaType == "" ||
+			len(artifact.MediaType) > 255 {
+			return fmt.Errorf("artifact %q has an invalid media type", artifact.Name)
+		}
+		if _, exists := seen[artifact.Name]; exists {
+			return fmt.Errorf("duplicate artifact name %q", artifact.Name)
+		}
+		seen[artifact.Name] = struct{}{}
+		if len(artifact.Data) > MaxArtifactBytes-total {
+			return errors.New("artifact bytes exceed 64 MiB")
+		}
+		total += len(artifact.Data)
 	}
 	return nil
 }

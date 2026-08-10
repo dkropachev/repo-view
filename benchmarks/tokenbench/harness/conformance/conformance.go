@@ -13,8 +13,8 @@ import (
 type Fixture struct {
 	Adapter    harness.Adapter
 	Resolve    harness.ResolveRequest
-	Invocation harness.Invocation
 	Execution  harness.RawExecution
+	Invocation harness.Invocation
 }
 
 // Run checks the harness-neutral adapter contract. Adapter packages should call

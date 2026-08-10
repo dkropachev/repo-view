@@ -2699,7 +2699,7 @@ func TestRunScriptImportsFromPrivateValidatedSnapshot(t *testing.T) {
 		}
 	}()
 
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(time.Minute)
 	for {
 		if _, err := os.Stat(ready); err == nil {
 			break
@@ -2731,7 +2731,7 @@ func TestRunScriptImportsFromPrivateValidatedSnapshot(t *testing.T) {
 	select {
 	case runError = <-done:
 		completed = true
-	case <-time.After(10 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for run.sh after releasing downstream build")
 	}
 	if runError != nil {

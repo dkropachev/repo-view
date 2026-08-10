@@ -1,85 +1,125 @@
 # Contributing to tokenbench
 
-> Tokenbench currently validates suites, binds source/model/adapter/tokenbench-executable identity, and renders and commits verified process pairs through `Pair.Plan(ctx)`. Target-process execution, live MCP read-only verification, Codex, immutable evidence, replay, statistics, and reporting remain planned. Do not advertise a planned command without checked-in implementation and tests.
-
-## Start with the invariant
-
-A baseline/candidate pair must be identical in every semantic input and configuration value except that baseline has no MCP registrations and candidate has exactly one: a read-only registration named `repo_view`.
-
-Do not introduce arm-specific prompts, policies, hints, wrappers, environment variables, `PATH` entries, permissions, timeouts, feature flags, repository setup, or model settings. If a useful experiment needs one of those deltas, it is a different experiment and should not be represented as tokenbench evidence.
+Start with the invariant: a paired run is identical except that candidate has
+one `repo_view` MCP registration and baseline has none. Read [DESIGN.md](DESIGN.md)
+and [AGENTS.md](AGENTS.md) before changing code.
 
 ## Change workflow
 
-1. Identify the contract affected: corpus, schema, parity, adapter, evidence, decoder, quality, analysis, report, or migration.
-2. Update the relevant design document before or with implementation.
-3. Keep raw capture separate from derived interpretation.
-4. Add a narrow fixture that demonstrates the behavior and a negative fixture for invalid state.
-5. Run the checks appropriate to the implemented stage and inspect the complete diff.
-6. State current limitations in the pull request; avoid roadmap language in release claims.
+1. Name the boundary being changed: authored policy, origin verification,
+   immutable snapshot, parity, adapter, process containment, capture, evidence,
+   replay, quality, statistics, or legacy migration.
+2. Open or link a focused issue. Keep foundational, live-execution,
+   methodology/reporting, and legacy-transition changes in reviewable stages.
+3. Update the relevant schema/design text with the implementation. Never
+   advertise a command or guarantee that the checked-in code does not provide.
+4. Add a positive fixture and adversarial tests for malformed, aliased,
+   drifting, interrupted, and cleanup-failure states at that boundary.
+5. Run the focused tests, full Go suite, race/vet/lint/build checks, and any
+   required privileged kernel lane.
+6. Inspect the complete diff, including generated schema/golden changes and
+   unrelated worktree modifications. Preserve user-owned changes.
+7. Keep the pull request draft until the implementation, documentation, and
+   required checks are green. Merge only the exact reviewed commit.
 
-## Required review by change type
+## Review questions
 
-### Run specification or schema
+Every runtime/evidence change should answer these explicitly:
 
-- Reject unknown fields and ambiguous defaults.
-- Require both the explicit requested model and exact expected `<model>@<immutable-revision>`.
-- Require a canonical absolute Git executable path and matching SHA-256; source verification must not discover Git through ambient `PATH`.
-- Preserve canonical serialization and stable digests.
-- Version incompatible changes.
-- Demonstrate that no general arm override can encode a second treatment.
-- Include malformed, future-version, and round-trip fixtures.
+- Can caller-authored JSON, an exported struct, an interface implementation, or
+  a boolean forge execution/publication authority?
+- Can any mutable pathname change between verification and use, escape through
+  a symlink/mount/hard link, or share an inode with another role?
+- Are baseline and candidate prompt, model, source, process, environment,
+  native tools, permissions, resource policy, routing, and model-visible paths
+  exact matches after removing only the MCP registration?
+- Is common state built once and candidate derived centrally rather than by an
+  independent adapter branch?
+- Does the live effective configuration and provider tool surface prove the
+  same sole delta that the requested plan claims?
+- Does containment cover every descendant and prove its own kernel state?
+- Can any failure, cancellation, overflow, response attempt, cleanup error, or
+  missing counter disappear from the evidence?
+- Are credentials, signing material, and ambient configuration excluded from
+  child state and serialized output?
+- Is publication atomic, durable, authenticated out of band, graph-verified,
+  and incapable of rewriting a parent during replay?
+- Can all non-model behavior be tested deterministically without a live API
+  credential?
 
-### Parity
+## Contract-specific expectations
 
-- Test a valid pair with only the canonical registration added.
-- Test every protected category: prompt, requested/resolved model identity, adapter identity digests, non-registration arguments, environment, `PATH`, permissions, tools, timeouts, working path, source tree, `.git` metadata, Git executable, and tokenbench executable.
-- Test duplicate, aliased, replaced, writable, and mismatched `repo_view` registrations.
-- Emit actionable paths and both value digests without leaking secret values.
-- Build the common process once, clone centrally, append only `MCPArguments`, and fail closed on any other rendered-process delta.
-- Treat live handshake/tool-surface parity as planned until implemented.
+### Schemas and canonical data
 
-### Harness adapter
+Reject unknown and duplicate fields, trailing JSON, invalid UTF-8, ambiguous
+null/default values, noncanonical ordering/encoding where required, and inputs
+above explicit limits. Incompatible changes get new schema/media versions;
+historical decoders and bytes remain unchanged.
 
-Follow [docs/adapter-authoring.md](docs/adapter-authoring.md). `Resolve` is common and deterministic; `Build` accepts only the MCP-free common invocation; `MCPArguments` accepts only the approved registration. Central tokenbench rendering, not the adapter, clones candidate and appends the suffix. Changes to the process bridge must test protocol shape, deterministic cwd/environment, wrapper-owned and child-owned identity digests, executable drift, keyed control-environment commitment, timeout/held-pipe behavior, and platform-specific process cleanup.
+### Parity and adapters
 
-### Source verification and authority
+Test every protected field, empty-versus-nil collections, duplicate/aliased
+registrations, prompt treatment hints, common build count, suffix-only process
+derivation, adapter identity drift, and requested/effective/provider config
+agreement. Follow [docs/adapter-authoring.md](docs/adapter-authoring.md).
 
-- Keep the source worktree, standalone `.git` metadata, Git executable identity, and tokenbench executable identity bound into the common invocation.
-- Test dirty/ignored state, linked worktrees, alternates, unsafe index flags/configuration, symlinks/submodules, hard links, transient metadata, and mutation races.
-- Preserve `PreparedSuite`/`Pair` as the private adapter-bound build authority.
-- Never add an execution path from `ResolvedPlan` or `DecodePlan`; embedded rendered processes do not change the decoded plan's audit-only authority.
+### Filesystems and executables
 
-### Evidence or replay
+Test dirty/ignored/transient Git state, alternates and linked worktrees,
+symlinks, hard links, mount descendants and propagation, cross-device copy,
+static/native ELF enforcement, fs-verity measurement, same-content replacement,
+mutation races, failed unmount/descriptor close, and retained residue.
 
-Follow [docs/evidence-format.md](docs/evidence-format.md). Evidence/CAS/replay are planned. When implemented, test partial writes, digest corruption, missing parents, schema mismatch, deterministic replay, and preservation of unknown raw events. Never update a captured object in place or mistake an audit plan for captured evidence.
+### Process and kernel boundaries
 
-### Metrics or quality
+Test the exact allowed and denied filesystem/network/syscall sets, cgroup direct
+and effective BPF programs, finite resource controls, atomic placement, process
+tree kill/reap, PID namespace, capability sets, x32/architecture validation,
+and transient cleanup retry. A mandatory privileged test may not silently skip.
 
-Predeclare metric semantics and denominator changes. Keep provider-reported token components, normalized non-overlapping totals, and monetary cost separate. Quality checks must be arm-blind where possible and must not use candidate traces as an answer key.
+### Evidence and replay
 
-### Documentation
+Test object collision/corruption, partial write, inode reuse, concurrent
+publication, directory-sync uncertainty, missing/transposed references,
+signature/trust-role failures, one-shot authority, recovery output, offline
+decoder binding, and parent immutability.
 
-Say whether behavior is current, planned, or historical. An example command must be marked proposed until the binary and integration test exist. Keep legacy results visibly classified as non-conformant unless strict parity is proven by their original evidence.
+### Quality and statistics
 
-## Reproducibility checklist
+Test preregistration canonicality, secret commitments, answer-label
+randomization, evaluator isolation, swapped/tampered output, objective fact
+scoring, missing/failure/exclusion accounting, paired estimators, exact and
+Monte Carlo paths, deterministic bootstrap, thresholds, and small/adversarial
+samples. Report raw paired observations with uncertainty and quality gates.
 
-Before accepting a live benchmark implementation or result, reviewers should be able to answer yes to all of these:
+### Legacy transition
 
-- Are prompt bytes and role ordering identical?
-- Are requested model, resolved immutable revision, reasoning, harness, adapter wrapper/child identities, sandbox, permissions, timeout, environment, and full `PATH` identical?
-- Are repository tree, standalone `.git` metadata, Git executable identity, tokenbench executable identity, and model-visible path identical?
-- Does baseline have zero MCP registrations and candidate exactly one canonical read-only `repo_view` registration?
-- Does removing that registration make the resolved configurations deeply equal?
-- Was the common process rendered exactly once and candidate created only by central clone plus the approved MCP suffix?
-- Was adapter identity re-resolved unchanged before rendering, then were tokenbench/harness/MCP executables and source/Git identity reverified after adapter control calls?
-- Are both sessions fresh and their order randomized or counterbalanced?
-- Are all attempts, exits, raw events, usage semantics, and quality outcomes preserved?
-- Can analysis replay without credentials, a harness, a model, or the live repository?
-- Are raw token counts reported without an arbitrary cache weight?
-- Are pricing assumptions versioned separately?
+Historical `experiments/lsp-replacement` pairs are non-conformant. Do not edit
+their canonical evidence. A compatibility alias may improve ergonomics, and
+replay/resolve may regenerate only in isolated staging before comparing with
+the immutable original. See [docs/migration.md](docs/migration.md).
 
-## Verification
+## Verification matrix
 
-For documentation changes, use repository diff inspection, `git diff --check`, relative-link checks, and trailing-whitespace checks. For foundation code, run focused tokenbench tests plus the repository's normal Go suite. Live model calls must not be required for unit, protocol, source-verifier, or future replay tests.
+Run the narrow package while developing, then before review:
 
-Do not regenerate, delete, or rewrite legacy evidence as part of routine verification.
+```sh
+go test ./... -count=1
+go test -race ./benchmarks/tokenbench/... -count=1
+go vet ./...
+go build ./cmd/... ./benchmarks/tokenbench/cmd/...
+golangci-lint run --config=.golangci.yml
+golangci-lint run --config=.golangci-fieldalignment.yml
+git diff --check
+```
+
+Also validate tracked shell and JSON files and compile platform-specific files
+for their supported GOOS/GOARCH combinations. Kernel-boundary changes require:
+
+```sh
+benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+```
+
+Live model calls are never a unit-test prerequisite and should not run in
+ordinary CI. A green privileged lane proves kernel mechanics, not a production
+model result.

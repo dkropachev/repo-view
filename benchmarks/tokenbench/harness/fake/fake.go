@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"sort"
 
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
@@ -37,6 +38,12 @@ func (Adapter) MCPArguments(
 	_ context.Context,
 	server harness.MCPServer,
 ) ([]string, error) {
+	return CanonicalMCPArguments(server)
+}
+
+// CanonicalMCPArguments is the independently verifiable fake-harness
+// treatment encoding used by offline end-to-end tests.
+func CanonicalMCPArguments(server harness.MCPServer) ([]string, error) {
 	servers, err := json.Marshal([]harness.MCPServer{server})
 	if err != nil {
 		return nil, fmt.Errorf("encode MCP registry: %w", err)
@@ -113,6 +120,30 @@ func (Adapter) Build(
 		return harness.ProcessSpec{}, errors.New(
 			"fake Build accepts only the common invocation; use MCPArguments for registration",
 		)
+	}
+	return canonicalProcess(invocation)
+}
+
+// ValidateCanonicalProcess lets the offline plan verifier independently
+// rederive the complete fake-harness common process. It does not trust a
+// caller-authored common argv merely because both arms share it.
+func ValidateCanonicalProcess(
+	invocation harness.Invocation,
+	observed harness.ProcessSpec,
+) error {
+	expected, err := canonicalProcess(invocation)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(observed, expected) {
+		return errors.New("fake common process differs from its code-owned encoding")
+	}
+	return nil
+}
+
+func canonicalProcess(invocation harness.Invocation) (harness.ProcessSpec, error) {
+	if len(invocation.MCPServers) != 0 {
+		return harness.ProcessSpec{}, errors.New("fake common invocation contains MCP servers")
 	}
 	arguments := append([]string{invocation.Executable}, invocation.Arguments...)
 	arguments = append(

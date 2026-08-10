@@ -33,18 +33,22 @@
     },
     "id": {
       "type": "string",
+	  "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*$"
     },
     "prompt_file": {
       "type": "string",
-      "minLength": 1
+	  "minLength": 1,
+	  "maxLength": 4096
     },
     "harness_kind": {
       "type": "string",
-      "minLength": 1
+	  "minLength": 1,
+	  "maxLength": 64
     },
     "harness_executable": {
       "type": "string",
+	  "maxLength": 4096,
       "pattern": "^/"
     },
     "harness_sha256": {
@@ -52,6 +56,7 @@
     },
     "git_executable": {
       "type": "string",
+	  "maxLength": 4096,
       "pattern": "^/"
     },
     "git_executable_sha256": {
@@ -59,6 +64,7 @@
     },
     "model": {
       "type": "string",
+	  "maxLength": 128,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*$",
       "not": {
         "pattern": "(^[Aa][Uu][Tt][Oo]$|^[Dd][Ee][Ff][Aa][Uu][Ll][Tt]$|[Rr][Oo][Uu][Tt][Ee][Rr]|[Ll][Aa][Tt][Ee][Ss][Tt]|[Cc][Uu][Rr][Rr][Ee][Nn][Tt]|[Ss][Tt][Aa][Bb][Ll][Ee]|[Pp][Rr][Oo][Dd][Uu][Cc][Tt][Ii][Oo][Nn]|\\*)"
@@ -66,6 +72,7 @@
     },
     "expected_model_revision": {
       "type": "string",
+	  "maxLength": 256,
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/+-]*@(?:[0-9][A-Za-z0-9._:+-]{3,}|[A-Za-z](?:[0-9][A-Za-z0-9._:+-]{2,}|[A-Za-z0-9._:+-][0-9][A-Za-z0-9._:+-]+|[A-Za-z0-9._:+-]{2,}[0-9][A-Za-z0-9._:+-]*))$",
       "minLength": 8,
       "not": {
@@ -74,17 +81,20 @@
     },
     "reasoning_effort": {
       "type": "string",
-      "minLength": 1
+	  "minLength": 1,
+	  "maxLength": 64
     },
     "permission_profile": {
       "const": "read-only"
     },
     "developer_instructions": {
-      "type": "string"
+	  "type": "string",
+	  "maxLength": 65536
     },
     "source_root": {
       "type": "string",
-      "minLength": 1
+	  "minLength": 1,
+	  "maxLength": 4096
     },
     "source_revision": {
       "$ref": "#/$defs/git_object_id"
@@ -98,12 +108,12 @@
     "timeout_millis": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 9223372036854775807
+	  "maximum": 7200000
     },
     "repetitions": {
       "type": "integer",
       "minimum": 1,
-      "maximum": 2147483647
+	  "maximum": 100
     },
     "seed": {
       "type": "integer",

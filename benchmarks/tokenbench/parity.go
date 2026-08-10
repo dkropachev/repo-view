@@ -105,9 +105,7 @@ func validateInvocation(invocation harness.Invocation) error {
 	case !utf8.Valid(invocation.Prompt):
 		return errors.New("prompt must be valid UTF-8")
 	case invocation.Environment == nil:
-		return errors.New("process environment must be a canonical empty object")
-	case len(invocation.Environment) != 0:
-		return errors.New("authored process environment is not allowed")
+		return errors.New("process environment must be a canonical object")
 	case invocation.Arguments == nil:
 		return errors.New("harness arguments must be a canonical empty array")
 	case len(invocation.Arguments) != 0:
@@ -159,6 +157,9 @@ func validateInvocation(invocation harness.Invocation) error {
 	case invocation.TimeoutMillis <= 0:
 		return errors.New("timeout must be positive")
 	}
+	if err := harness.ValidatePublishableEnvironment(invocation.Environment); err != nil {
+		return err
+	}
 	if err := harness.ValidateIdentity(invocation.HarnessIdentity); err != nil {
 		return err
 	}
@@ -180,10 +181,31 @@ func validateRepoViewRegistration(
 	registration harness.MCPServer,
 	invocation harness.Invocation,
 ) error {
-	expectedArguments := []string{
+	legacyArguments := []string{
 		"mcp",
 		"--root", invocation.WorkingDirectory,
 		"--base", invocation.SourceBaseRevision,
+		"--git", invocation.GitExecutable,
+		"--git-sha256", invocation.GitExecutableSHA256,
+	}
+	cachePath := filepath.Join(
+		filepath.Dir(invocation.WorkingDirectory),
+		"cache",
+		"changed-state.json",
+	)
+	cacheArguments := []string{
+		"mcp",
+		"--root", invocation.WorkingDirectory,
+		"--base", invocation.SourceBaseRevision,
+		"--head", invocation.SourceRevision,
+		"--changed-state-cache", cachePath,
+		"--changed-state-cache-sha256", "",
+	}
+	validArguments := reflect.DeepEqual(registration.Arguments, legacyArguments)
+	if len(registration.Arguments) == len(cacheArguments) &&
+		ValidSHA256(registration.Arguments[len(registration.Arguments)-1]) {
+		cacheArguments[len(cacheArguments)-1] = registration.Arguments[len(registration.Arguments)-1]
+		validArguments = reflect.DeepEqual(registration.Arguments, cacheArguments)
 	}
 	switch {
 	case registration.Name != "repo_view":
@@ -203,9 +225,9 @@ func validateRepoViewRegistration(
 		return errors.New("repo_view MCP server must be declared read-only")
 	case registration.Environment == nil || len(registration.Environment) != 0:
 		return errors.New("repo_view MCP registration must not contain environment hints")
-	case !reflect.DeepEqual(registration.Arguments, expectedArguments):
+	case !validArguments:
 		return fmt.Errorf(
-			"repo_view MCP arguments must be the code-owned generic form, got %q",
+			"repo_view MCP arguments must be a code-owned Git or cache-only form, got %q",
 			registration.Arguments,
 		)
 	default:

@@ -1,112 +1,199 @@
 # Tokenbench
 
-> Status: validation and process-planning foundation. This revision validates suites, pins model/source/adapter/tokenbench-executable identity, resolves the sole-delta pair, renders a verified process pair, and provides `validate`/`plan`. It does not launch model runs or provide live MCP handshake/tool-surface verification, a Codex adapter, immutable evidence, replay, statistics, or reporting commands.
+Tokenbench is the validity-first paired benchmark for measuring whether making
+the read-only `repo_view` MCP server available changes Codex token use without
+reducing answer quality.
 
-Tokenbench is the proposed reproducible benchmark for measuring whether read-only `repo_view` MCP access changes model token use while preserving answer quality. It is intended to replace one-off shell experiments with an auditable paired design, immutable evidence, harness adapters, and offline replay.
+The invariant is deliberately narrow:
 
-## The experiment
-
-Each attempt is a fresh pair of runs over the same immutable repository state and the same task:
-
-| Arm | Configuration |
+| Arm | MCP configuration |
 | --- | --- |
-| Baseline | Canonical run specification, with no MCP server registrations |
-| Candidate | The identical specification, with exactly one read-only MCP registration named `repo_view` |
+| Baseline | no MCP registrations |
+| Candidate | exactly one required registration named `repo_view` |
 
-That registration is the sole treatment. The model may receive the tool declarations naturally produced by the MCP handshake. It must not receive candidate-only instructions about navigation or tool use.
+Everything else is derived once and shared: exact prompt bytes and roles,
+developer instructions, requested and provider-resolved model revision,
+reasoning settings, Codex build, adapter, native tools, environment and `PATH`,
+permissions, limits, proxy route, source/Git state, filesystem paths, and fresh
+runtime layout. Tool declarations obtained from the candidate MCP handshake are
+part of the treatment. A candidate-only hint, wrapper, executable, environment
+value, or repository preparation is a parity failure, not a benchmark result.
 
-The following must remain identical: prompt bytes and roles, requested model, resolved immutable model revision, reasoning settings, harness, adapter, and tokenbench executable identities, permissions and sandbox, working directory and complete source/Git state, executable `PATH`, environment, timeouts, native tool inventory, account/routing settings, feature flags, and all other effective configuration. Baseline has no MCP registrations; candidate's `repo_view` entry is the only one. Run identifiers, timestamps, and randomized order are evidence metadata and are not model-visible inputs.
+## Current status
 
-The current planner proves invocation parity, asks the bound adapter to build the common process exactly once, clones that process, and centrally appends only the adapter's native encoding of the approved registration to candidate argv. It then reverifies the tokenbench, harness, and MCP executables plus source, `.git`, and Git-executable inputs, and commits the rendered pair and its digest in the audit plan. Live MCP handshake, server identity, and read-only tool-surface verification remain planned.
+The checked-in implementation provides:
 
-## Intended lifecycle
+- strict `tokenbench.suite/v2`, artifact-manifest v1, plan v3, capture v3,
+  signed-root, trust-policy, and replay contracts;
+- an audit-only planner plus one publishable live adapter for Codex CLI
+  `0.144.0`, exact executable SHA-256
+  `08b012d75651efb22b5162be253cd4d28752594082671098e123229b896ba77e`;
+- one allowed model snapshot: requested `gpt-5.4`, immutable identity
+  `gpt-5.4@gpt-5.4-2026-03-05`, provider value
+  `gpt-5.4-2026-03-05`;
+- immutable source, standalone `.git`, changed-state cache, Codex, repo-view,
+  Git, Bash, runner, and closed native-tool snapshots backed by fs-verity and a
+  private read-only self-bind mount;
+- fresh arm state, randomized counterbalanced order, complete process and
+  effective-config parity checks, exact MCP tool-surface checks, raw Codex
+  JSONL and Responses-wire capture, and provider usage decoding;
+- Linux containment using a private PID namespace, delegated bounded cgroup v2,
+  cgroup BPF network policy, Landlock ABI 6 or newer, seccomp, empty capability
+  sets, and fail-closed process-tree cleanup;
+- append-only content-addressed evidence, atomic publication, Ed25519
+  attestations, out-of-band trust policy, graph verification, and offline replay;
+- a harness-neutral adapter interface, fake/conformance fixtures, and a generic
+  non-publishable executor for extension work.
 
-1. Validate a versioned corpus and canonical run specification.
-2. Centrally derive baseline and candidate invocations and prove that their sole semantic difference is the MCP registration.
-3. Render the approved common process once, centrally clone/append the MCP suffix, and prove wrapper-level process parity.
-4. Run fresh sessions in randomized, counterbalanced order.
-5. Capture raw events, usage, responses, effective configuration, and checks into immutable content-addressed evidence.
-6. Replay decoding and analysis offline into a new derived bundle.
-7. Report token components, quality, uncertainty, failures, and provenance together.
+The live path intentionally refuses to run when a required kernel, artifact,
+identity, cleanup, or capture proof is unavailable. It has no best-effort
+publication mode. Study-level blinded quality evaluation and statistical
+reporting are kept separate from raw capture and replay.
 
-The current foundation covers common suite validation plus steps 2–3 through verified process construction, but it has no versioned corpus and does not launch those processes. Corpus support, steps 4–7, and live harness/MCP verification are target capabilities, not current command guarantees.
+## Commands
 
-## Current foundation
-
-The checked-in Go foundation currently provides:
-
-- `tokenbench.suite/v1` decoding with unknown/duplicate-field rejection and schema documentation;
-- an explicit requested model plus an expected resolved identity in `<model>@<immutable-revision>` form;
-- prompt, harness executable, canonical tokenbench executable, full source and base revisions, raw tracked-tree and standalone `.git` metadata commitments, plus suite-authored canonical Git executable path/SHA-256;
-- rejection of ambiguous model aliases, authored opaque harness arguments/environment, dirty or ignored source files, linked worktrees, Git alternates, unsafe index state, and local Git overrides;
-- `PrepareSuite` retention of the verified source snapshot, resolved adapter identity, and adapter capability, plus `NewRepoViewTool` pinning of the actual MCP executable;
-- code-owned construction of the sole `repo_view` registration, marked required and read-only in the plan; live server identity/tool-surface verification remains planned;
-- defensive pair resolution, deep common-invocation comparison, and a serializable parity proof;
-- `Pair.Build`, which re-resolves adapter identity, builds the common process once, centrally clones/appends `MCPArguments`, and reverifies tokenbench/harness/MCP executables plus source/Git identity before returning `ProcessPair`;
-- `Pair.Plan(ctx)`, which obtains that pair only through the retained adapter-bound capability and stores both the rendered processes and their digest in `ResolvedPlan`;
-- `validate` for suite validation plus suite/prompt digest output, and `plan` for full preparation, verified process rendering, and exclusive audit-plan creation;
-- the `Kind`/`Resolve`/`MCPArguments`/`Build`/`Decode` adapter interface, deterministic fake, shared conformance helper, and external process bridge.
-
-Neither subcommand launches the planned target processes. A generated or decoded `ResolvedPlan` contains the verified process specifications, but remains audit/transport data rather than benchmark evidence, a benchmark result, or execution authority. Code that still retains the original adapter-bound `Pair` may build again; the plan alone cannot. Starting from only serialized plan data requires reloading and preparing the suite to obtain fresh authority.
-
-From the repository root, the implemented command surface is:
+From the repository root:
 
 ```sh
-go run ./benchmarks/tokenbench/cmd/tokenbench validate --suite SUITE.json
-go run ./benchmarks/tokenbench/cmd/tokenbench plan \
-  --suite SUITE.json \
-  --repo-view-mcp /absolute/path/to/repo-view \
-  --out PLAN.json
+go run ./benchmarks/tokenbench/cmd/tokenbench help
 ```
 
-`plan` requires pinned harness/MCP/Git executables, the exact expected model revision, and a clean self-contained source repository with standalone `.git`. It calls `Pair.Plan(ctx)`, which internally builds the pair once and commits the rendered processes before emitting the audit plan. Omitting `--out` writes JSON to standard output; when `--out` names a file, that path must not already exist. No `run`, `replay`, `analyze`, `stats`, or `report` subcommand exists yet.
+The command surface is:
 
-The built-in `fake` adapter supports deterministic offline planning/tests. Any other `harness_kind` requires `--adapter-command /absolute/path/to/adapter`; the command must implement `tokenbench.external-adapter/v1` as documented in [docs/adapter-authoring.md](docs/adapter-authoring.md). Codex is not yet a built-in adapter.
+- `validate`: strictly load a suite and reverify its common source, model, and
+  Codex planning inputs without launching a model;
+- `plan`: emit a non-publishable audit plan; decoded plans never grant execution
+  authority;
+- `run`: execute exactly one explicit suite repetition and publish one signed
+  capture root;
+- `verify`: authenticate and transitively verify a capture or replay root under
+  an explicit trust policy;
+- `replay`: decode an authenticated capture offline and publish a new signed
+  replay root without changing its parent.
 
-## Current and planned structure
+Run every authored repetition explicitly. Outputs, state, CAS, and snapshot
+paths are exclusive; tokenbench never selects or overwrites a prior result.
+
+```sh
+tokenbench run \
+  --suite /absolute/study/suite.json \
+  --artifact-bundle /absolute/artifacts \
+  --snapshot-root /absolute/new-snapshot \
+  --state-root /absolute/new-runtime \
+  --cas /absolute/new-cas \
+  --root-out /absolute/new-capture.root.json \
+  --credential-fd 3 \
+  --signing-key-file /absolute/secrets/capture.seed \
+  --trust-policy /absolute/policy/trust.json \
+  --repetition 0 \
+  3</absolute/secrets/openai-api-key
+```
+
+The inherited credential descriptor must be in `3..255`. The parent process
+passes it unchanged into a new private mount namespace; the child reads it once,
+closes it before either arm launches, and never serializes it. Ambient provider
+base URLs, proxies, or custom-CA variables are rejected.
+
+Verify and replay by signed root, never by mutable directory convention:
+
+```sh
+tokenbench verify \
+  --cas /absolute/cas \
+  --root /absolute/capture.root.json \
+  --trust-policy /absolute/policy/trust.json
+
+tokenbench replay \
+  --cas /absolute/cas \
+  --root /absolute/capture.root.json \
+  --trust-policy /absolute/policy/trust.json \
+  --signing-key-file /absolute/secrets/replay.seed \
+  --root-out /absolute/new-replay.root.json
+```
+
+`run` and `replay` read signing keys only after the data they will attest has
+passed the applicable execution/authentication boundary. A signing-key file is
+exactly one unpadded base64url-encoded 32-byte Ed25519 seed with no newline.
+Trust-policy JSON is byte-canonical, independently distributed, and authorizes
+sorted key IDs for `capture`, `replay`, or both roles.
+
+## Building a publishable binary
+
+Publishable execution uses a closed artifact bundle. Its fixed manifest name is
+`tokenbench-artifacts-v1.json`; the exact compact JSON bytes must match
+[`schemas/artifact-manifest-v1.schema.json`](schemas/artifact-manifest-v1.schema.json).
+It names exact, single-link, native static ELF images for Codex, repo-view,
+verifier Git, Bash, and each allowlisted utility, with reproducible provenance.
+No symlink, dynamic loader, multicall alias, unlisted executable, or digest drift
+is accepted.
+
+The suite and tokenbench binary must independently allow the same manifest
+digest. Build tokenbench itself as a static executable and bind that digest at
+link time:
+
+```sh
+manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v1.json | awk '{print $1}')"
+CGO_ENABLED=0 go build -trimpath \
+  -ldflags "-X github.com/dkropachev/repo-view/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -o /absolute/bin/tokenbench \
+  ./benchmarks/tokenbench/cmd/tokenbench
+```
+
+The authored suite's `artifact_manifest_sha256`, `harness_executable`,
+`harness_sha256`, `git_executable`, and `git_executable_sha256` must agree with
+that same bundle. A normal `go run` or binary built without the link-time policy
+can validate and produce audit-only plans, but cannot publish a live result.
+
+## Host prerequisites
+
+Publishable runs currently require Linux on a native architecture supported by
+the bundled static ELF images, plus all of the following:
+
+- a private mount namespace whose mount tree can be made recursively private;
+- an absent snapshot path on an fs-verity-capable filesystem and permission to
+  create a read-only `nosuid,nodev` self-bind mount;
+- a writable delegated cgroup-v2 directory containing only tokenbench, with
+  finite `pids.max` and `memory.max`, and `cpu`, `memory`, and `pids`
+  controllers;
+- cgroup BPF attach/query support with no inherited connect programs;
+- Landlock ABI 6 or newer, seccomp, PID namespaces, and capability bounding;
+- direct TLS access to `https://api.openai.com/v1` using system roots.
+
+The mandatory privileged CI lane builds a pinned container by digest and turns
+every unavailable prerequisite or skipped kernel test into a failure. For a
+local kernel-boundary check, run:
+
+```sh
+benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+```
+
+This command requires a Linux x86-64 host and a privileged Docker-compatible
+container engine. It performs no model call.
+
+## Repository layout
 
 ```text
 benchmarks/tokenbench/
-  AGENTS.md
-  README.md
-  DESIGN.md
-  CONTRIBUTING.md
-  cmd/tokenbench/       # current validate/plan CLI
-  harness/              # current interface, fake, conformance, process bridge
-  source/               # current immutable-source verification
-  docs/
-    methodology.md
-    adapter-authoring.md
-    evidence-format.md
-    migration.md
-  corpus/              # planned versioned tasks and expected facts
-  schemas/             # current suite schema; evidence schemas planned
-  suites/smoke/        # current placeholder; corpus planned
-  testdata/            # current process-adapter fixtures; replay fixtures planned
+  AGENTS.md             coding rules for agents and contributors
+  CONTRIBUTING.md       review and verification checklist
+  DESIGN.md             security, authority, parity, and failure model
+  cmd/tokenbench/       command-line boundary
+  harness/              harness-neutral contract and Codex adapter
+  runner/               containment and raw execution
+  snapshot/             immutable source/tool image and changed-state cache
+  cas/                  typed append-only content-addressed store
+  evidence/             capture, attestation, verification, and replay
+  source/               mutable-origin verification
+  study/                separate methodology stage for blinded paired analysis
+  schemas/              authored JSON contracts
+  scripts/              fail-closed privileged validation
+  docs/                 operations, methodology, evidence, adapter, and migration guides
 ```
 
-The current CLI name and package locations above are established. Directories labeled planned are roadmap, not available workflow surfaces.
-
-## Roadmap
-
-- **Stage 0 — contracts (current):** methodology, design, evidence, adapter, and migration documentation.
-- **Stage 1 — validation/process-planning core (current):** strict types/schema, full source/Git verification, adapter/model identity binding, sole-delta pair construction, process rendering, parity proofs, `validate`/`plan`, fake/conformance support, and the external process bridge.
-- **Stage 2 — live execution and evidence (planned):** target-process runner, MCP handshake/read-only tool-surface enforcement, raw capture, and immutable CAS publication.
-- **Stage 3 — first live/model-backed harness (planned):** Codex adapter, provider event/usage decoding, and live conformance fixtures.
-- **Stage 4 — replay and study workflow (planned):** offline replay, reviewed corpus, blinded quality checks, paired statistics, and report generation.
-- **Stage 5 — legacy transition (planned):** provenance-preserving import and an optional compatibility entry point for old experiment workflows.
-
-A stage is complete only after its implementation and tests are checked in. Later-stage prose is directional.
-
-## Reading guide
-
-- [DESIGN.md](DESIGN.md) defines boundaries, parity, and failure behavior.
-- [docs/methodology.md](docs/methodology.md) defines the experimental estimand and analysis.
-- [docs/adapter-authoring.md](docs/adapter-authoring.md) defines harness conformance.
-- [docs/evidence-format.md](docs/evidence-format.md) defines the proposed immutable bundle model.
-- [docs/migration.md](docs/migration.md) explains how legacy evidence remains available without being mistaken for conformant evidence.
-- [CONTRIBUTING.md](CONTRIBUTING.md) contains change and review expectations.
-
-## Non-goals
-
-Tokenbench does not tune prompts separately for each arm, prove that every task benefits from repository navigation, convert price into “effective tokens,” or retroactively make legacy oracle-assisted experiments comparable. It is designed to make a narrow treatment and its evidence inspectable.
+Read [DESIGN.md](DESIGN.md) before changing an authority boundary,
+[AGENTS.md](AGENTS.md) before editing code, and
+[docs/adapter-authoring.md](docs/adapter-authoring.md) before adding another
+harness. Operators should follow the end-to-end
+[artifact, signing, run, and recovery guide](docs/operations.md). Historical
+`experiments/lsp-replacement` output is explicitly
+non-conformant and is not pooled with tokenbench evidence; see
+[docs/migration.md](docs/migration.md).
