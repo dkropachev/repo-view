@@ -285,6 +285,28 @@ func rejectDescendantMounts(root string) error {
 	return nil
 }
 
+func verifyArmMountTopology(root string, overlay mountRecord) error {
+	records, err := allMountRecords()
+	if err != nil {
+		return err
+	}
+	foundOverlay := 0
+	for _, record := range records {
+		if record.point == root || !pathWithin(root, record.point) {
+			continue
+		}
+		if record.id == overlay.id && reflect.DeepEqual(record, overlay) {
+			foundOverlay++
+			continue
+		}
+		return fmt.Errorf("workspace contains unexpected descendant mount %q", record.point)
+	}
+	if foundOverlay != 1 {
+		return fmt.Errorf("workspace contains %d retained overlay mounts, want 1", foundOverlay)
+	}
+	return nil
+}
+
 func verifyMountRecord(path string, expectedInfo os.FileInfo, expected mountRecord) error {
 	if expectedInfo == nil || expected.id == 0 {
 		return errors.New("workspace retained mount identity is absent")
@@ -601,7 +623,14 @@ func claimWorkspaceRoot(path string) (
 		}
 		if parent != nil {
 			if created {
-				resultErr = errors.Join(resultErr, unix.Unlinkat(int(parent.Fd()), leaf, unix.AT_REMOVEDIR))
+				if info == nil {
+					resultErr = errors.Join(
+						resultErr,
+						errors.New("unverified claimed workspace root residue retained"),
+					)
+				} else {
+					resultErr = errors.Join(resultErr, removeClaimedRoot(parent, leaf, info))
+				}
 			}
 			resultErr = errors.Join(resultErr, parent.Close())
 		}
@@ -626,8 +655,14 @@ func claimWorkspaceRoot(path string) (
 	if err != nil || info.Mode().Perm() != 0o700 {
 		return nil, nil, nil, "", errors.Join(errors.New("claimed workspace root mode is invalid"), err)
 	}
+	if err := verifyDirectoryPathAt(parent, leaf, root); err != nil {
+		return nil, nil, nil, "", fmt.Errorf("verify claimed workspace root path: %w", err)
+	}
 	if err := parent.Sync(); err != nil {
 		return nil, nil, nil, "", err
+	}
+	if err := verifyDirectoryPathAt(parent, leaf, root); err != nil {
+		return nil, nil, nil, "", fmt.Errorf("reverify claimed workspace root after sync: %w", err)
 	}
 	return parent, root, info, leaf, nil
 }
@@ -675,11 +710,62 @@ func createDirectoryAt(parent *os.File, name string) (*os.File, error) {
 		_ = directory.Close()
 		return nil, errors.Join(errors.New("workspace directory mode is invalid"), err)
 	}
+	if err := verifyDirectoryPathAt(parent, name, directory); err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("verify created workspace directory path: %w", err)
+	}
 	if err := parent.Sync(); err != nil {
 		_ = directory.Close()
 		return nil, err
 	}
+	if err := verifyDirectoryPathAt(parent, name, directory); err != nil {
+		_ = directory.Close()
+		return nil, fmt.Errorf("reverify created workspace directory after sync: %w", err)
+	}
 	return directory, nil
+}
+
+func verifyDirectoryPathAt(
+	parent *os.File,
+	name string,
+	expected *os.File,
+) (resultErr error) {
+	if parent == nil || expected == nil {
+		return errors.New("workspace directory identity is absent")
+	}
+	expectedInfo, err := expected.Stat()
+	if err != nil || !expectedInfo.IsDir() || expectedInfo.Mode().Perm() != 0o700 {
+		return errors.Join(errors.New("workspace directory descriptor is invalid"), err)
+	}
+	current, err := openDirectoryAt(parent, name)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, current.Close()) }()
+	currentInfo, err := current.Stat()
+	if err != nil || !os.SameFile(expectedInfo, currentInfo) ||
+		currentInfo.Mode().Perm() != 0o700 {
+		return errors.Join(errors.New("workspace directory pathname changed"), err)
+	}
+	var pathStat unix.Stat_t
+	if err := unix.Fstatat(
+		int(parent.Fd()),
+		name,
+		&pathStat,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
+		return err
+	}
+	var openedStat unix.Stat_t
+	if err := unix.Fstat(int(current.Fd()), &openedStat); err != nil {
+		return err
+	}
+	if pathStat.Dev != openedStat.Dev || pathStat.Ino != openedStat.Ino ||
+		pathStat.Mode&unix.S_IFMT != unix.S_IFDIR || openedStat.Mode&unix.S_IFMT != unix.S_IFDIR ||
+		pathStat.Uid != uint32(os.Geteuid()) || openedStat.Uid != uint32(os.Geteuid()) {
+		return errors.New("workspace directory changed after it was opened")
+	}
+	return nil
 }
 
 func directoryIsEmpty(directory *os.File) error {
@@ -746,9 +832,16 @@ func removeClaimedRoot(parent *os.File, leaf string, expected os.FileInfo) error
 	}
 	info, statErr := current.Stat()
 	emptyErr := directoryIsEmpty(current)
+	pathErr := verifyDirectoryPathAt(parent, leaf, current)
 	closeErr := current.Close()
-	if statErr != nil || !os.SameFile(expected, info) || emptyErr != nil || closeErr != nil {
-		return errors.Join(errors.New("refuse to remove changed workspace root"), statErr, emptyErr, closeErr)
+	if statErr != nil || !os.SameFile(expected, info) || emptyErr != nil || pathErr != nil || closeErr != nil {
+		return errors.Join(
+			errors.New("refuse to remove changed workspace root"),
+			statErr,
+			emptyErr,
+			pathErr,
+			closeErr,
+		)
 	}
 	if err := unix.Unlinkat(int(parent.Fd()), leaf, unix.AT_REMOVEDIR); err != nil {
 		return err

@@ -305,7 +305,7 @@ func removeArmLayout(root *os.File, limits Limits) error {
 	} {
 		resultErr = errors.Join(
 			resultErr,
-			removeDirectoryTreeAt(root, name, rootStat.Dev, &budget, 0),
+			removeDirectoryTreeAt(root, name, rootStat.Dev, &budget),
 		)
 	}
 	resultErr = errors.Join(resultErr, root.Sync())
@@ -317,10 +317,9 @@ func removeDirectoryTreeAt(
 	name string,
 	rootDevice uint64,
 	budget *int64,
-	depth int,
-) error {
-	if depth > maximumWorkspacePathDepth {
-		return errors.New("workspace cleanup depth exceeds its limit")
+) (resultErr error) {
+	if parent == nil || budget == nil {
+		return errors.New("workspace cleanup authority is absent")
 	}
 	directory, err := openDirectoryAt(parent, name)
 	if errors.Is(err, unix.ENOENT) {
@@ -329,18 +328,83 @@ func removeDirectoryTreeAt(
 	if err != nil {
 		return err
 	}
-	var resultErr error
-	names, readErr := directoryNames(directory)
-	resultErr = errors.Join(resultErr, readErr)
-	for _, childName := range names {
+	defer func() {
+		if directory != nil {
+			resultErr = errors.Join(resultErr, directory.Close())
+		}
+	}()
+	var parentStat unix.Stat_t
+	if err := unix.Fstat(int(parent.Fd()), &parentStat); err != nil {
+		return err
+	}
+	type cleanupFrame struct {
+		name      string
+		parentDev uint64
+		parentIno uint64
+	}
+	stack := []cleanupFrame{{
+		name: name, parentDev: parentStat.Dev, parentIno: parentStat.Ino,
+	}}
+	for {
+		childName, found, err := firstDirectoryName(directory)
+		if err != nil {
+			return err
+		}
+		if !found {
+			if err := directory.Sync(); err != nil {
+				return err
+			}
+			frame := stack[len(stack)-1]
+			if len(stack) == 1 {
+				if err := verifyCleanupDirectoryAt(parent, frame.name, directory, rootDevice); err != nil {
+					return err
+				}
+				if err := directory.Close(); err != nil {
+					return err
+				}
+				directory = nil
+				if err := unix.Unlinkat(int(parent.Fd()), frame.name, unix.AT_REMOVEDIR); err != nil {
+					return err
+				}
+				return parent.Sync()
+			}
+
+			ascended, err := openDirectoryAt(directory, "..")
+			if err != nil {
+				return err
+			}
+			var ascendedStat unix.Stat_t
+			if err := unix.Fstat(int(ascended.Fd()), &ascendedStat); err != nil ||
+				ascendedStat.Dev != frame.parentDev || ascendedStat.Ino != frame.parentIno {
+				_ = ascended.Close()
+				return errors.Join(errors.New("workspace cleanup parent identity changed"), err)
+			}
+			if err := verifyCleanupDirectoryAt(ascended, frame.name, directory, rootDevice); err != nil {
+				_ = ascended.Close()
+				return err
+			}
+			if err := directory.Close(); err != nil {
+				_ = ascended.Close()
+				return err
+			}
+			directory = ascended
+			if err := unix.Unlinkat(int(directory.Fd()), frame.name, unix.AT_REMOVEDIR); err != nil {
+				return err
+			}
+			if err := directory.Sync(); err != nil {
+				return err
+			}
+			stack = stack[:len(stack)-1]
+			continue
+		}
+
 		if *budget <= 0 {
-			resultErr = errors.Join(resultErr, errors.New("workspace cleanup entry limit exceeded"))
-			break
+			return errors.New("workspace cleanup entry limit exceeded")
 		}
 		*budget--
-		if !validPathComponent(childName) {
-			resultErr = errors.Join(resultErr, errors.New("workspace cleanup found an invalid name"))
-			continue
+		if childName == "" || childName == "." || childName == ".." ||
+			strings.ContainsAny(childName, "/\x00") {
+			return errors.New("workspace cleanup received an impossible directory entry")
 		}
 		var stat unix.Stat_t
 		if err := unix.Fstatat(
@@ -349,28 +413,83 @@ func removeDirectoryTreeAt(
 			&stat,
 			unix.AT_SYMLINK_NOFOLLOW,
 		); err != nil {
-			resultErr = errors.Join(resultErr, err)
-			continue
+			return err
 		}
 		if stat.Dev != rootDevice {
-			resultErr = errors.Join(resultErr, errors.New("workspace cleanup crossed a filesystem boundary"))
-			continue
+			return errors.New("workspace cleanup crossed a filesystem boundary")
 		}
 		if stat.Mode&unix.S_IFMT == unix.S_IFDIR {
-			resultErr = errors.Join(
-				resultErr,
-				removeDirectoryTreeAt(directory, childName, rootDevice, budget, depth+1),
-			)
+			child, err := openDirectoryAt(directory, childName)
+			if err != nil {
+				return err
+			}
+			if err := verifyCleanupDirectoryAt(directory, childName, child, rootDevice); err != nil {
+				_ = child.Close()
+				return err
+			}
+			var currentStat unix.Stat_t
+			if err := unix.Fstat(int(directory.Fd()), &currentStat); err != nil {
+				_ = child.Close()
+				return err
+			}
+			stack = append(stack, cleanupFrame{
+				name: childName, parentDev: currentStat.Dev, parentIno: currentStat.Ino,
+			})
+			if err := directory.Close(); err != nil {
+				_ = child.Close()
+				return err
+			}
+			directory = child
 			continue
 		}
-		resultErr = errors.Join(
-			resultErr,
-			unix.Unlinkat(int(directory.Fd()), childName, 0),
-		)
+		if err := unix.Unlinkat(int(directory.Fd()), childName, 0); err != nil {
+			return err
+		}
 	}
-	resultErr = errors.Join(resultErr, directory.Sync(), directory.Close())
-	if resultErr != nil {
-		return resultErr
+}
+
+func firstDirectoryName(directory *os.File) (string, bool, error) {
+	stream, err := openDirectoryAt(directory, ".")
+	if err != nil {
+		return "", false, err
 	}
-	return unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+	names, readErr := stream.Readdirnames(1)
+	closeErr := stream.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return "", false, errors.Join(readErr, closeErr)
+	}
+	if closeErr != nil {
+		return "", false, closeErr
+	}
+	if len(names) == 0 {
+		return "", false, nil
+	}
+	return names[0], true, nil
+}
+
+func verifyCleanupDirectoryAt(
+	parent *os.File,
+	name string,
+	directory *os.File,
+	rootDevice uint64,
+) error {
+	var opened unix.Stat_t
+	if err := unix.Fstat(int(directory.Fd()), &opened); err != nil {
+		return err
+	}
+	var path unix.Stat_t
+	if err := unix.Fstatat(
+		int(parent.Fd()),
+		name,
+		&path,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
+		return err
+	}
+	if opened.Dev != rootDevice || path.Dev != rootDevice ||
+		opened.Dev != path.Dev || opened.Ino != path.Ino ||
+		opened.Mode&unix.S_IFMT != unix.S_IFDIR || path.Mode&unix.S_IFMT != unix.S_IFDIR {
+		return errors.New("workspace cleanup directory identity changed")
+	}
+	return nil
 }

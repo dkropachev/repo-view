@@ -206,6 +206,8 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 			t.Fatalf("arm %d cache is not fresh: %v", iteration, err)
 		}
 		if iteration == 0 {
+			assertPrivilegedCacheReplacementRejected(t, arm)
+			assertPrivilegedPrivateMountRejected(t, arm, lowerPath)
 			assertPrivilegedDescendantMountRejected(t, arm, lowerPath)
 		}
 		if err := os.WriteFile(filepath.Join(arm.paths.ModelRoot, "mutation"), []byte(fmt.Sprint(iteration)), 0o600); err != nil {
@@ -232,6 +234,71 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 	}
 	if _, err := os.Lstat(rootPath); !os.IsNotExist(err) {
 		t.Fatalf("workspace root remains after cleanup: %v", err)
+	}
+}
+
+func assertPrivilegedPrivateMountRejected(
+	t *testing.T,
+	arm *ArmAuthority,
+	source string,
+) {
+	t.Helper()
+	target := arm.paths.CacheRoot
+	mounted := false
+	defer func() {
+		if mounted {
+			_ = unix.Unmount(target, unix.UMOUNT_NOFOLLOW)
+		}
+	}()
+	if err := unix.Mount(source, target, "", unix.MS_BIND, ""); err != nil {
+		t.Fatalf("create private-layout mount probe: %v", err)
+	}
+	mounted = true
+	if err := arm.reverifyLocked(context.Background(), false); err == nil {
+		t.Fatal("private-layout descendant mount was accepted")
+	}
+	if err := unix.Unmount(target, unix.UMOUNT_NOFOLLOW); err != nil {
+		t.Fatalf("remove private-layout mount probe: %v", err)
+	}
+	mounted = false
+	if err := arm.reverifyLocked(context.Background(), false); err != nil {
+		t.Fatalf("reverify after private-layout mount removal: %v", err)
+	}
+}
+
+func assertPrivilegedCacheReplacementRejected(t *testing.T, arm *ArmAuthority) {
+	t.Helper()
+	cachePath := arm.paths.CacheRoot
+	retainedPath := cachePath + "-retained"
+	if err := os.Rename(cachePath, retainedPath); err != nil {
+		t.Fatal(err)
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_ = os.RemoveAll(cachePath)
+			_ = os.Rename(retainedPath, cachePath)
+		}
+	}()
+	if err := os.Mkdir(cachePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cachePath, "stale"), []byte("stale"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := arm.reverifyLocked(context.Background(), false); err == nil ||
+		!strings.Contains(err.Error(), "cache") {
+		t.Fatalf("replacement cache path reverify = %v", err)
+	}
+	if err := os.RemoveAll(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(retainedPath, cachePath); err != nil {
+		t.Fatal(err)
+	}
+	restored = true
+	if err := arm.reverifyLocked(context.Background(), false); err != nil {
+		t.Fatalf("reverify restored cache path: %v", err)
 	}
 }
 

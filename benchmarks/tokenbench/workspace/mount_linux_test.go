@@ -166,6 +166,33 @@ func TestClaimWorkspaceRootRejectsExistingPathAndSymlink(t *testing.T) {
 	}
 }
 
+func TestRemoveClaimedRootRefusesReplacementPath(t *testing.T) {
+	t.Parallel()
+	parentPath := t.TempDir()
+	rootPath := filepath.Join(parentPath, "claimed")
+	retainedPath := filepath.Join(parentPath, "retained")
+	parent, root, info, leaf, err := claimWorkspaceRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = root.Close()
+		_ = parent.Close()
+	})
+	if err := os.Rename(rootPath, retainedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeClaimedRoot(parent, leaf, info); err == nil {
+		t.Fatal("replacement workspace root was removed")
+	}
+	if current, err := os.Stat(rootPath); err != nil || !current.IsDir() {
+		t.Fatalf("replacement workspace root was not retained: %v", err)
+	}
+}
+
 func TestDirectoryIsEmptyUsesFreshStreamEveryTime(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

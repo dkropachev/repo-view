@@ -422,8 +422,32 @@ func (arm *ArmAuthority) reverifyLocked(ctx context.Context, verifyPair bool) er
 	if arm.overlayMount.parentID != arm.pair.rootMount.id {
 		return errors.New("workspace overlay escaped its bounded tmpfs parent")
 	}
-	if err := rejectDescendantMounts(arm.paths.ModelRoot); err != nil {
+	if err := arm.verifyPrivateLayoutLocked(); err != nil {
 		return err
+	}
+	if err := verifyArmMountTopology(arm.pair.rootPath, arm.overlayMount); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (arm *ArmAuthority) verifyPrivateLayoutLocked() error {
+	for _, directory := range []struct {
+		file *os.File
+		name string
+	}{
+		{file: arm.upper, name: upperDirectory},
+		{file: arm.work, name: workDirectory},
+		{file: arm.cache, name: cacheDirectory},
+		{file: arm.capture, name: captureDirectory},
+	} {
+		if err := verifyDirectoryPathAt(
+			arm.pair.mountedRoot,
+			directory.name,
+			directory.file,
+		); err != nil {
+			return fmt.Errorf("reverify workspace %s directory: %w", directory.name, err)
+		}
 	}
 	return nil
 }
@@ -448,7 +472,9 @@ func (arm *ArmAuthority) closeLocked() error {
 	if arm.mounted {
 		if err := verifyMountRecord(arm.paths.ModelRoot, arm.overlayInfo, arm.overlayMount); err != nil {
 			attemptErr = errors.Join(attemptErr, fmt.Errorf("refuse to unmount changed workspace overlay: %w", err))
-		} else if err := rejectDescendantMounts(arm.paths.ModelRoot); err != nil {
+		} else if err := arm.verifyPrivateLayoutLocked(); err != nil {
+			attemptErr = errors.Join(attemptErr, err)
+		} else if err := verifyArmMountTopology(arm.pair.rootPath, arm.overlayMount); err != nil {
 			attemptErr = errors.Join(attemptErr, err)
 		} else if arm.overlayRoot != nil {
 			closeErr := arm.overlayRoot.Close()
@@ -467,6 +493,17 @@ func (arm *ArmAuthority) closeLocked() error {
 	}
 	if arm.mounted {
 		arm.closeErr = errors.Join(arm.closeErr, attemptErr)
+		return arm.closeErr
+	}
+	if err := verifyDirectoryPathAt(
+		arm.pair.mountedRoot,
+		worktreeDirectory,
+		arm.target,
+	); err != nil {
+		arm.closeErr = errors.Join(
+			arm.closeErr,
+			fmt.Errorf("refuse to remove changed workspace target: %w", err),
+		)
 		return arm.closeErr
 	}
 	for _, file := range []*os.File{

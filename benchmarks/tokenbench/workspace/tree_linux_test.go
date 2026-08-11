@@ -186,6 +186,75 @@ func TestRemoveArmLayoutHandlesSymlinksAndSpecialEntries(t *testing.T) {
 	}
 }
 
+func TestRemoveArmLayoutHandlesInvalidUTF8AndDeepTrees(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	rootDirectory, err := os.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = rootDirectory.Close() })
+	for _, name := range []string{
+		worktreeDirectory, upperDirectory, workDirectory, cacheDirectory, captureDirectory,
+	} {
+		if err := unix.Mkdirat(int(rootDirectory.Fd()), name, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache, err := openDirectoryAt(rootDirectory, cacheDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidName := string([]byte{'i', 0xff})
+	descriptor, err := unix.Openat(
+		int(cache.Fd()),
+		invalidName,
+		unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC,
+		0o600,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := unix.Close(descriptor); err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	current, err := openDirectoryAt(rootDirectory, worktreeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range maximumWorkspacePathDepth + 32 {
+		if err := unix.Mkdirat(int(current.Fd()), "d", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		next, err := openDirectoryAt(current, "d")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := current.Close(); err != nil {
+			t.Fatal(err)
+		}
+		current = next
+	}
+	if err := current.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := removeArmLayout(rootDirectory, validLimits()); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("workspace cleanup left %d entries", len(entries))
+	}
+}
+
 func TestValidWorktreeRelativePathRejectsAliasesAndInvalidBytes(t *testing.T) {
 	t.Parallel()
 	for _, value := range []string{"", "/absolute", "../escape", "a/../b", "a//b", "a\x00b", string([]byte{'a', 0xff})} {

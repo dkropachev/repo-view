@@ -157,7 +157,7 @@ Publishable runs currently require Linux on a native architecture supported by
 the bundled static ELF images, plus all of the following:
 
 - a private mount namespace whose mount tree can be made recursively private;
-- `CAP_SYS_ADMIN`, tmpfs, OverlayFS, `/proc/self/fd`, and the Linux `fsopen`,
+- `CAP_SYS_ADMIN`, `CAP_MKNOD`, tmpfs, OverlayFS, `/proc/self/fd`, and the Linux `fsopen`,
   `fsconfig`, `fsmount`, and `move_mount` APIs for bounded writable code arms;
 - an absent snapshot path on an fs-verity-capable filesystem and permission to
   create a read-only `nosuid,nodev` self-bind mount;
