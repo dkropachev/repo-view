@@ -48,6 +48,17 @@ writable path, environment, arm, evaluator, or gold-patch field. This is a
 load-only authoring boundary: the current CLI and runner do not accept it for
 execution, and decoded workspace records cannot grant mount or write authority.
 
+The Linux `workspace.Prepare` API is now the only live writable-workspace
+constructor. It is not exposed by the CLI. A future code runner must pass it the
+live immutable snapshot authority plus one absent private root; it must never
+derive either from decoded suite or workspace JSON. Before each child launch it
+must call `RequireFresh`, supply only the returned stable worktree and cache
+paths to containment, and close each arm before beginning the next. Successful
+closure means a normal unmount and bounded descriptor-relative cleanup; any
+identity, topology, or cleanup error invalidates the pair. Patch capture and
+code-result publication remain unimplemented, so v3 suites still cannot be run
+or published.
+
 ## 2. Build the trusted artifact bundle
 
 The artifact build is a separate reproducible supply-chain step. Build all

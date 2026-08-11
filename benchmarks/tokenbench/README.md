@@ -24,7 +24,8 @@ value, or repository preparation is a parity failure, not a benchmark result.
 The checked-in implementation provides:
 
 - strict read-only `tokenbench.suite/v2`, load-only code-task
-  `tokenbench.suite/v3`, bounded workspace audit types, artifact-manifest v2, plan v4, run v3,
+  `tokenbench.suite/v3`, bounded workspace audit types and Linux mount authority,
+  artifact-manifest v2, plan v4, run v3,
   observation v2, capture v5, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
@@ -53,8 +54,9 @@ The live path intentionally refuses to run when a required kernel, artifact,
 identity, cleanup, or capture proof is unavailable. It has no best-effort
 publication mode. Study-level blinded quality evaluation and statistical
 reporting are kept separate from raw capture and replay. Code-task quality has
-a sealed objective-outcome boundary and a separate v3 authoring loader, but no
-writable workspace authority or code runner is implemented yet.
+a sealed objective-outcome boundary, a separate v3 authoring loader, and a live
+Linux authority for fresh bounded writable workspaces, but no code runner or
+result capture is connected to them yet.
 
 ## Commands
 
@@ -155,6 +157,8 @@ Publishable runs currently require Linux on a native architecture supported by
 the bundled static ELF images, plus all of the following:
 
 - a private mount namespace whose mount tree can be made recursively private;
+- `CAP_SYS_ADMIN`, tmpfs, OverlayFS, `/proc/self/fd`, and the Linux `fsopen`,
+  `fsconfig`, `fsmount`, and `move_mount` APIs for bounded writable code arms;
 - an absent snapshot path on an fs-verity-capable filesystem and permission to
   create a read-only `nosuid,nodev` self-bind mount;
 - a writable delegated cgroup-v2 directory containing only tokenbench, with

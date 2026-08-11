@@ -26,9 +26,20 @@ const (
 	maximumPatchBytes   = 256 << 20
 	maximumChangedFiles = 100_000
 	maximumPathBytes    = 4_096
+
+	mountPolicyDocument = "tokenbench.workspace-mount-policy/v1\n" +
+		"root=detached-tmpfs,nosuid,nodev,noexec,noatime,bounded-bytes,bounded-inodes\n" +
+		"arm=detached-overlay,nosuid,nodev,noatime,index-off,nfs-export-off,redirect-off,metacopy-off,xino-off\n" +
+		"mount-inputs=retained-descriptors-via-proc-self-fd\n" +
+		"layout=worktree,upper,work,cache,capture\n" +
+		"model-root-mode=0700\n" +
+		"git=opaque-whiteout\n" +
+		"cleanup=normal-unmount-only"
 )
 
 var violationCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+var requiredMountPolicySHA256 = digest([]byte(mountPolicyDocument))
 
 // Limits bounds one fresh arm workspace. These values are committed before
 // execution and must be the same for both arms.
@@ -41,8 +52,8 @@ type Limits struct {
 }
 
 // Inputs records the exact common workspace identity. Exported paths are audit
-// data only; a future private PairAuthority must prove and retain their live
-// filesystem identities before they can be used.
+// data only; only the private live state retained by PairAuthority can
+// authorize their use.
 type Inputs struct {
 	SchemaVersion      string `json:"schema_version"`
 	ModelRoot          string `json:"model_root"`
@@ -122,8 +133,8 @@ func (inputs Inputs) Validate() error {
 		return errors.New("snapshot_commitment must be a lowercase SHA-256 digest")
 	case !validSHA256(inputs.ChangedStateSHA256):
 		return errors.New("changed_state_sha256 must be a lowercase SHA-256 digest")
-	case !validSHA256(inputs.MountPolicySHA256):
-		return errors.New("mount_policy_sha256 must be a lowercase SHA-256 digest")
+	case inputs.MountPolicySHA256 != requiredMountPolicySHA256:
+		return errors.New("mount_policy_sha256 must identify the code-owned workspace policy")
 	case limitsErr != nil:
 		return limitsErr
 	case inputs.Commitment != inputs.ComputeCommitment():
