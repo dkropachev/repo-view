@@ -389,8 +389,8 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 8 {
-		t.Fatalf("schema count = %d, want 8", len(entries))
+	if len(entries) != 9 {
+		t.Fatalf("schema count = %d, want 9", len(entries))
 	}
 	want := map[string]bool{
 		"blind-evaluation-v2.schema.json":       true,
@@ -399,6 +399,7 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 		"study-analysis-v2.schema.json":         true,
 		"study-inputs-v1.schema.json":           true,
 		"study-policy-v2.schema.json":           true,
+		"task-bundle-v1.schema.json":            true,
 		"task-catalog-v1.schema.json":           true,
 		"verified-quality-v2.schema.json":       true,
 	}

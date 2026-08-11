@@ -79,6 +79,22 @@ Unknown and duplicate fields are rejected. Treatment-neutrality checks reject
 prompt/instruction text that names or hints at the treatment. Paths resolve
 before execution and every mutable input is reverified across external calls.
 
+## Study authoring contracts
+
+The confirmatory study catalog is a closed 144-task matrix over twelve locked
+repositories, three task families, and four size tiers. Its canonical digest
+commits source revisions, prompt/toolchain/evaluator digests, commands, bounds,
+quality items, exclusions, and code-only gold-patch identities before outcomes
+are observed.
+
+`task-bundle/v1` is the catalog's non-executing artifact-reference companion.
+It commits that catalog digest and the exact sorted task IDs to opaque
+content-addressed prompt, pinned-toolchain, hidden-evaluator, and code-only
+gold-patch objects. The value contract accepts no filesystem paths or loader
+options. A future integration must separately open and verify those objects,
+keep hidden roles outside both model sandboxes, and convert verified inputs into
+the same common authored suite for both arms before it can authorize execution.
+
 ## Trusted artifacts and immutable execution image
 
 The fixed artifact-manifest v1 contains a closed set of exact executable roles:

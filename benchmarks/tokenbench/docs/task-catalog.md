@@ -41,7 +41,7 @@ Each task binds:
 - sorted, preregistered exclusion conditions;
 - for `code` tasks only, the hidden gold-patch SHA-256 and expected result-tree Git object ID.
 
-The catalog contains identities, not hidden evaluator or patch contents. Those artifacts remain outside the model sandbox and must be authenticated by the later execution/evidence integration.
+The catalog contains identities, not hidden evaluator or patch contents. The companion [`task-bundle/v1`](task-bundle.md) contract binds those identities, prompts, and pinned toolchain manifests to bounded opaque CAS references while keeping hidden artifacts outside the model sandbox.
 
 ## Canonical encoding
 

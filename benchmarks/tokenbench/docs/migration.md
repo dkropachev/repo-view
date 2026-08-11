@@ -45,7 +45,7 @@ Produce a derived report that shows the legacy calculation beside the new decode
 
 ### 5. Strict rerun
 
-Create new corpus tasks from the user-facing intent only. Remove arm-specific oracle material from both arms rather than transferring it to candidate or hiding it in configuration. Pin full source and standalone Git state, requested model plus exact expected revision, tokenbench/harness/adapter identities, and canonical prompt, then execute a new paired study whose only delta is the live-verified read-only `repo_view` registration.
+Create new corpus tasks from the user-facing intent only. Remove arm-specific oracle material from both arms rather than transferring it to candidate or hiding it in configuration. Record new confirmatory work in a canonical task catalog and catalog-bound task bundle; the bundle may reference only opaque content-addressed prompts, pinned toolchain manifests, hidden evaluator bundle descriptors, and code-only gold patches, never legacy paths or mutable external addresses. Pin full source and standalone Git state, requested model plus exact expected revision, tokenbench/harness/adapter identities, and canonical prompt, then execute a new paired study whose only delta is the live-verified read-only `repo_view` registration.
 
 The strict rerun is a new evidence lineage, not a continuation that replaces old files. It may cite the legacy task as motivation while remaining statistically separate.
 
