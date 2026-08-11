@@ -85,7 +85,7 @@ Copyright (c) 2017 Maxim Sokolov (Rust grammar)
 ## golang.org/x/text
 
 The compiled `scopesifter` binary incorporates
-[`golang.org/x/text`](https://pkg.go.dev/golang.org/x/text) version `v0.37.0`.
+[`golang.org/x/text`](https://pkg.go.dev/golang.org/x/text) version `v0.40.0`.
 The upstream software is licensed under the BSD 3-Clause License reproduced
 below and includes the additional patent grant reproduced below.
 
