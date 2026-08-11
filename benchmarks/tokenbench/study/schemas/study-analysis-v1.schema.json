@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/study-analysis-v1.schema.json",
+  "title": "Tokenbench study analysis v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_sha256", "counts", "tokens", "randomization", "bootstrap", "quality", "decision"],
+  "properties": {
+    "schema_version": {"const": "tokenbench.study-analysis/v1"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "counts": {"$ref": "#/$defs/counts"},
+    "tokens": {"$ref": "#/$defs/tokens"},
+    "randomization": {"$ref": "#/$defs/randomization"},
+    "bootstrap": {"$ref": "#/$defs/bootstrap"},
+    "quality": {"$ref": "#/$defs/quality"},
+    "decision": {"$ref": "#/$defs/decision"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "number": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined", "value"],
+      "properties": {"defined": {"type": "boolean"}, "value": {"type": "number"}}
+    },
+    "interval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined", "lower", "upper"],
+      "properties": {"defined": {"type": "boolean"}, "lower": {"type": "number"}, "upper": {"type": "number"}}
+    },
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["count", "mean", "median", "q25", "q75", "minimum", "maximum"],
+      "properties": {
+        "count": {"$ref": "#/$defs/nonnegative"},
+        "mean": {"$ref": "#/$defs/number"},
+        "median": {"$ref": "#/$defs/number"},
+        "q25": {"$ref": "#/$defs/number"},
+        "q75": {"$ref": "#/$defs/number"},
+        "minimum": {"$ref": "#/$defs/number"},
+        "maximum": {"$ref": "#/$defs/number"}
+      }
+    },
+    "ratio": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["defined", "baseline_zero_candidate_zero", "baseline_zero_candidate_positive"],
+      "properties": {
+        "defined": {"$ref": "#/$defs/distribution"},
+        "baseline_zero_candidate_zero": {"$ref": "#/$defs/nonnegative"},
+        "baseline_zero_candidate_positive": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baseline", "candidate", "paired_delta", "paired_ratio", "baseline_sum", "candidate_sum", "ratio_of_sums"],
+      "properties": {
+        "baseline": {"$ref": "#/$defs/distribution"},
+        "candidate": {"$ref": "#/$defs/distribution"},
+        "paired_delta": {"$ref": "#/$defs/distribution"},
+        "paired_ratio": {"$ref": "#/$defs/ratio"},
+        "baseline_sum": {"type": "integer", "minimum": 0},
+        "candidate_sum": {"type": "integer", "minimum": 0},
+        "ratio_of_sums": {"$ref": "#/$defs/number"}
+      }
+    },
+    "optional_paired_metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["both_present_pairs", "baseline_missing_pairs", "candidate_missing_pairs", "both_missing_pairs", "both_present"],
+      "properties": {
+        "both_present_pairs": {"$ref": "#/$defs/nonnegative"},
+        "baseline_missing_pairs": {"$ref": "#/$defs/nonnegative"},
+        "candidate_missing_pairs": {"$ref": "#/$defs/nonnegative"},
+        "both_missing_pairs": {"$ref": "#/$defs/nonnegative"},
+        "both_present": {"$ref": "#/$defs/metric"}
+      }
+    },
+    "tokens": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "cached_input", "cache_write_input", "output", "reasoning", "provider_total", "primary_total"],
+      "properties": {
+        "input": {"$ref": "#/$defs/metric"},
+        "cached_input": {"$ref": "#/$defs/metric"},
+        "cache_write_input": {"$ref": "#/$defs/metric"},
+        "output": {"$ref": "#/$defs/metric"},
+        "reasoning": {"$ref": "#/$defs/metric"},
+        "provider_total": {"$ref": "#/$defs/optional_paired_metric"},
+        "primary_total": {"$ref": "#/$defs/metric"}
+      }
+    },
+    "counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["declared_tasks", "included_tasks", "predeclared_excluded_tasks", "planned_pairs", "predeclared_excluded_pairs", "attempted_pairs", "not_attempted_pairs", "failed_pairs", "failed_arms", "excluded_pairs", "missing_answer_pairs", "quality_missing_pairs", "complete_token_pairs", "complete_token_tasks", "quality_evaluated_pairs", "quality_evaluated_tasks", "analyzed_pairs"],
+      "properties": {
+        "declared_tasks": {"$ref": "#/$defs/nonnegative"}, "included_tasks": {"$ref": "#/$defs/nonnegative"},
+        "predeclared_excluded_tasks": {"$ref": "#/$defs/nonnegative"}, "planned_pairs": {"$ref": "#/$defs/nonnegative"},
+        "predeclared_excluded_pairs": {"$ref": "#/$defs/nonnegative"}, "attempted_pairs": {"$ref": "#/$defs/nonnegative"},
+        "not_attempted_pairs": {"$ref": "#/$defs/nonnegative"}, "failed_pairs": {"$ref": "#/$defs/nonnegative"},
+        "failed_arms": {"$ref": "#/$defs/nonnegative"}, "excluded_pairs": {"$ref": "#/$defs/nonnegative"},
+        "missing_answer_pairs": {"$ref": "#/$defs/nonnegative"}, "quality_missing_pairs": {"$ref": "#/$defs/nonnegative"},
+        "complete_token_pairs": {"$ref": "#/$defs/nonnegative"}, "complete_token_tasks": {"$ref": "#/$defs/nonnegative"},
+        "quality_evaluated_pairs": {"$ref": "#/$defs/nonnegative"}, "quality_evaluated_tasks": {"$ref": "#/$defs/nonnegative"},
+        "analyzed_pairs": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "randomization": {
+      "type": "object", "additionalProperties": false,
+      "required": ["method", "unit", "repository_cluster_count", "minimum_token_reduction_ppm", "observed_margin_adjusted_cluster_mean_tokens", "assignments", "extreme_assignments", "two_sided_p_value", "seed_commitment_sha256"],
+      "properties": {
+        "method": {"enum": ["not_computed", "exact_repository_cluster_sign_flip", "monte_carlo_repository_cluster_sign_flip"]}, "unit": {"const": "repository_cluster"},
+        "repository_cluster_count": {"$ref": "#/$defs/nonnegative"},
+        "minimum_token_reduction_ppm": {"type": "integer", "minimum": 0, "maximum": 999999},
+        "observed_margin_adjusted_cluster_mean_tokens": {"$ref": "#/$defs/number"},
+        "assignments": {"$ref": "#/$defs/nonnegative"},
+        "extreme_assignments": {"$ref": "#/$defs/nonnegative"}, "two_sided_p_value": {"$ref": "#/$defs/number"},
+        "seed_commitment_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "bootstrap": {
+      "type": "object", "additionalProperties": false,
+      "required": ["method", "unit", "repository_cluster_count", "samples", "confidence_level_ppm", "margin_adjusted_cluster_mean_tokens_confidence", "seed_commitment_sha256"],
+      "properties": {
+        "method": {"enum": ["not_computed", "paired_task_then_repository_cluster_percentile"]}, "unit": {"const": "repository_cluster"},
+        "repository_cluster_count": {"$ref": "#/$defs/nonnegative"}, "samples": {"$ref": "#/$defs/nonnegative"},
+        "confidence_level_ppm": {"type": "integer", "minimum": 500001, "maximum": 999999},
+        "margin_adjusted_cluster_mean_tokens_confidence": {"$ref": "#/$defs/interval"}, "seed_commitment_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "quality": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evaluated_pairs", "evaluated_tasks", "evaluated_repository_clusters", "baseline_passes", "candidate_passes", "candidate_pass_rate", "baseline_scores_ppm", "candidate_scores_ppm", "paired_delta_ppm", "repository_cluster_mean_delta_ppm_confidence", "noninferiority_margin_ppm", "noninferior"],
+      "properties": {
+        "evaluated_pairs": {"$ref": "#/$defs/nonnegative"}, "evaluated_tasks": {"$ref": "#/$defs/nonnegative"},
+        "evaluated_repository_clusters": {"$ref": "#/$defs/nonnegative"},
+        "baseline_passes": {"$ref": "#/$defs/nonnegative"}, "candidate_passes": {"$ref": "#/$defs/nonnegative"},
+        "candidate_pass_rate": {"$ref": "#/$defs/number"}, "baseline_scores_ppm": {"$ref": "#/$defs/distribution"},
+        "candidate_scores_ppm": {"$ref": "#/$defs/distribution"}, "paired_delta_ppm": {"$ref": "#/$defs/distribution"},
+        "repository_cluster_mean_delta_ppm_confidence": {"$ref": "#/$defs/interval"}, "noninferiority_margin_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
+        "noninferior": {"type": "boolean"}
+      }
+    },
+    "gate": {
+      "type": "object", "additionalProperties": false, "required": ["name", "passed", "actual", "requirement"],
+      "properties": {"name": {"type": "string", "minLength": 1}, "passed": {"type": "boolean"}, "actual": {"type": "string"}, "requirement": {"type": "string"}}
+    },
+    "decision": {
+      "type": "object", "additionalProperties": false, "required": ["status", "token_efficient", "gates"],
+      "properties": {"status": {"enum": ["inconclusive", "not_demonstrated", "demonstrated"]}, "token_efficient": {"type": "boolean"}, "gates": {"type": "array", "minItems": 14, "maxItems": 14, "items": {"$ref": "#/$defs/gate"}}}
+    }
+  }
+}
