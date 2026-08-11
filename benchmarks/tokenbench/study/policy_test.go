@@ -320,8 +320,8 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 5 {
-		t.Fatalf("schema count = %d, want 5", len(entries))
+	if len(entries) != 6 {
+		t.Fatalf("schema count = %d, want 6", len(entries))
 	}
 	for _, entry := range entries {
 		t.Run(entry.Name(), func(t *testing.T) {

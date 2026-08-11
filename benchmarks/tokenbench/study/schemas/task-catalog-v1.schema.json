@@ -1,0 +1,212 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-catalog-v1.schema.json",
+  "title": "Tokenbench task catalog v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "catalog_id", "tasks"],
+  "properties": {
+    "schema_version": {"const": "tokenbench.task-catalog/v1"},
+    "catalog_id": {"$ref": "#/$defs/id"},
+    "tasks": {
+      "type": "array",
+      "minItems": 144,
+      "maxItems": 144,
+      "items": {"$ref": "#/$defs/task"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gitObjectID": {
+      "type": "string",
+      "anyOf": [
+        {"pattern": "^[0-9a-f]{40}$"},
+        {"pattern": "^[0-9a-f]{64}$"}
+      ]
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["upstream_url", "source_url", "base_object_id", "head_object_id", "source_tree_sha256"],
+      "properties": {
+        "upstream_url": {
+          "enum": [
+            "https://github.com/apache/commons-lang",
+            "https://github.com/clap-rs/clap",
+            "https://github.com/fmtlib/fmt",
+            "https://github.com/go-chi/chi",
+            "https://github.com/go-git/go-git",
+            "https://github.com/kysely-org/kysely",
+            "https://github.com/pallets/click",
+            "https://github.com/scylladb/java-driver",
+            "https://github.com/scylladb/scylla-ccm",
+            "https://github.com/scylladb/scylla-rust-driver",
+            "https://github.com/scylladb/seastar",
+            "https://github.com/sindresorhus/got"
+          ]
+        },
+        "source_url": {
+          "type": "string",
+          "pattern": "^https://github\\.com/scopesifter/corpus-(cpp|go|java|python|rust|typescript)-[a-z0-9-]+$",
+          "maxLength": 128
+        },
+        "base_object_id": {"$ref": "#/$defs/gitObjectID"},
+        "head_object_id": {
+          "anyOf": [
+            {"$ref": "#/$defs/gitObjectID"},
+            {"type": "null"}
+          ]
+        },
+        "source_tree_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "command": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["command_id", "argv", "timeout_millis"],
+      "properties": {
+        "command_id": {"$ref": "#/$defs/id"},
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {"type": "string", "minLength": 1, "maxLength": 4096}
+        },
+        "timeout_millis": {"type": "integer", "minimum": 1, "maximum": 7200000}
+      }
+    },
+    "ceilings": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["navigation_file_minimum", "navigation_file_ceiling", "change_line_ceiling", "component_minimum", "component_ceiling"],
+      "properties": {
+        "navigation_file_minimum": {"type": "integer", "minimum": 1, "maximum": 30},
+        "navigation_file_ceiling": {"type": "integer", "minimum": 1, "maximum": 30},
+        "change_line_ceiling": {"type": "integer", "minimum": 1, "maximum": 1500},
+        "component_minimum": {"type": "integer", "minimum": 1, "maximum": 30},
+        "component_ceiling": {"type": "integer", "minimum": 1, "maximum": 30}
+      }
+    },
+    "fact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_id", "requirement", "expected", "maximum_points"],
+      "properties": {
+        "item_id": {"$ref": "#/$defs/id"},
+        "requirement": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "expected": {"type": "string", "minLength": 1, "maxLength": 8000},
+        "maximum_points": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "rubric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["item_id", "requirement", "maximum_points"],
+      "properties": {
+        "item_id": {"$ref": "#/$defs/id"},
+        "requirement": {"type": "string", "minLength": 1, "maxLength": 4000},
+        "maximum_points": {"type": "integer", "minimum": 1, "maximum": 1000000}
+      }
+    },
+    "goldPatch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["patch_sha256", "result_tree_object_id"],
+      "properties": {
+        "patch_sha256": {"$ref": "#/$defs/sha256"},
+        "result_tree_object_id": {"$ref": "#/$defs/gitObjectID"}
+      }
+    },
+    "exclusion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "condition"],
+      "properties": {
+        "code": {"$ref": "#/$defs/id"},
+        "condition": {"type": "string", "minLength": 1, "maxLength": 2000}
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "Go validation additionally enforces the locked language/task-slug/repository-slug/upstream/source mapping, canonical task ID and order, exact 12/24/48/36 distributions, nested sorted uniqueness, byte limits, cross-list quality point bounds, tier ceilings, equal Git object formats, distinct base/head IDs, treatment-neutral exclusions, and the family unions.",
+      "required": ["task_id", "language", "repo_slug", "repository_slug", "source", "family", "tier", "prompt_sha256", "toolchain_sha256", "commands", "ceilings", "facts", "rubric", "hidden_evaluator_bundle_sha256", "gold_patch", "exclusions"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/id"},
+        "language": {"enum": ["cpp", "go", "rust", "java", "python", "typescript"]},
+        "repo_slug": {"enum": ["seastar", "fmt", "go-git", "chi", "scylla-driver", "clap", "commons-lang", "scylla-ccm", "click", "got", "kysely"]},
+        "repository_slug": {
+          "enum": [
+            "corpus-cpp-seastar",
+            "corpus-cpp-fmt",
+            "corpus-go-go-git",
+            "corpus-go-chi",
+            "corpus-rust-scylla-driver",
+            "corpus-rust-clap",
+            "corpus-java-scylla-driver",
+            "corpus-java-commons-lang",
+            "corpus-python-scylla-ccm",
+            "corpus-python-click",
+            "corpus-typescript-got",
+            "corpus-typescript-kysely"
+          ]
+        },
+        "source": {"$ref": "#/$defs/source"},
+        "family": {"enum": ["code", "review", "explain"]},
+        "tier": {"enum": ["small", "medium", "large", "huge"]},
+        "prompt_sha256": {"$ref": "#/$defs/sha256"},
+        "toolchain_sha256": {"$ref": "#/$defs/sha256"},
+        "commands": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"$ref": "#/$defs/command"}},
+        "ceilings": {"$ref": "#/$defs/ceilings"},
+        "facts": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"$ref": "#/$defs/fact"}},
+        "rubric": {"type": "array", "maxItems": 256, "items": {"$ref": "#/$defs/rubric"}},
+        "hidden_evaluator_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "gold_patch": {"anyOf": [{"$ref": "#/$defs/goldPatch"}, {"type": "null"}]},
+        "exclusions": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/exclusion"}}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"family": {"const": "code"}}},
+          "then": {
+            "properties": {
+              "gold_patch": {"$ref": "#/$defs/goldPatch"},
+              "commands": {
+                "allOf": [
+                  {"contains": {"type": "object", "required": ["command_id"], "properties": {"command_id": {"const": "build"}}}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"type": "object", "required": ["command_id"], "properties": {"command_id": {"const": "fail-to-pass"}}}, "minContains": 1, "maxContains": 1},
+                  {"contains": {"type": "object", "required": ["command_id"], "properties": {"command_id": {"const": "pass-to-pass"}}}, "minContains": 1, "maxContains": 1}
+                ]
+              }
+            }
+          },
+          "else": {"properties": {"gold_patch": {"type": "null"}}}
+        },
+        {
+          "if": {"properties": {"family": {"enum": ["code", "review"]}}},
+          "then": {"properties": {"source": {"properties": {"head_object_id": {"$ref": "#/$defs/gitObjectID"}}}}}
+        },
+        {
+          "if": {"properties": {"family": {"enum": ["review", "explain"]}}},
+          "then": {"properties": {"rubric": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"tier": {"const": "small"}}},
+          "then": {"properties": {"ceilings": {"const": {"navigation_file_minimum": 1, "navigation_file_ceiling": 2, "change_line_ceiling": 80, "component_minimum": 1, "component_ceiling": 1}}}}
+        },
+        {
+          "if": {"properties": {"tier": {"const": "medium"}}},
+          "then": {"properties": {"ceilings": {"const": {"navigation_file_minimum": 3, "navigation_file_ceiling": 5, "change_line_ceiling": 250, "component_minimum": 1, "component_ceiling": 2}}}}
+        },
+        {
+          "if": {"properties": {"tier": {"const": "large"}}},
+          "then": {"properties": {"ceilings": {"const": {"navigation_file_minimum": 6, "navigation_file_ceiling": 12, "change_line_ceiling": 700, "component_minimum": 2, "component_ceiling": 3}}}}
+        },
+        {
+          "if": {"properties": {"tier": {"const": "huge"}}},
+          "then": {"properties": {"ceilings": {"const": {"navigation_file_minimum": 13, "navigation_file_ceiling": 30, "change_line_ceiling": 1500, "component_minimum": 3, "component_ceiling": 30}}}}
+        }
+      ]
+    }
+  }
+}
