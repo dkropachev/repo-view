@@ -241,7 +241,7 @@ func TestTaskCatalogValidationBoundsCanonicalBytes(t *testing.T) {
 			continue
 		}
 		commands := make([]CatalogCommand, 0, maxCatalogCommands)
-		for commandIndex := 0; commandIndex < maxCatalogCommands; commandIndex++ {
+		for commandIndex := range maxCatalogCommands {
 			arguments := make([]string, 16)
 			for argumentIndex := range arguments {
 				arguments[argumentIndex] = largeArgument
