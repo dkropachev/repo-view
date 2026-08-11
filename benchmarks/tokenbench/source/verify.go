@@ -76,7 +76,8 @@ type Snapshot struct {
 }
 
 // Verify rejects worktrees whose content or Git storage can depend on another
-// checkout. It hashes stable bytes from every tracked regular file.
+// checkout. It hashes stable bytes from every tracked regular file and commits
+// opaque, uninitialized gitlinks without reading another repository.
 func Verify(ctx context.Context, expected Expected) (
 	snapshot Snapshot,
 	resultErr error,
@@ -123,10 +124,13 @@ func Verify(ctx context.Context, expected Expected) (
 	if err := rejectLocalOverrides(ctx, git, root); err != nil {
 		return Snapshot{}, err
 	}
+	if err := preflightOpaqueGitlinks(ctx, git, root); err != nil {
+		return Snapshot{}, err
+	}
 	status, err := git.output(
 		ctx,
-		root,
-		"status", "--porcelain=v1", "--untracked-files=all",
+		root, "status", "--porcelain=v1", "--untracked-files=all",
+		"--ignore-submodules=all",
 	)
 	if err != nil {
 		return Snapshot{}, err
@@ -187,8 +191,8 @@ func Verify(ctx context.Context, expected Expected) (
 	}
 	finalStatus, err := git.output(
 		ctx,
-		root,
-		"status", "--porcelain=v1", "--untracked-files=all",
+		root, "status", "--porcelain=v1", "--untracked-files=all",
+		"--ignore-submodules=all",
 	)
 	if err != nil {
 		return Snapshot{}, err
@@ -204,6 +208,9 @@ func Verify(ctx context.Context, expected Expected) (
 		return Snapshot{}, errors.New(
 			"source worktree gained untracked or ignored files during verification",
 		)
+	}
+	if err := preflightOpaqueGitlinks(ctx, git, root); err != nil {
+		return Snapshot{}, err
 	}
 	if digest != expected.TreeSHA256 {
 		return Snapshot{}, fmt.Errorf(
@@ -230,9 +237,10 @@ func Verify(ctx context.Context, expected Expected) (
 	}, nil
 }
 
-// TreeDigest computes a framed SHA-256 over sorted tracked paths, modes, and
-// exact stable file bytes. The index must exactly match HEAD, raw worktree bytes
-// must match indexed blobs, and unsafe index flags or file types are rejected.
+// TreeDigest computes a framed SHA-256 over sorted tracked paths and modes,
+// exact stable regular-file bytes, and opaque gitlink commit IDs. The index must
+// exactly match HEAD, raw worktree bytes must match indexed blobs, and a gitlink
+// must be absent or a stable, empty, unmounted real directory.
 func TreeDigest(ctx context.Context, root string) (
 	digest string,
 	resultErr error,
@@ -251,52 +259,24 @@ func TreeDigest(ctx context.Context, root string) (
 }
 
 func treeDigest(ctx context.Context, git gitRunner, root string) (string, error) {
-	objectFormat, objectIDLength, err := gitObjectFormat(ctx, git, root)
+	objectFormat, entries, err := verifiedTrackedEntries(ctx, git, root)
 	if err != nil {
 		return "", err
 	}
-	listing, err := git.outputBytes(ctx, root, "ls-files", "-z", "--stage")
+	gitlinks, err := verifiedGitlinks(root, entries)
 	if err != nil {
 		return "", err
 	}
-	entries := make([]trackedEntry, 0, 1_024)
-	seen := make(map[string]struct{}, 1_024)
-	for record := range bytes.SplitSeq(listing, []byte{0}) {
-		if len(record) == 0 {
-			continue
-		}
-		if len(entries) >= maximumTrackedEntries {
-			return "", fmt.Errorf(
-				"source exceeds %d tracked entries",
-				maximumTrackedEntries,
-			)
-		}
-		entry, err := parseTrackedEntry(record, objectIDLength)
-		if err != nil {
-			return "", err
-		}
-		if _, exists := seen[entry.path]; exists {
-			return "", fmt.Errorf("duplicate tracked path %q", entry.path)
-		}
-		seen[entry.path] = struct{}{}
-		entries = append(entries, entry)
-	}
-	sort.Slice(entries, func(left, right int) bool {
-		return entries[left].path < entries[right].path
-	})
-	if err := rejectUnsafeIndexFlags(ctx, git, root, entries); err != nil {
-		return "", err
-	}
-	headEntries, err := headTreeEntries(ctx, git, root, objectIDLength)
+	directories, err := verifiedWorktreeDirectories(ctx, root, entries, gitlinks)
 	if err != nil {
 		return "", err
 	}
-	if err := compareIndexToHEAD(entries, headEntries); err != nil {
-		return "", err
-	}
-	directories, err := verifiedWorktreeDirectories(ctx, root, entries)
+	afterGitlinks, err := verifiedGitlinks(root, entries)
 	if err != nil {
 		return "", err
+	}
+	if !sameGitlinkMaterializations(gitlinks, afterGitlinks) {
+		return "", errors.New("gitlink materialization changed while source was hashed")
 	}
 
 	hasher := sha256.New()
@@ -309,6 +289,13 @@ func treeDigest(ctx context.Context, git gitRunner, root string) (string, error)
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
 			return "", err
+		}
+		if entry.mode == gitlinkMode {
+			writeFrame(hasher, []byte("gitlink"))
+			writeFrame(hasher, []byte(entry.mode))
+			writeFrame(hasher, []byte(entry.path))
+			writeFrame(hasher, []byte(entry.objectID))
+			continue
 		}
 		path := filepath.Join(root, filepath.FromSlash(entry.path))
 		content, info, err := readStableRegularContext(
@@ -361,6 +348,57 @@ func treeDigest(ctx context.Context, git gitRunner, root string) (string, error)
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
+func verifiedTrackedEntries(
+	ctx context.Context,
+	git gitRunner,
+	root string,
+) (string, []trackedEntry, error) {
+	objectFormat, objectIDLength, err := gitObjectFormat(ctx, git, root)
+	if err != nil {
+		return "", nil, err
+	}
+	listing, err := git.outputBytes(ctx, root, "ls-files", "-z", "--stage")
+	if err != nil {
+		return "", nil, err
+	}
+	entries := make([]trackedEntry, 0, 1_024)
+	seen := make(map[string]struct{}, 1_024)
+	for record := range bytes.SplitSeq(listing, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if len(entries) >= maximumTrackedEntries {
+			return "", nil, fmt.Errorf(
+				"source exceeds %d tracked entries",
+				maximumTrackedEntries,
+			)
+		}
+		entry, err := parseTrackedEntry(record, objectIDLength)
+		if err != nil {
+			return "", nil, err
+		}
+		if _, exists := seen[entry.path]; exists {
+			return "", nil, fmt.Errorf("duplicate tracked path %q", entry.path)
+		}
+		seen[entry.path] = struct{}{}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		return entries[left].path < entries[right].path
+	})
+	if err := rejectUnsafeIndexFlags(ctx, git, root, entries); err != nil {
+		return "", nil, err
+	}
+	headEntries, err := headTreeEntries(ctx, git, root, objectIDLength)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := compareIndexToHEAD(entries, headEntries); err != nil {
+		return "", nil, err
+	}
+	return objectFormat, entries, nil
+}
+
 type worktreeDirectory struct {
 	path string
 	mode os.FileMode
@@ -370,11 +408,18 @@ func verifiedWorktreeDirectories(
 	ctx context.Context,
 	root string,
 	entries []trackedEntry,
+	gitlinks map[string]gitlinkMaterialization,
 ) ([]worktreeDirectory, error) {
-	tracked := make(map[string]struct{}, len(entries))
+	tracked := make(map[string]struct{}, len(entries)-len(gitlinks))
 	allowedDirectories := map[string]struct{}{".": {}}
 	for _, entry := range entries {
-		tracked[entry.path] = struct{}{}
+		if entry.mode == gitlinkMode {
+			if !gitlinks[entry.path].present {
+				continue
+			}
+		} else {
+			tracked[entry.path] = struct{}{}
+		}
 		for directory := pathpkg.Dir(entry.path); directory != "."; directory = pathpkg.Dir(directory) {
 			allowedDirectories[directory] = struct{}{}
 			if len(allowedDirectories) > maximumWorktreeEntries {
@@ -386,6 +431,7 @@ func verifiedWorktreeDirectories(
 		}
 	}
 	directories := make([]worktreeDirectory, 0, len(allowedDirectories))
+	seenGitlinks := make(map[string]struct{}, len(gitlinks))
 	walked := 0
 	err := filepath.WalkDir(root, func(
 		path string,
@@ -424,6 +470,16 @@ func verifiedWorktreeDirectories(
 		if entry.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("worktree contains symlink %q", relative)
 		}
+		if gitlink, exists := gitlinks[relative]; exists {
+			if !gitlink.present {
+				return fmt.Errorf("absent gitlink %q appeared while source was hashed", relative)
+			}
+			if !entry.IsDir() {
+				return fmt.Errorf("gitlink %q is not an uninitialized directory", relative)
+			}
+			seenGitlinks[relative] = struct{}{}
+			return filepath.SkipDir
+		}
 		if entry.IsDir() {
 			if _, allowed := allowedDirectories[relative]; !allowed {
 				return fmt.Errorf("worktree contains untracked directory %q", relative)
@@ -452,6 +508,12 @@ func verifiedWorktreeDirectories(
 	if len(directories) != len(allowedDirectories) {
 		return nil, errors.New("worktree directory structure does not match tracked paths")
 	}
+	for path, gitlink := range gitlinks {
+		_, seen := seenGitlinks[path]
+		if seen != gitlink.present {
+			return nil, fmt.Errorf("gitlink %q materialization changed while source was hashed", path)
+		}
+	}
 	sort.Slice(directories, func(left, right int) bool {
 		return directories[left].path < directories[right].path
 	})
@@ -462,6 +524,59 @@ type trackedEntry struct {
 	path     string
 	mode     string
 	objectID string
+}
+
+const gitlinkMode = "160000"
+
+func preflightOpaqueGitlinks(ctx context.Context, git gitRunner, root string) error {
+	_, entries, err := verifiedTrackedEntries(ctx, git, root)
+	if err != nil {
+		return err
+	}
+	before, err := verifiedGitlinks(root, entries)
+	if err != nil {
+		return err
+	}
+	after, err := verifiedGitlinks(root, entries)
+	if err != nil {
+		return err
+	}
+	if !sameGitlinkMaterializations(before, after) {
+		return errors.New("gitlink materialization changed during source preflight")
+	}
+	return nil
+}
+
+func verifiedGitlinks(
+	root string,
+	entries []trackedEntry,
+) (map[string]gitlinkMaterialization, error) {
+	gitlinks := make(map[string]gitlinkMaterialization)
+	for _, entry := range entries {
+		if entry.mode != gitlinkMode {
+			continue
+		}
+		materialization, err := verifyOpaqueGitlink(root, entry.path)
+		if err != nil {
+			return nil, fmt.Errorf("verify opaque gitlink %q: %w", entry.path, err)
+		}
+		gitlinks[entry.path] = materialization
+	}
+	return gitlinks, nil
+}
+
+func sameGitlinkMaterializations(
+	left, right map[string]gitlinkMaterialization,
+) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for path, materialization := range left {
+		if right[path] != materialization {
+			return false
+		}
+	}
+	return true
 }
 
 func parseTrackedEntry(record []byte, objectIDLength int) (trackedEntry, error) {
@@ -515,8 +630,8 @@ func validateTrackedMode(mode string) error {
 		return nil
 	case "120000":
 		return errors.New("tracked symlinks are not allowed")
-	case "160000":
-		return errors.New("git submodules are not allowed")
+	case gitlinkMode:
+		return nil
 	default:
 		return fmt.Errorf("unsupported tracked mode %q", mode)
 	}
@@ -667,11 +782,14 @@ func headTreeEntries(
 		if err := validateTrackedMode(mode); err != nil {
 			return nil, err
 		}
-		if metadata[1] != "blob" {
+		expectedType := "blob"
+		if mode == gitlinkMode {
+			expectedType = "commit"
+		}
+		if metadata[1] != expectedType {
 			return nil, fmt.Errorf(
-				"unsupported HEAD object type %q for mode %s",
-				metadata[1],
-				mode,
+				"unsupported HEAD object type %q for mode %s; want %s",
+				metadata[1], mode, expectedType,
 			)
 		}
 		objectID := metadata[2]
