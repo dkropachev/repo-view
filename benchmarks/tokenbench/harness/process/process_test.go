@@ -283,10 +283,29 @@ func resolveRequestFixture() harness.ResolveRequest {
 
 func TestExternalAdapterRejectsProtocolDrift(t *testing.T) {
 	t.Parallel()
-	adapter := helperAdapter(t, "bad-version")
-	_, err := adapter.Resolve(context.Background(), harness.ResolveRequest{})
-	if err == nil || !strings.Contains(err.Error(), "protocol") {
-		t.Fatalf("expected protocol error, got %v", err)
+	if protocolVersion != "tokenbench.external-adapter/v2" {
+		t.Fatalf("external adapter protocol = %q", protocolVersion)
+	}
+	for _, mode := range []string{"old-version", "bad-version"} {
+		adapter := helperAdapter(t, mode)
+		_, err := adapter.Resolve(context.Background(), harness.ResolveRequest{})
+		if err == nil || !strings.Contains(err.Error(), "protocol") {
+			t.Fatalf("%s: expected protocol error, got %v", mode, err)
+		}
+	}
+}
+
+func TestExternalAdapterV2PreservesProviderTotal(t *testing.T) {
+	t.Parallel()
+	observation, err := helperAdapter(t, "ok").Decode(
+		context.Background(),
+		harness.RawExecution{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := observation.Usage.ProviderTotalTokens; total == nil || *total != 13 {
+		t.Fatalf("external adapter provider total = %v", total)
 	}
 }
 
@@ -398,7 +417,7 @@ func TestExternalAdapterHelperProcess(t *testing.T) {
 		os.Exit(0)
 	}
 	if mode == "duplicate" {
-		_, _ = os.Stdout.WriteString(`{"protocol_version":"tokenbench.external-adapter/v1","protocol_version":"wrong"}`)
+		_, _ = os.Stdout.WriteString(`{"protocol_version":"tokenbench.external-adapter/v2","protocol_version":"wrong"}`)
 		os.Exit(0)
 	}
 	if mode == "invalid-utf8" {
@@ -426,7 +445,10 @@ func TestExternalAdapterHelperProcess(t *testing.T) {
 		}
 	}
 	version := protocolVersion
-	if mode == "bad-version" {
+	switch mode {
+	case "old-version":
+		version = "tokenbench.external-adapter/v1"
+	case "bad-version":
 		version = "wrong/v1"
 	}
 	response := wireResponse{ProtocolVersion: version}
@@ -482,12 +504,14 @@ func TestExternalAdapterHelperProcess(t *testing.T) {
 			response.Process.Environment = map[string]string{"KEY": "bad\x00value"}
 		}
 	case "decode":
+		providerTotal := int64(13)
 		response.Observation = &harness.Observation{
 			Usage: harness.Usage{
-				InputTokens:       10,
-				CachedInputTokens: 2,
-				OutputTokens:      3,
-				ReasoningTokens:   1,
+				ProviderTotalTokens: &providerTotal,
+				InputTokens:         10,
+				CachedInputTokens:   2,
+				OutputTokens:        3,
+				ReasoningTokens:     1,
 			},
 			FinalAnswer: "fixture answer",
 			Model:       "fixed-model",

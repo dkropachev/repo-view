@@ -19,7 +19,7 @@ import (
 	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
 )
 
-const adapterVersion = "tokenbench.fake-adapter/v1"
+const adapterVersion = "tokenbench.fake-adapter/v2"
 
 var adapterConfigSHA256 = digest([]byte("tokenbench.fake-config/v1"))
 var adapterControlConfigSHA256 = digest([]byte("tokenbench.fake-control-config/v1"))
@@ -74,7 +74,7 @@ func (Adapter) Resolve(
 		Model:                      request.Model,
 		ModelRevision:              request.ExpectedModelRevision,
 		ReasoningEffort:            request.ReasoningEffort,
-		DecoderSchema:              "tokenbench.fake-output/v1",
+		DecoderSchema:              "tokenbench.fake-output/v2",
 	}
 	if err := harness.ValidateIdentity(identity); err != nil {
 		return harness.Identity{}, err
@@ -207,13 +207,13 @@ func (Adapter) Decode(
 	if err := harness.ValidateUsage(output.Usage); err != nil {
 		return harness.Observation{}, err
 	}
-	return harness.Observation{
+	return harness.CloneObservation(harness.Observation{
 		Usage:       output.Usage,
 		FinalAnswer: output.FinalAnswer,
 		Model:       output.Model,
-		ToolCalls:   append([]string(nil), output.ToolCalls...),
+		ToolCalls:   output.ToolCalls,
 		Completed:   output.Completed,
-	}, nil
+	}), nil
 }
 
 func cloneMap(source map[string]string) map[string]string {

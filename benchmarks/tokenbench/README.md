@@ -23,8 +23,9 @@ value, or repository preparation is a parity failure, not a benchmark result.
 
 The checked-in implementation provides:
 
-- strict `tokenbench.suite/v2`, artifact-manifest v1, plan v3, capture v3,
-  signed-root, trust-policy, and replay contracts;
+- strict `tokenbench.suite/v2`, artifact-manifest v1, plan v3, run v2,
+  observation v2, capture v4, signed-root, trust-policy, and replay v2
+  contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
   `0.144.0`, exact executable SHA-256
   `08b012d75651efb22b5162be253cd4d28752594082671098e123229b896ba77e`;

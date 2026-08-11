@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	protocolVersion  = "tokenbench.external-adapter/v1"
+	protocolVersion  = "tokenbench.external-adapter/v2"
 	bridgeVersion    = "tokenbench.process-bridge/v1"
 	defaultMaxOutput = 8 << 20
 	defaultWaitDelay = 250 * time.Millisecond
@@ -316,7 +316,7 @@ func (adapter *Adapter) Decode(
 	if err := harness.ValidateUsage(response.Observation.Usage); err != nil {
 		return harness.Observation{}, fmt.Errorf("external adapter observation: %w", err)
 	}
-	return *response.Observation, nil
+	return harness.CloneObservation(*response.Observation), nil
 }
 
 type wireRequest struct {

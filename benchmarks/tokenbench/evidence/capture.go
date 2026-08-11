@@ -16,11 +16,11 @@ import (
 )
 
 const (
-	CaptureSchemaVersion = "tokenbench.capture/v3"
+	CaptureSchemaVersion = "tokenbench.capture/v4"
 
-	captureMediaType     = "application/vnd.tokenbench.capture.v3+json"
+	captureMediaType     = "application/vnd.tokenbench.capture.v4+json"
 	planMediaType        = "application/vnd.tokenbench.plan.v3+json"
-	observationMediaType = "application/vnd.tokenbench.observation.v1+json"
+	observationMediaType = "application/vnd.tokenbench.observation.v2+json"
 	stdoutMediaType      = "application/vnd.tokenbench.stdout"
 	stderrMediaType      = "application/vnd.tokenbench.stderr"
 	artifactMediaType    = "application/vnd.tokenbench.artifact"

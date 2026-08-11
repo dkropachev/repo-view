@@ -16,20 +16,59 @@ func TestDecodeValidatesJSONLAgainstProviderEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	providerTotal := int64(15)
 	want := harness.Observation{
 		FinalAnswer: "The answer is 42.",
 		Model:       "gpt-5.4",
 		ToolCalls:   []string{"exec_command", "repo_view.inspect"},
 		Usage: harness.Usage{
-			InputTokens:       10,
-			CachedInputTokens: 2,
-			OutputTokens:      5,
-			ReasoningTokens:   1,
+			InputTokens:         10,
+			CachedInputTokens:   2,
+			OutputTokens:        5,
+			ReasoningTokens:     1,
+			ProviderTotalTokens: &providerTotal,
 		},
 		Completed: true,
 	}
 	if !reflect.DeepEqual(observation, want) {
 		t.Fatalf("unexpected observation:\n got: %+v\nwant: %+v", observation, want)
+	}
+}
+
+func TestDecodeOmitsAggregateProviderTotalWhenAnyResponseOmitsIt(t *testing.T) {
+	t.Parallel()
+	execution := executionFixture(t)
+	mutateTrace(t, &execution, func(trace *ResponsesTrace) {
+		trace.Responses[1].ProviderTotalTokens = nil
+	})
+	observation, err := adapterFixture(t).Decode(context.Background(), execution)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.Usage.ProviderTotalTokens != nil {
+		t.Fatalf("partial provider totals produced an aggregate: %+v", observation.Usage)
+	}
+	if observation.Usage.InputTokens != 10 || observation.Usage.OutputTokens != 5 {
+		t.Fatalf("native components changed with provider-total missingness: %+v", observation.Usage)
+	}
+}
+
+func TestDecodeRejectsProviderTotalDuplicatedInsideV3Usage(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"null", "9"} {
+		t.Run(value, func(t *testing.T) {
+			t.Parallel()
+			execution := executionFixture(t)
+			execution.Artifacts[0].Data = replaceExactlyOnce(
+				t,
+				execution.Artifacts[0].Data,
+				`"input_tokens": 6,`,
+				`"provider_total_tokens": `+value+`, "input_tokens": 6,`,
+			)
+			if _, err := adapterFixture(t).Decode(context.Background(), execution); err == nil {
+				t.Fatal("Responses trace v3 accepted a provider total inside its usage object")
+			}
+		})
 	}
 }
 
@@ -403,7 +442,8 @@ func TestParseResponsesTraceUsesDecoderValidation(t *testing.T) {
 
 func TestDecodeDoesNotRequireMCPUse(t *testing.T) {
 	t.Parallel()
-	usage := harness.Usage{InputTokens: 1, OutputTokens: 1}
+	providerTotal := int64(0)
+	usage := ResponsesUsageTrace{}
 	strict := true
 	tools := []ResponsesToolDeclaration{{
 		Kind:              ToolKindCommand,
@@ -438,8 +478,9 @@ func TestDecodeDoesNotRequireMCPUse(t *testing.T) {
 		}},
 		ResponseAttempts: []ProviderResponseAttemptTrace{testCompletedAttempt("5")},
 		Responses: []ResponsesResponseTrace{{
-			RequestModel:           "gpt-5.4",
-			RequestExactBodySHA256: strings.Repeat("4", 64),
+			ProviderTotalTokens:                        &providerTotal,
+			RequestModel:                               "gpt-5.4",
+			RequestExactBodySHA256:                     strings.Repeat("4", 64),
 			RequestNonceNormalizedNonToolPayloadSHA256: strings.Repeat("0", 64),
 			RequestHeadersSHA256:                       testRequestHeaders(false).ReviewedSemanticSHA256,
 			RequestToolsSHA256:                         digest(toolsJSON),
@@ -465,7 +506,7 @@ func TestDecodeDoesNotRequireMCPUse(t *testing.T) {
 			"{\"type\":\"thread.started\",\"thread_id\":\"thread-1\"}\n" +
 				"{\"type\":\"turn.started\"}\n" +
 				"{\"type\":\"item.completed\",\"item\":{\"id\":\"message-1\",\"type\":\"agent_message\",\"text\":\"No tool needed.\"}}\n" +
-				"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"cached_input_tokens\":0,\"output_tokens\":1,\"reasoning_output_tokens\":0}}\n",
+				"{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":0,\"cached_input_tokens\":0,\"output_tokens\":0,\"reasoning_output_tokens\":0}}\n",
 		),
 		Artifacts: []harness.Artifact{
 			{Name: ResponsesTraceArtifactName, MediaType: ResponsesTraceMediaType, Data: traceJSON},
@@ -477,7 +518,9 @@ func TestDecodeDoesNotRequireMCPUse(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !observation.Completed || observation.FinalAnswer != "No tool needed." ||
-		observation.ToolCalls == nil || len(observation.ToolCalls) != 0 {
+		observation.ToolCalls == nil || len(observation.ToolCalls) != 0 ||
+		observation.Usage.ProviderTotalTokens == nil ||
+		*observation.Usage.ProviderTotalTokens != 0 {
 		t.Fatalf("unexpected baseline observation: %+v", observation)
 	}
 }

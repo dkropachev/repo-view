@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"sort"
 	"strconv"
@@ -941,6 +942,16 @@ func parseCompletedResponse(
 	if err != nil {
 		return harnesscodex.ResponsesResponseTrace{}, err
 	}
+	// Responses trace v3 already has a dedicated provider_total_tokens field.
+	// Keep the nested v3 usage object unchanged; Decode restores the optional
+	// total after validating and aggregating the explicit provider evidence.
+	traceUsage := harnesscodex.ResponsesUsageTrace{
+		InputTokens:           usage.InputTokens,
+		CachedInputTokens:     usage.CachedInputTokens,
+		CacheWriteInputTokens: usage.CacheWriteInputTokens,
+		OutputTokens:          usage.OutputTokens,
+		ReasoningTokens:       usage.ReasoningTokens,
+	}
 	return harnesscodex.ResponsesResponseTrace{
 		RequestModel:           request.Model,
 		RequestExactBodySHA256: request.ExactBodySHA256,
@@ -949,7 +960,7 @@ func parseCompletedResponse(
 		RequestToolsSHA256:                         requestToolsSHA256,
 		ResponseModel:                              model,
 		Outputs:                                    outputsTrace,
-		Usage:                                      &usage,
+		Usage:                                      &traceUsage,
 		ProviderTotalTokens:                        providerTotalTokens,
 	}, nil
 }
@@ -1188,17 +1199,23 @@ func parseUsage(object map[string]any) (harness.Usage, *int64, error) {
 	var providerTotalTokens *int64
 	if total, present, err := optionalNonnegativeInteger(object, "total_tokens"); err != nil {
 		return harness.Usage{}, nil, err
-	} else if present && total != input+output {
+	} else if present && (input > math.MaxInt64-output || total != input+output) {
 		return harness.Usage{}, nil, errors.New("provider total_tokens does not equal input_tokens plus output_tokens")
 	} else if present {
 		providerTotalTokens = new(int64)
 		*providerTotalTokens = total
 	}
+	var usageProviderTotal *int64
+	if providerTotalTokens != nil {
+		total := *providerTotalTokens
+		usageProviderTotal = &total
+	}
 	usage := harness.Usage{
-		InputTokens:       input,
-		CachedInputTokens: cached,
-		OutputTokens:      output,
-		ReasoningTokens:   reasoning,
+		InputTokens:         input,
+		CachedInputTokens:   cached,
+		OutputTokens:        output,
+		ReasoningTokens:     reasoning,
+		ProviderTotalTokens: usageProviderTotal,
 	}
 	if err := harness.ValidateUsage(usage); err != nil {
 		return harness.Usage{}, nil, err
