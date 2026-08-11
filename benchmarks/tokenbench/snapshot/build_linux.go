@@ -40,6 +40,13 @@ type inodePin struct {
 	rel   string
 }
 
+// RetainedPath is a caller-owned duplicate of one inode pinned by a live
+// Authority. Entry is the exact manifest identity associated with File.
+type RetainedPath struct {
+	File  *os.File
+	Entry ManifestEntry
+}
+
 // Authority is the nonserializable live proof behind ExecutionInputs. It pins
 // the snapshot root and every inode until Close. Decoding JSON can never create
 // one.
@@ -69,6 +76,112 @@ func (authority *Authority) Inputs() (ExecutionInputs, error) {
 		return ExecutionInputs{}, errors.New("execution snapshot authority is closed")
 	}
 	return cloneInputs(authority.inputs), nil
+}
+
+// RetainPaths reverifies the complete snapshot and duplicates the exact
+// retained inode pins for paths. It never reopens a published audit path.
+// The caller owns every returned descriptor.
+func (authority *Authority) RetainPaths(
+	ctx context.Context,
+	paths []string,
+) ([]RetainedPath, error) {
+	if ctx == nil {
+		return nil, errors.New("execution snapshot context is required")
+	}
+	if authority == nil {
+		return nil, errors.New("execution snapshot authority is closed")
+	}
+	authority.mu.Lock()
+	defer authority.mu.Unlock()
+	if authority.closed {
+		return nil, errors.New("execution snapshot authority is closed")
+	}
+	if err := authority.reverifyLocked(ctx); err != nil {
+		return nil, err
+	}
+	return retainPinnedPaths(authority.pins, paths)
+}
+
+func retainPinnedPaths(
+	pins []inodePin,
+	paths []string,
+) ([]RetainedPath, error) {
+	return retainPinnedPathsWith(pins, paths, duplicateRetainedPath)
+}
+
+func retainPinnedPathsWith(
+	pins []inodePin,
+	paths []string,
+	duplicate func(inodePin, string) (*os.File, error),
+) (_ []RetainedPath, resultErr error) {
+	if len(paths) == 0 {
+		return nil, errors.New("at least one snapshot path must be retained")
+	}
+	pinsByPath := make(map[string]inodePin, len(pins))
+	for _, pin := range pins {
+		path := pin.entry.SnapshotPath
+		if _, exists := pinsByPath[path]; exists {
+			return nil, fmt.Errorf("snapshot pin path %q is duplicated", path)
+		}
+		pinsByPath[path] = pin
+	}
+	retained := make([]RetainedPath, 0, len(paths))
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		resultErr = errors.Join(resultErr, closeRetainedPaths(retained))
+		retained = nil
+	}()
+	seen := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		if _, exists := seen[path]; exists {
+			return nil, fmt.Errorf("requested snapshot path %q is duplicated", path)
+		}
+		seen[path] = struct{}{}
+		pin, exists := pinsByPath[path]
+		if !exists || pin.file == nil || pin.info == nil {
+			return nil, fmt.Errorf("snapshot path %q has no retained inode", path)
+		}
+		file, err := duplicate(pin, path)
+		if err != nil {
+			return nil, fmt.Errorf("duplicate retained snapshot path %q: %w", path, err)
+		}
+		retained = append(retained, RetainedPath{
+			File: file, Entry: cloneManifestEntry(pin.entry),
+		})
+	}
+	return retained, nil
+}
+
+func duplicateRetainedPath(pin inodePin, path string) (*os.File, error) {
+	descriptor, err := unix.FcntlInt(pin.file.Fd(), unix.F_DUPFD_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(descriptor), path)
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(pin.info, opened) ||
+		pin.info.Mode() != opened.Mode() || pin.info.Size() != opened.Size() ||
+		!pin.info.ModTime().Equal(opened.ModTime()) {
+		closeErr := file.Close()
+		return nil, errors.Join(
+			errors.New("retained snapshot inode changed while duplicating"),
+			err,
+			closeErr,
+		)
+	}
+	return file, nil
+}
+
+func closeRetainedPaths(paths []RetainedPath) error {
+	var resultErr error
+	for index := len(paths) - 1; index >= 0; index-- {
+		if paths[index].File != nil {
+			resultErr = errors.Join(resultErr, paths[index].File.Close())
+		}
+	}
+	return resultErr
 }
 
 // Build copies all inputs into a newly-created root, enables fs-verity on

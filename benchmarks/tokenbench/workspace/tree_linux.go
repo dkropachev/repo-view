@@ -23,6 +23,19 @@ import (
 
 const maximumWorkspacePathDepth = 256
 
+var (
+	errInvalidWorkspaceTree = errors.New("workspace tree violates its closed policy")
+	errWorkspaceTreeLimit   = errors.New("workspace tree exceeds its committed limits")
+)
+
+func invalidWorkspaceTree(format string, arguments ...any) error {
+	return fmt.Errorf("%w: %s", errInvalidWorkspaceTree, fmt.Sprintf(format, arguments...))
+}
+
+func workspaceTreeLimit(format string, arguments ...any) error {
+	return fmt.Errorf("%w: %s", errWorkspaceTreeLimit, fmt.Sprintf(format, arguments...))
+}
+
 type worktreeEntry struct {
 	path   string
 	kind   string
@@ -127,7 +140,7 @@ func scanWorktree(ctx context.Context, root *os.File, limits Limits) ([]worktree
 		mode: rootStat.Mode & 0o777,
 	}}
 	if len(entries) > limits.MaximumEntries {
-		return nil, errors.New("workspace tree exceeds its entry limit")
+		return nil, workspaceTreeLimit("entry count exceeds maximum_entries")
 	}
 	if err := scanDirectory(
 		ctx,
@@ -161,17 +174,17 @@ func scanDirectory(
 			return err
 		}
 		if !validPathComponent(name) {
-			return errors.New("workspace contains an invalid path component")
+			return invalidWorkspaceTree("invalid path component")
 		}
 		path := name
 		if relative != "." {
 			path = relative + "/" + name
 		}
 		if !validWorktreeRelativePath(path) || path == ".git" || strings.HasPrefix(path, ".git/") {
-			return fmt.Errorf("workspace contains forbidden path %q", path)
+			return invalidWorkspaceTree("forbidden path %q", path)
 		}
 		if len(*entries) >= limits.MaximumEntries {
-			return errors.New("workspace tree exceeds its entry limit")
+			return workspaceTreeLimit("entry count exceeds maximum_entries")
 		}
 		var before unix.Stat_t
 		if err := unix.Fstatat(
@@ -199,8 +212,19 @@ func scanDirectory(
 			})
 			scanErr := scanDirectory(ctx, child, path, limits, entries)
 			closeErr := child.Close()
-			if scanErr != nil || closeErr != nil {
-				return errors.Join(scanErr, closeErr)
+			if closeErr != nil {
+				if scanErr != nil {
+					return fmt.Errorf(
+						"scan workspace directory %q (%s) and close it: %w",
+						path,
+						scanErr.Error(),
+						closeErr,
+					)
+				}
+				return fmt.Errorf("close scanned workspace directory %q: %w", path, closeErr)
+			}
+			if scanErr != nil {
+				return scanErr
 			}
 		case unix.S_IFREG:
 			entry, err := scanRegularFile(directory, name, path, before, limits.MaximumFileBytes)
@@ -209,7 +233,7 @@ func scanDirectory(
 			}
 			*entries = append(*entries, entry)
 		default:
-			return fmt.Errorf("workspace contains special path %q", path)
+			return invalidWorkspaceTree("special path %q", path)
 		}
 	}
 	return nil
@@ -221,8 +245,11 @@ func scanRegularFile(
 	before unix.Stat_t,
 	maximumBytes int64,
 ) (entry worktreeEntry, resultErr error) {
-	if before.Nlink != 1 || before.Size < 0 || before.Size > maximumBytes {
-		return worktreeEntry{}, fmt.Errorf("workspace file %q violates link or byte limits", path)
+	if before.Nlink != 1 || before.Size < 0 {
+		return worktreeEntry{}, invalidWorkspaceTree("file %q has invalid link or size state", path)
+	}
+	if before.Size > maximumBytes {
+		return worktreeEntry{}, workspaceTreeLimit("file %q exceeds maximum_file_bytes", path)
 	}
 	descriptor, err := unix.Openat(
 		int(directory.Fd()),

@@ -30,16 +30,23 @@ type PairAuthority struct {
 	underlyingInfo os.FileInfo
 	mountedInfo    os.FileInfo
 	closeErr       error
-	snapshot       *snapshot.Authority
+	snapshot       immutableSnapshotAuthority
 	active         *ArmAuthority
 	underlyingRoot *os.File
 	mountedRoot    *os.File
 	rootMountFile  *os.File
+	sourceRoot     *os.File
+	verifierGit    *os.File
+	gitObjects     *os.File
 	paths          ArmPaths
 	rootPath       string
+	baseRevision   string
 	rootMount      mountRecord
 	parentMount    mountRecord
 	baseManifest   []worktreeEntry
+	sourceInfo     os.FileInfo
+	verifierInfo   os.FileInfo
+	objectsInfo    os.FileInfo
 	inputs         Inputs
 	namespace      namespaceIdentity
 	mu             sync.Mutex
@@ -49,27 +56,37 @@ type PairAuthority struct {
 	released       bool
 }
 
+type immutableSnapshotAuthority interface {
+	Reverify(context.Context) error
+	Inputs() (snapshot.ExecutionInputs, error)
+}
+
 // ArmAuthority owns one fresh overlay and its fixed model-visible paths. It is
 // one-shot and cannot be reconstructed from ArmPaths.
 type ArmAuthority struct {
-	overlayInfo  os.FileInfo
-	closeErr     error
-	overlayFile  *os.File
-	target       *os.File
-	work         *os.File
-	cache        *os.File
-	pair         *PairAuthority
-	overlayRoot  *os.File
-	capture      *os.File
-	upper        *os.File
-	lower        *os.File
-	paths        ArmPaths
-	layoutClaims []directoryClaim
-	inodeReserve []*os.File
-	overlayMount mountRecord
-	mounted      bool
-	closing      bool
-	released     bool
+	overlayInfo    os.FileInfo
+	closeErr       error
+	overlayFile    *os.File
+	capture        *os.File
+	upper          *os.File
+	work           *os.File
+	cache          *os.File
+	pair           *PairAuthority
+	overlayRoot    *os.File
+	target         *os.File
+	lower          *os.File
+	paths          ArmPaths
+	layoutClaims   []directoryClaim
+	inodeReserve   []*os.File
+	captureErr     error
+	outcome        *Outcome
+	overlayMount   mountRecord
+	mounted        bool
+	closing        bool
+	released       bool
+	frozen         bool
+	freezeVerified bool
+	capturing      bool
 }
 
 // Prepare creates a code-owned bounded tmpfs only after binding it to a live
@@ -137,6 +154,7 @@ func Prepare(
 		namespace:      namespace,
 		parentMount:    parentMount,
 		baseManifest:   baseManifest,
+		baseRevision:   snapshotInputs.SourceRevision,
 	}
 	defer func() {
 		if resultErr == nil {
@@ -148,6 +166,9 @@ func Prepare(
 		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
 
+	if err := pair.pinCaptureInputs(ctx, snapshotAuthority, snapshotInputs); err != nil {
+		return nil, err
+	}
 	if err := pair.attachBoundedTmpfs(request.Limits); err != nil {
 		return nil, err
 	}
@@ -254,6 +275,9 @@ func (pair *PairAuthority) reverifyLocked(ctx context.Context, includeArm bool) 
 		currentInputs.ChangedState.SHA256 != pair.inputs.ChangedStateSHA256 {
 		return errors.New("workspace immutable lower snapshot identity changed")
 	}
+	if err := pair.verifyCaptureInputsLocked(); err != nil {
+		return err
+	}
 	if err := verifyMountRecord(pair.rootPath, pair.mountedInfo, pair.rootMount); err != nil {
 		return fmt.Errorf("reverify workspace tmpfs: %w", err)
 	}
@@ -310,7 +334,11 @@ func (pair *PairAuthority) BeginArm(ctx context.Context) (_ *ArmAuthority, resul
 
 func (arm *ArmAuthority) createLocked(ctx context.Context) error {
 	var err error
-	arm.lower, err = openDirectoryNoSymlinks(arm.pair.inputs.ImmutableLowerRoot)
+	arm.lower, err = duplicateRetainedFile(
+		arm.pair.sourceRoot,
+		arm.pair.sourceInfo,
+		"workspace source-root descriptor",
+	)
 	if err != nil {
 		return fmt.Errorf("open immutable workspace lower root: %w", err)
 	}
@@ -362,7 +390,7 @@ func (arm *ArmAuthority) Paths() (ArmPaths, error) {
 	}
 	arm.pair.mu.Lock()
 	defer arm.pair.mu.Unlock()
-	if arm.pair.active != arm || arm.closing || arm.released {
+	if arm.pair.active != arm || arm.closing || arm.released || arm.frozen || arm.capturing {
 		return ArmPaths{}, errors.New("workspace arm authority is closed")
 	}
 	return arm.paths, nil
@@ -383,6 +411,9 @@ func (arm *ArmAuthority) RequireFresh(ctx context.Context) error {
 }
 
 func (arm *ArmAuthority) requireFreshLocked(ctx context.Context) error {
+	if arm.frozen || arm.capturing || arm.outcome != nil || arm.captureErr != nil {
+		return errors.New("workspace arm is no longer launchable")
+	}
 	if err := arm.reverifyLocked(ctx, true); err != nil {
 		return err
 	}
@@ -490,26 +521,30 @@ func (arm *ArmAuthority) closeLocked() error {
 	arm.closing = true
 	var attemptErr error
 	if arm.mounted {
-		record, err := mountpointForUnmount(arm.overlayFile, arm.overlayInfo, arm.overlayMount)
-		if err != nil {
-			attemptErr = errors.Join(attemptErr, fmt.Errorf("resolve retained workspace overlay: %w", err))
-		} else if err := arm.verifyPrivateLayoutLocked(); err != nil {
-			attemptErr = errors.Join(attemptErr, err)
-		} else if err := rejectMountDescendants(record.id); err != nil {
+		if err := arm.refreshFrozenOverlayMount(); err != nil {
 			attemptErr = errors.Join(attemptErr, err)
 		} else {
-			if arm.overlayMount.id == 0 {
-				arm.overlayMount = record
-			}
-			attemptErr = errors.Join(
-				attemptErr,
-				closeFile(&arm.overlayRoot, "workspace overlay descriptor"),
-				closeFile(&arm.overlayFile, "workspace overlay mount descriptor"),
-			)
-			if err := unix.Unmount(record.point, unix.UMOUNT_NOFOLLOW); err != nil {
-				attemptErr = errors.Join(attemptErr, fmt.Errorf("unmount retained workspace overlay: %w", err))
+			record, err := mountpointForUnmount(arm.overlayFile, arm.overlayInfo, arm.overlayMount)
+			if err != nil {
+				attemptErr = errors.Join(attemptErr, fmt.Errorf("resolve retained workspace overlay: %w", err))
+			} else if err := arm.verifyPrivateLayoutLocked(); err != nil {
+				attemptErr = errors.Join(attemptErr, err)
+			} else if err := rejectMountDescendants(record.id); err != nil {
+				attemptErr = errors.Join(attemptErr, err)
 			} else {
-				arm.mounted = false
+				if arm.overlayMount.id == 0 {
+					arm.overlayMount = record
+				}
+				attemptErr = errors.Join(
+					attemptErr,
+					closeFile(&arm.overlayRoot, "workspace overlay descriptor"),
+					closeFile(&arm.overlayFile, "workspace overlay mount descriptor"),
+				)
+				if err := unix.Unmount(record.point, unix.UMOUNT_NOFOLLOW); err != nil {
+					attemptErr = errors.Join(attemptErr, fmt.Errorf("unmount retained workspace overlay: %w", err))
+				} else {
+					arm.mounted = false
+				}
 			}
 		}
 	}
@@ -590,8 +625,8 @@ func (arm *ArmAuthority) Closed() bool {
 		arm.capture == nil && arm.lower == nil && len(arm.inodeReserve) == 0
 }
 
-// Close releases the active arm first and then the exact tmpfs, descriptors,
-// and claimed underlying directory. No lazy unmount is used.
+// Close releases the active arm first and then the exact tmpfs and descriptors,
+// leaving the verified borrowed mountpoint caller-owned. No lazy unmount is used.
 func (pair *PairAuthority) Close() error {
 	if pair == nil {
 		return nil
@@ -660,6 +695,12 @@ func (pair *PairAuthority) closeLocked() error {
 	if pair.underlyingRoot != nil {
 		attemptErr = errors.Join(attemptErr, closeFile(&pair.underlyingRoot, "borrowed workspace mountpoint descriptor"))
 	}
+	attemptErr = errors.Join(
+		attemptErr,
+		closeFile(&pair.sourceRoot, "workspace source-root descriptor"),
+		closeFile(&pair.verifierGit, "capture verifier Git descriptor"),
+		closeFile(&pair.gitObjects, "capture Git object-store descriptor"),
+	)
 	pair.closeErr = attemptErr
 	pair.released = attemptErr == nil
 	if pair.released {
@@ -677,5 +718,6 @@ func (pair *PairAuthority) Closed() bool {
 	pair.mu.Lock()
 	defer pair.mu.Unlock()
 	return pair.released && !pair.mounted && pair.active == nil &&
-		pair.underlyingRoot == nil && pair.mountedRoot == nil && pair.rootMountFile == nil
+		pair.underlyingRoot == nil && pair.mountedRoot == nil && pair.rootMountFile == nil &&
+		pair.sourceRoot == nil && pair.verifierGit == nil && pair.gitObjects == nil
 }

@@ -5,8 +5,8 @@ package workspace
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -17,6 +17,18 @@ import (
 )
 
 const requirePrivilegedWorkspaceTestsEnvironment = "TOKENBENCH_REQUIRE_PRIVILEGED_TESTS"
+
+type privilegedWorkspaceSnapshot struct {
+	inputs snapshot.ExecutionInputs
+}
+
+func (authority *privilegedWorkspaceSnapshot) Reverify(ctx context.Context) error {
+	return ctx.Err()
+}
+
+func (authority *privilegedWorkspaceSnapshot) Inputs() (snapshot.ExecutionInputs, error) {
+	return authority.inputs, nil
+}
 
 func TestAuthoritiesFailClosedWithoutLiveState(t *testing.T) {
 	t.Parallel()
@@ -43,6 +55,9 @@ func TestAuthoritiesFailClosedWithoutLiveState(t *testing.T) {
 	}
 	if err := arm.Reverify(ctx); err == nil {
 		t.Fatal("nil arm reverified")
+	}
+	if _, err := arm.Capture(ctx); err == nil {
+		t.Fatal("nil arm captured a workspace")
 	}
 	if arm.Closed() {
 		t.Fatal("nil arm reported successful cleanup")
@@ -333,35 +348,90 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 	}
 
 	lowerPath := t.TempDir()
-	if err := os.Mkdir(filepath.Join(lowerPath, ".git"), 0o700); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(lowerPath, ".git", "config"), []byte("hidden\n"), 0o600); err != nil {
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
 		t.Fatal(err)
 	}
+	runFixtureGit(t, "", gitPath, "init", "--quiet", "--object-format=sha1", lowerPath)
 	baseline := []byte("baseline\n")
 	if err := os.WriteFile(filepath.Join(lowerPath, "README"), baseline, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, lowerPath, gitPath, "add", "--", "README")
+	runFixtureGit(
+		t,
+		lowerPath,
+		gitPath,
+		"-c", "user.name=Tokenbench",
+		"-c", "user.email=tokenbench@example.invalid",
+		"commit", "--quiet", "-m", "base",
+	)
+	baseRevision := strings.TrimSpace(runFixtureGit(t, lowerPath, gitPath, "rev-parse", "HEAD"))
+	fileInfo, err := os.Stat(filepath.Join(lowerPath, "README"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseManifest := []worktreeEntry{
+		{path: ".", kind: snapshot.ManifestKindDirectory, mode: 0o700},
+		{
+			path: "README", kind: snapshot.ManifestKindFile, digest: digest(baseline),
+			mode: uint32(fileInfo.Mode().Perm()), size: int64(len(baseline)),
+		},
+	}
+	gitExecutable, err := os.Open(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.verifierGit = gitExecutable
+	pair.verifierInfo, err = gitExecutable.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.gitObjects, err = os.Open(filepath.Join(lowerPath, ".git", "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.objectsInfo, err = pair.gitObjects.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.baseRevision = baseRevision
+	pair.baseManifest = baseManifest
+	snapshotCommitment := digest([]byte("privileged snapshot authority"))
+	baseTreeSHA256 := digest([]byte("privileged source tree"))
+	changedStateSHA256 := digest(nil)
+	pair.snapshot = &privilegedWorkspaceSnapshot{
+		inputs: snapshot.ExecutionInputs{
+			Commitment: snapshotCommitment, SourceRoot: lowerPath,
+			SourceTreeSHA256: baseTreeSHA256,
+			ChangedState:     snapshot.ChangedStateIdentity{SHA256: changedStateSHA256},
+		},
+	}
+	pair.inputs = Inputs{
+		SchemaVersion: InputsSchemaVersion, ModelRoot: pair.paths.ModelRoot,
+		ImmutableLowerRoot: lowerPath, BaseTreeSHA256: baseTreeSHA256,
+		SnapshotCommitment: snapshotCommitment, ChangedStateSHA256: changedStateSHA256,
+		MountPolicySHA256: requiredMountPolicySHA256, Limits: limits,
+	}
+	pair.inputs.Commitment = pair.inputs.ComputeCommitment()
+	if err := pair.inputs.Validate(); err != nil {
 		t.Fatal(err)
 	}
 
 	for iteration := range 2 {
 		arm := privilegedTestArm(t, pair, lowerPath)
-		fileInfo, err := os.Stat(filepath.Join(lowerPath, "README"))
-		if err != nil {
-			t.Fatal(err)
-		}
-		expected := []worktreeEntry{
-			{path: ".", kind: snapshot.ManifestKindDirectory, mode: 0o700},
-			{path: "README", kind: snapshot.ManifestKindFile, digest: digest(baseline), mode: uint32(fileInfo.Mode().Perm()), size: int64(len(baseline))},
-		}
 		actual, err := scanWorktree(context.Background(), arm.overlayRoot, limits)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !reflect.DeepEqual(actual, expected) {
-			t.Fatalf("arm %d initial tree = %#v, want %#v", iteration, actual, expected)
+		if !reflect.DeepEqual(actual, baseManifest) {
+			t.Fatalf("arm %d initial tree = %#v, want %#v", iteration, actual, baseManifest)
 		}
-		if err := verifyInitialWorktree(context.Background(), arm.overlayRoot, expected, limits); err != nil {
+		if err := verifyInitialWorktree(context.Background(), arm.overlayRoot, baseManifest, limits); err != nil {
 			t.Fatalf("arm %d initial tree: %v", iteration, err)
 		}
 		content, err := os.ReadFile(filepath.Join(arm.paths.ModelRoot, "README"))
@@ -381,12 +451,58 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 			assertPrivilegedCacheReplacementRejected(t, arm)
 			assertPrivilegedPrivateMountRejected(t, arm, lowerPath)
 			assertPrivilegedDescendantMountRejected(t, arm, lowerPath)
+			if err := os.WriteFile(
+				filepath.Join(arm.paths.ModelRoot, "mutation"),
+				[]byte("captured\n"),
+				0o644,
+			); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(arm.paths.CacheRoot, "cache"), []byte("private"), 0o600); err != nil {
+				t.Fatal(err)
+			}
 		}
-		if err := os.WriteFile(filepath.Join(arm.paths.ModelRoot, "mutation"), []byte(fmt.Sprint(iteration)), 0o600); err != nil {
-			t.Fatal(err)
+		if _, err := scanCapturedWorktree(
+			context.Background(),
+			arm.overlayRoot,
+			baseManifest,
+			limits,
+		); err != nil {
+			t.Fatalf("scan arm %d before capture: %v", iteration, err)
 		}
-		if err := os.WriteFile(filepath.Join(arm.paths.CacheRoot, "cache"), []byte("private"), 0o600); err != nil {
-			t.Fatal(err)
+		outcome, err := arm.Capture(context.Background())
+		if err != nil {
+			t.Fatalf("capture arm %d: %v", iteration, err)
+		}
+		wantStatus := StatusNoChange
+		if iteration == 0 {
+			wantStatus = StatusCaptured
+		}
+		if outcome.Status != wantStatus {
+			t.Fatalf("arm %d capture = %#v, want status %q", iteration, outcome, wantStatus)
+		}
+		if err := outcome.Validate(limits); err != nil {
+			t.Fatalf("arm %d capture outcome: %v", iteration, err)
+		}
+		cached, err := arm.Capture(context.Background())
+		if err != nil || !reflect.DeepEqual(cached, outcome) {
+			t.Fatalf("arm %d cached capture = %#v, %v", iteration, cached, err)
+		}
+		if _, err := arm.Paths(); err == nil {
+			t.Fatal("frozen workspace still published launch paths")
+		}
+		if err := arm.RequireFresh(context.Background()); err == nil {
+			t.Fatal("frozen workspace was launchable")
+		}
+		if err := os.WriteFile(
+			filepath.Join(arm.paths.ModelRoot, "write-after-freeze"),
+			[]byte("forbidden"),
+			0o600,
+		); err == nil {
+			t.Fatal("read-only workspace freeze permitted a new file")
+		}
+		if err := arm.Reverify(context.Background()); err != nil {
+			t.Fatalf("reverify captured arm %d: %v", iteration, err)
 		}
 		if err := arm.Close(); err != nil {
 			t.Fatalf("close arm %d: %v", iteration, err)
@@ -741,7 +857,59 @@ func TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot(t *testing.T) {
 	}
 	pair := privilegedMountedPair(t, rootPath, limits)
 	lowerPath := t.TempDir()
-	if err := os.Mkdir(filepath.Join(lowerPath, ".git"), 0o700); err != nil {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runFixtureGit(t, "", gitPath, "init", "--quiet", "--object-format=sha1", lowerPath)
+	runFixtureGit(
+		t,
+		lowerPath,
+		gitPath,
+		"-c", "user.name=Tokenbench",
+		"-c", "user.email=tokenbench@example.invalid",
+		"commit", "--quiet", "--allow-empty", "-m", "base",
+	)
+	pair.baseRevision = strings.TrimSpace(runFixtureGit(t, lowerPath, gitPath, "rev-parse", "HEAD"))
+	pair.baseManifest = []worktreeEntry{{
+		path: ".", kind: snapshot.ManifestKindDirectory, mode: 0o700,
+	}}
+	pair.verifierGit, err = os.Open(gitPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.verifierInfo, err = pair.verifierGit.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.gitObjects, err = os.Open(filepath.Join(lowerPath, ".git", "objects"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair.objectsInfo, err = pair.gitObjects.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshotCommitment := digest([]byte("minimum-entry snapshot authority"))
+	baseTreeSHA256 := digest([]byte("minimum-entry source tree"))
+	changedStateSHA256 := digest(nil)
+	pair.snapshot = &privilegedWorkspaceSnapshot{inputs: snapshot.ExecutionInputs{
+		Commitment: snapshotCommitment, SourceRoot: lowerPath,
+		SourceTreeSHA256: baseTreeSHA256,
+		ChangedState:     snapshot.ChangedStateIdentity{SHA256: changedStateSHA256},
+	}}
+	pair.inputs = Inputs{
+		SchemaVersion: InputsSchemaVersion, ModelRoot: pair.paths.ModelRoot,
+		ImmutableLowerRoot: lowerPath, BaseTreeSHA256: baseTreeSHA256,
+		SnapshotCommitment: snapshotCommitment, ChangedStateSHA256: changedStateSHA256,
+		MountPolicySHA256: requiredMountPolicySHA256, Limits: limits,
+	}
+	pair.inputs.Commitment = pair.inputs.ComputeCommitment()
+	if err := pair.inputs.Validate(); err != nil {
 		t.Fatal(err)
 	}
 	arm := privilegedTestArm(t, pair, lowerPath)
@@ -760,6 +928,23 @@ func TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(arm.paths.ModelRoot, "model"), nil, 0o600); !errors.Is(err, unix.ENOSPC) {
 		t.Fatalf("worktree escaped cache-consumed maximum_entries: %v", err)
+	}
+	reserved := len(arm.inodeReserve)
+	if reserved == 0 {
+		t.Fatal("minimum-limit arm retained no private capture inode reserve")
+	}
+	outcome, err := arm.Capture(context.Background())
+	if err != nil {
+		t.Fatalf("capture minimum-limit no-change tree: %v", err)
+	}
+	if outcome.Status != StatusNoChange {
+		t.Fatalf("minimum-limit capture = %#v, want status %q", outcome, StatusNoChange)
+	}
+	if err := outcome.Validate(limits); err != nil {
+		t.Fatalf("minimum-limit capture outcome: %v", err)
+	}
+	if len(arm.inodeReserve) != 0 {
+		t.Fatal("released capture inode reserve retained descriptors")
 	}
 	if err := pair.Close(); err != nil {
 		t.Fatalf("cleanup minimum-limit overlay and cache: %v", err)
@@ -923,7 +1108,19 @@ func privilegedTestArm(t *testing.T, pair *PairAuthority, lowerPath string) *Arm
 	arm := &ArmAuthority{pair: pair, paths: pair.paths}
 	pair.active = arm
 	var err error
-	arm.lower, err = openDirectoryNoSymlinks(lowerPath)
+	if pair.sourceRoot == nil {
+		pair.sourceRoot, err = openDirectoryNoSymlinks(lowerPath)
+		if err == nil {
+			pair.sourceInfo, err = pair.sourceRoot.Stat()
+		}
+	}
+	if err == nil {
+		arm.lower, err = duplicateRetainedFile(
+			pair.sourceRoot,
+			pair.sourceInfo,
+			"privileged test source-root descriptor",
+		)
+	}
 	if err == nil {
 		arm.target, err = arm.createDirectoryLocked(worktreeDirectory)
 	}
