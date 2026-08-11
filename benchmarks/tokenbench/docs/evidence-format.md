@@ -219,7 +219,12 @@ policy.
 ## Evolution and derived studies
 
 Schemas and media types are explicit and incompatible changes receive new
-versions. Historical object bytes and decoders remain immutable. Blinded quality
-results, paired statistics, cost tables, and rendered reports must be published
+versions. Historical object bytes remain immutable, and their exact producing
+source and decoders remain recoverable from the recorded Git commit and frozen
+recovery bundles. The current decoder surface is latest-only: it rejects
+predecessor schemas instead of carrying compatibility paths. Two-judge
+quality retains each preregistered evaluator identity, complete output, and digest;
+analysis descendants disclose agreement and disagreement. Blinded quality
+results, objective code outcomes, paired statistics, cost tables, and rendered reports must be published
 as new typed descendants with their own policy/producer identities; they may
 reference a replay/capture lineage but must never edit it or hide failed pairs.

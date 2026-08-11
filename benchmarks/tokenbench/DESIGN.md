@@ -238,6 +238,32 @@ preserved separately. Cached input remains a subset rather than an invented
 discounted token total. Price calculations, quality evaluation, and statistical
 reports are derived layers with their own versioned policy and lineage.
 
+## Family-aware quality boundary
+
+Study policy v2 classifies every task as `code`, `review`, or `explain`.
+Review/explain tasks preregister exactly two distinct canonical evaluator IDs
+and deterministic arithmetic-mean aggregation. Both evaluators independently
+receive defensive copies of the same v2 blind packet. The packet contains final
+answers, anonymous labels, and preregistered criteria, but no treatment, order,
+repetition, trace, token, failure, or other-evaluator metadata.
+
+Verification requires both outputs in preregistered evaluator order, exact
+answer/item order, and matching packet nonce and commitment. It preserves each
+complete canonical output, its SHA-256, and its treatment-mapped item matrix
+before computing the aggregate. Analysis v2 discloses
+evaluator identities, exact agreement and disagreement at pair and answer/item
+levels, agreement rate, and normalized absolute score differences. Distinct
+identifiers enforce protocol completeness and non-aliasing; operational judge
+independence remains a study-procedure obligation and must be documented.
+Post hoc adjudication is not accepted by v2; an explicit-adjudication design
+would require a separately preregistered, versioned protocol.
+
+Code tasks cannot enter the blind prose-evaluator path or contain prose quality
+items. A disjoint private-seal `ObjectiveCodeQuality` shape reserves lineage for
+future per-arm patch/test outcome digests. This version deliberately exposes no
+production constructor and implements no code runner, so unavailable code
+quality remains explicit missingness rather than a caller assertion.
+
 ## Harness extension boundary
 
 The harness-neutral interface is:

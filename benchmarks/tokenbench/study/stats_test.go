@@ -321,8 +321,15 @@ func TestVerifiedQualitySealRejectsMutationAndCrossRepetitionReuse(t *testing.T)
 	records := completeRecords(t, policy, seeds, TokenCounts{InputTokens: 10}, TokenCounts{InputTokens: 9})
 
 	records[0].Quality.CandidateScorePPM = 900_000
-	if _, err := Analyze(policy, records, analysisSeeds); err == nil || !strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluation") {
+	if _, err := Analyze(policy, records, analysisSeeds); err == nil || !strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluations") {
 		t.Fatalf("post-verification score mutation was not rejected by the seal: %v", err)
+	}
+
+	records = completeRecords(t, policy, seeds, TokenCounts{InputTokens: 10}, TokenCounts{InputTokens: 9})
+	records[0].Quality.Judgments[0].Output.Answers[0].Items[0].Rationale = "Mutated rationale."
+	if _, err := Analyze(policy, records, analysisSeeds); err == nil ||
+		!strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluations") {
+		t.Fatalf("post-verification individual output mutation was not rejected: %v", err)
 	}
 
 	records = completeRecords(t, policy, seeds, TokenCounts{InputTokens: 10}, TokenCounts{InputTokens: 9})
@@ -331,7 +338,7 @@ func TestVerifiedQualitySealRejectsMutationAndCrossRepetitionReuse(t *testing.T)
 		t.Fatalf("quality result reused for another repetition was not rejected: %v", err)
 	}
 	records[1].Quality.Repetition = records[1].Repetition
-	if _, err := Analyze(policy, records, analysisSeeds); err == nil || !strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluation") {
+	if _, err := Analyze(policy, records, analysisSeeds); err == nil || !strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluations") {
 		t.Fatalf("repetition mutation used to disguise quality reuse was not rejected by the seal: %v", err)
 	}
 }
@@ -359,6 +366,9 @@ func TestAnalysisReportSealRejectsTopLevelAndNestedMutation(t *testing.T) {
 		}},
 		{name: "optional provider metric", mutate: func(changed *AnalysisReport) {
 			changed.Tokens.ProviderTotal.BothMissingPairs++
+		}},
+		{name: "inter-rater disclosure", mutate: func(changed *AnalysisReport) {
+			changed.InterRater.DisagreementItems++
 		}},
 		{name: "nested gate", mutate: func(changed *AnalysisReport) {
 			changed.Decision.Gates = append([]GateResult(nil), changed.Decision.Gates...)
@@ -388,7 +398,7 @@ func TestAnalysisReportCanonicalTopLevelOrderStartsWithCounts(t *testing.T) {
 		t.Fatal(err)
 	}
 	previous := -1
-	for _, field := range []string{"schema_version", "policy_sha256", "counts", "tokens", "randomization", "bootstrap", "quality", "decision"} {
+	for _, field := range []string{"schema_version", "policy_sha256", "counts", "tokens", "randomization", "bootstrap", "quality", "inter_rater", "decision"} {
 		position := strings.Index(string(raw), `"`+field+`":`)
 		if position <= previous {
 			t.Fatalf("top-level field %q is absent or out of canonical order: %s", field, raw)
@@ -402,6 +412,8 @@ func TestAnalysisReportCanonicalTopLevelOrderStartsWithCounts(t *testing.T) {
 		`"margin_adjusted_cluster_mean_tokens_confidence":`,
 		`"repository_cluster_mean_delta_ppm_confidence":`,
 		`"provider_total":`, `"both_present_pairs":`, `"both_missing_pairs":`,
+		`"judged_quality_pairs":`, `"objective_code_quality_pairs":`,
+		`"exact_agreement_items":`, `"disagreement_items":`,
 	} {
 		if !strings.Contains(wire, required) {
 			t.Fatalf("analysis report is missing repository-cluster field %s: %s", required, raw)
@@ -411,6 +423,44 @@ func TestAnalysisReportCanonicalTopLevelOrderStartsWithCounts(t *testing.T) {
 		if strings.Contains(wire, stale) {
 			t.Fatalf("analysis report retained stale task-cluster field %s: %s", stale, raw)
 		}
+	}
+}
+
+func TestAnalysisDisclosesInterRaterAgreementAndDisagreement(t *testing.T) {
+	policy, seeds := analysisPolicyFixture(t, 2)
+	records := completeRecords(t, policy, seeds,
+		TokenCounts{InputTokens: 100, OutputTokens: 20},
+		TokenCounts{InputTokens: 70, OutputTokens: 20},
+	)
+	packet, key, err := BlindPair(policy, BlindPairRequest{
+		TaskID: records[0].TaskID, Repetition: records[0].Repetition,
+		BaselineAnswer: "A complete first response.", CandidateAnswer: "A complete second response.",
+	}, seeds.blinding)
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputs := maximumOutputs(packet)
+	outputs[1].Answers[0].Items[1].Score--
+	quality, err := VerifyEvaluations(policy, packet, key, outputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records[0].Quality = &quality
+
+	report, err := Analyze(policy, records, AnalysisSeeds{
+		Randomization: seeds.randomization, Bootstrap: seeds.bootstrap,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agreement := report.InterRater
+	if !reflect.DeepEqual(agreement.EvaluatorIDs, []string{"judge-alpha", "judge-beta"}) ||
+		agreement.EvaluatedPairs != 2 || agreement.ItemComparisons != 8 ||
+		agreement.ExactAgreementItems != 7 || agreement.DisagreementItems != 1 ||
+		agreement.ExactAgreementPairs != 1 || agreement.DisagreementPairs != 1 ||
+		!agreement.ExactAgreementRate.Defined || agreement.ExactAgreementRate.Value != 0.875 ||
+		agreement.AbsoluteScoreDeltaPPM.Count != 8 || agreement.AbsoluteScoreDeltaPPM.Maximum.Value <= 0 {
+		t.Fatalf("inter-rater disclosure is incomplete: %+v", agreement)
 	}
 }
 
@@ -429,7 +479,7 @@ func completeRecords(t *testing.T, policy Policy, seeds testSeedSet, baseline, c
 			if err != nil {
 				t.Fatal(err)
 			}
-			quality, err := VerifyEvaluation(policy, packet, key, maximumOutput(packet))
+			quality, err := VerifyEvaluations(policy, packet, key, maximumOutputs(packet))
 			if err != nil {
 				t.Fatal(err)
 			}

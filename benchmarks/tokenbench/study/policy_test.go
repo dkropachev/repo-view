@@ -50,6 +50,8 @@ func policyFixture(t *testing.T, includedTasks int) (Policy, testSeedSet) {
 			MinimumAnswerScorePPM:       800_000,
 			MinimumCandidatePassRatePPM: 1_000_000,
 			NoninferiorityMarginPPM:     50_000,
+			ProseEvaluatorIDs:           []string{"judge-alpha", "judge-beta"},
+			ProseAggregation:            ArithmeticMeanAggregation,
 		},
 		Analysis: AnalysisPolicy{
 			MinimumCompletePairs:          2,
@@ -88,7 +90,7 @@ func taskFixture(taskID string, status TaskStatus) TaskPolicy {
 		SuiteSHA256:         strings.Repeat("a", 64),
 		PromptSHA256:        strings.Repeat("b", 64),
 		RepositoryClusterID: "repository-main",
-		TaskFamily:          "repository-location",
+		TaskFamily:          ExplainTaskFamily,
 		Status:              status,
 		ExclusionReason:     reason,
 		Repetitions:         1,
@@ -116,7 +118,7 @@ func TestPolicyCanonicalGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.ReadFile(filepath.Join("testdata", "study-policy-v1.json"))
+	want, err := os.ReadFile(filepath.Join("testdata", "study-policy-v2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,6 +172,73 @@ func TestPolicyRejectsUnblindingCriteriaAndOneRunClaims(t *testing.T) {
 	policy.Analysis.MinimumCompleteTasks = 1
 	if err := policy.Validate(); err == nil {
 		t.Fatal("one-task decision policy accepted")
+	}
+}
+
+func TestPolicyRequiresExactlyTwoCanonicalDistinctProseEvaluators(t *testing.T) {
+	mutations := map[string]func(*Policy){
+		"nil": func(policy *Policy) { policy.Quality.ProseEvaluatorIDs = nil },
+		"one": func(policy *Policy) { policy.Quality.ProseEvaluatorIDs = []string{"judge-alpha"} },
+		"three": func(policy *Policy) {
+			policy.Quality.ProseEvaluatorIDs = []string{"judge-alpha", "judge-beta", "judge-gamma"}
+		},
+		"duplicate": func(policy *Policy) {
+			policy.Quality.ProseEvaluatorIDs = []string{"judge-alpha", "judge-alpha"}
+		},
+		"reordered": func(policy *Policy) {
+			policy.Quality.ProseEvaluatorIDs = []string{"judge-beta", "judge-alpha"}
+		},
+		"noncanonical": func(policy *Policy) {
+			policy.Quality.ProseEvaluatorIDs = []string{"Judge Alpha", "judge-beta"}
+		},
+		"unregistered aggregation": func(policy *Policy) {
+			policy.Quality.ProseAggregation = "pick_first"
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			policy, _ := policyFixture(t, 2)
+			mutate(&policy)
+			if err := policy.Validate(); err == nil {
+				t.Fatal("invalid two-evaluator preregistration accepted")
+			}
+		})
+	}
+}
+
+func TestPolicySeparatesCodeFromJudgedTaskFamilies(t *testing.T) {
+	policy, _ := policyFixture(t, 2)
+	policy.Tasks[0].TaskFamily = CodeTaskFamily
+	policy.Tasks[0].Facts = []FactItem{}
+	policy.Tasks[0].Rubric = []RubricItem{}
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("mixed family policy rejected: %v", err)
+	}
+
+	policy.Tasks[0].Facts = []FactItem{{
+		ItemID: "fact.patch", Requirement: "Checks the patch.", Expected: "The patch passes.", MaximumPoints: 1,
+	}}
+	if err := policy.Validate(); err == nil {
+		t.Fatal("code task was forced through prose criteria")
+	}
+
+	policy, _ = policyFixture(t, 2)
+	policy.Tasks[0].Facts = []FactItem{}
+	policy.Tasks[0].Rubric = []RubricItem{}
+	if err := policy.Validate(); err == nil {
+		t.Fatal("explain task without judged criteria accepted")
+	}
+
+	policy, _ = policyFixture(t, 2)
+	for index := range policy.Tasks {
+		policy.Tasks[index].TaskFamily = CodeTaskFamily
+		policy.Tasks[index].Facts = []FactItem{}
+		policy.Tasks[index].Rubric = []RubricItem{}
+	}
+	policy.Quality.ProseEvaluatorIDs = []string{}
+	policy.Quality.ProseAggregation = NoProseAggregation
+	if err := policy.Validate(); err != nil {
+		t.Fatalf("code-only policy without prose judges rejected: %v", err)
 	}
 }
 
@@ -320,11 +389,24 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 6 {
-		t.Fatalf("schema count = %d, want 6", len(entries))
+	if len(entries) != 8 {
+		t.Fatalf("schema count = %d, want 8", len(entries))
+	}
+	want := map[string]bool{
+		"blind-evaluation-v2.schema.json":       true,
+		"evaluator-output-v2.schema.json":       true,
+		"objective-code-quality-v1.schema.json": true,
+		"study-analysis-v2.schema.json":         true,
+		"study-inputs-v1.schema.json":           true,
+		"study-policy-v2.schema.json":           true,
+		"task-catalog-v1.schema.json":           true,
+		"verified-quality-v2.schema.json":       true,
 	}
 	for _, entry := range entries {
 		t.Run(entry.Name(), func(t *testing.T) {
+			if !want[entry.Name()] {
+				t.Fatal("stale or unversioned schema")
+			}
 			raw, err := os.ReadFile(filepath.Join("schemas", entry.Name()))
 			if err != nil {
 				t.Fatal(err)
@@ -337,6 +419,27 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 				schema["$id"] == "" || schema["additionalProperties"] != false {
 				t.Fatal("schema lacks a versioned strict top-level contract")
 			}
+			assertSchemaReferencesAreLocal(t, schema)
 		})
+	}
+}
+
+func assertSchemaReferencesAreLocal(t *testing.T, value any) {
+	t.Helper()
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if key == "$ref" {
+				reference, ok := child.(string)
+				if !ok || !strings.HasPrefix(reference, "#/") {
+					t.Fatalf("schema has a nonlocal reference %v", child)
+				}
+			}
+			assertSchemaReferencesAreLocal(t, child)
+		}
+	case []any:
+		for _, child := range typed {
+			assertSchemaReferencesAreLocal(t, child)
+		}
 	}
 }
