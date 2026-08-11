@@ -46,9 +46,9 @@ func TestAttestationCanonicalGolden(t *testing.T) {
 	}
 	digest := sha256.Sum256(envelopeJSON)
 	const wantKeyID = "ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec"
-	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v1","project":"github.com/dkropachev/repo-view/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v3+json"},"parents":[]}`
-	const wantSignature = "_1c9FCsYn1oF9v5zFO5c3uF0Noj0bPzzG2R0XTX5tLOVdOYSokz5_Pz9y5WrnJa12O21xr4qFaMStnrdrf-VAQ"
-	const wantRootDigest = "70f6b098a24254c454eaeb1601baa04794cbbd12f150dfbe2c61d0ffe86bc2ed"
+	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v1","project":"github.com/dkropachev/repo-view/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v4+json"},"parents":[]}`
+	const wantSignature = "JuyUZ7jWPXct08-LMhkjZ4pl1MR5733FIG1mpPaGkCUA5LQEuD7iJEMTQH-7QF6IC_uGLkNa5bOD-dHsVP_hCQ"
+	const wantRootDigest = "16056116845cd4369872be4aba4ea4d51aa65e35fd188522c5e1478a9c011557"
 	if envelope.Statement.KeyID != wantKeyID ||
 		string(statementJSON) != wantStatement ||
 		envelope.Signature != wantSignature ||

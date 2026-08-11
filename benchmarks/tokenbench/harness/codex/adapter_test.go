@@ -233,6 +233,10 @@ func TestCanonicalProcessValidationRejectsSharedHiddenOverrides(t *testing.T) {
 
 func TestResolvePinsIdentityAndSnapshotAllowlist(t *testing.T) {
 	t.Parallel()
+	if adapterVersion != "tokenbench.codex-adapter/codex-cli-v0.144.0/v3" ||
+		decoderSchema != "codex.exec-jsonl/v0.144.0+responses-trace/v3+observation/v2" {
+		t.Fatalf("Codex observation contract = %q / %q", adapterVersion, decoderSchema)
+	}
 	adapter := adapterFixture(t)
 	request := resolveRequest(invocationFixture(t))
 	first, err := adapter.Resolve(context.Background(), request)
@@ -251,7 +255,7 @@ func TestResolvePinsIdentityAndSnapshotAllowlist(t *testing.T) {
 		first.Model != request.Model || first.ModelRevision != request.ExpectedModelRevision {
 		t.Fatalf("unexpected resolved identity: %+v", first)
 	}
-	if first.AdapterControlConfigSHA256 != "8f06f9ca4654864b328ff6f28cf0453a6845b311a33a017470a296cd3dfb2d36" {
+	if first.AdapterControlConfigSHA256 != "10cba9aa6b5e0c5136c9c56470d44842375654bf3881a89a8828a3a63f9d960b" {
 		t.Fatalf("Codex control manifest snapshot changed: got %s", first.AdapterControlConfigSHA256)
 	}
 	if first.AdapterConfigSHA256 != "4abc48e987ab8f041960711d0b880befe0e1e620956152f8cfb9b638e430b8a0" {

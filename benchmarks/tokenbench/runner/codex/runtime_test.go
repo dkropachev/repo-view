@@ -113,6 +113,12 @@ func TestLifecycleCapturesAndComparesOfflinePair(t *testing.T) {
 	if len(baselineArtifacts) != 2 || len(candidateArtifacts) != 2 {
 		t.Fatalf("artifact counts = %d/%d, want 2/2", len(baselineArtifacts), len(candidateArtifacts))
 	}
+	if count := bytes.Count(
+		candidateArtifacts[0].Data,
+		[]byte(`"provider_total_tokens"`),
+	); count != 1 {
+		t.Fatalf("Responses trace v3 provider-total field count = %d, want 1", count)
+	}
 	assertArtifactContract(t, baselineArtifacts, baselineConfig)
 	assertArtifactContract(t, candidateArtifacts, candidateConfig)
 

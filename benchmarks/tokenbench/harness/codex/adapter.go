@@ -24,9 +24,9 @@ import (
 
 const (
 	adapterKind       = "codex"
-	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v2"
+	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v3"
 	executableVersion = "codex-cli 0.144.0"
-	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v3"
+	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v3+observation/v2"
 	configSchema      = "tokenbench.codex-config/v0.144.0/v2"
 	layoutSchema      = "tokenbench.codex-runtime-layout/v3"
 	productionAdapter = "tokenbench.codex-production-adapter/v1"

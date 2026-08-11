@@ -94,7 +94,7 @@ func TestBuildPreservesPromptAndOnlyRendersMCPDelta(t *testing.T) {
 func TestDecodeDoesNotRequireToolUse(t *testing.T) {
 	t.Parallel()
 	output := []byte(`{
-  "usage": {"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_tokens": 0},
+  "usage": {"provider_total_tokens": 2, "input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1, "reasoning_tokens": 0},
   "final_answer": "valid without tool",
   "model": "pinned-model",
   "tool_calls": [],
@@ -107,8 +107,19 @@ func TestDecodeDoesNotRequireToolUse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !observation.Completed || len(observation.ToolCalls) != 0 {
+	if !observation.Completed || len(observation.ToolCalls) != 0 ||
+		observation.Usage.ProviderTotalTokens == nil ||
+		*observation.Usage.ProviderTotalTokens != 2 {
 		t.Fatalf("unexpected observation: %+v", observation)
+	}
+}
+
+func TestResolveAdvertisesV2ObservationContract(t *testing.T) {
+	t.Parallel()
+	identity := invocationFixture().HarnessIdentity
+	if identity.AdapterVersion != "tokenbench.fake-adapter/v2" ||
+		identity.DecoderSchema != "tokenbench.fake-output/v2" {
+		t.Fatalf("fake observation contract = %+v", identity)
 	}
 }
 

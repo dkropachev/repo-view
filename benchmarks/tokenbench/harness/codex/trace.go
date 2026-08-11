@@ -254,7 +254,7 @@ type ResponsesToolDeclaration struct {
 // provider counter object.
 type ResponsesResponseTrace struct {
 	ProviderTotalTokens                        *int64                    `json:"provider_total_tokens"`
-	Usage                                      *harness.Usage            `json:"usage"`
+	Usage                                      *ResponsesUsageTrace      `json:"usage"`
 	ProviderModelHeader                        string                    `json:"provider_model_header"`
 	RequestHeadersSHA256                       string                    `json:"request_headers_sha256"`
 	RequestToolsSHA256                         string                    `json:"request_tools_sha256"`
@@ -267,6 +267,27 @@ type ResponsesResponseTrace struct {
 	TLSConnections                             []TLSConnectionTrace      `json:"tls_connections,omitempty"`
 	Wire                                       ProviderResponseWireTrace `json:"wire"`
 	ReasoningIncluded                          bool                      `json:"reasoning_included"`
+}
+
+// ResponsesUsageTrace is the frozen component-only usage object in Responses
+// trace v3. Provider total presence belongs only to the enclosing response's
+// pre-existing provider_total_tokens field.
+type ResponsesUsageTrace struct {
+	InputTokens           int64 `json:"input_tokens"`
+	CachedInputTokens     int64 `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
+	OutputTokens          int64 `json:"output_tokens"`
+	ReasoningTokens       int64 `json:"reasoning_tokens"`
+}
+
+func (usage ResponsesUsageTrace) normalized() harness.Usage {
+	return harness.Usage{
+		InputTokens:           usage.InputTokens,
+		CachedInputTokens:     usage.CachedInputTokens,
+		CacheWriteInputTokens: usage.CacheWriteInputTokens,
+		OutputTokens:          usage.OutputTokens,
+		ReasoningTokens:       usage.ReasoningTokens,
+	}
 }
 
 // ProviderResponseWireTrace commits the exact bounded bytes forwarded to the
@@ -513,15 +534,18 @@ func validateResponsesTrace(trace ResponsesTrace) (decodedTrace, error) {
 }
 
 type traceResponseValidation struct {
-	firstRequest       *ResponsesRequestTrace
-	declarations       map[string]ResponsesToolDeclaration
-	requestToolsSHA256 string
-	providerModel      string
-	turnStateSHA256    string
-	result             decodedTrace
-	outputCount        int
-	tlsModeObserved    bool
-	tlsExpected        bool
+	firstRequest           *ResponsesRequestTrace
+	declarations           map[string]ResponsesToolDeclaration
+	requestToolsSHA256     string
+	providerModel          string
+	turnStateSHA256        string
+	result                 decodedTrace
+	providerTotalSum       int64
+	responseCount          int
+	outputCount            int
+	tlsModeObserved        bool
+	tlsExpected            bool
+	providerTotalsComplete bool
 }
 
 func validateTraceContents(
@@ -566,9 +590,10 @@ func validateTraceContents(
 	}
 
 	state := traceResponseValidation{
-		firstRequest:       first,
-		declarations:       declarations,
-		requestToolsSHA256: requestToolsSHA256,
+		firstRequest:           first,
+		declarations:           declarations,
+		requestToolsSHA256:     requestToolsSHA256,
+		providerTotalsComplete: true,
 		result: decodedTrace{
 			model:     first.Model,
 			toolCalls: make([]ResponsesToolCall, 0),
@@ -602,6 +627,10 @@ func validateTraceContents(
 				sequence,
 			)
 		}
+	}
+	if state.responseCount != 0 && state.providerTotalsComplete {
+		providerTotal := state.providerTotalSum
+		state.result.usage.ProviderTotalTokens = &providerTotal
 	}
 	return state.result, nil
 }
@@ -795,19 +824,29 @@ func (state *traceResponseValidation) validateResponse(
 	if response.Usage == nil {
 		return errors.New("usage is omitted")
 	}
-	if err := harness.ValidateUsage(*response.Usage); err != nil {
+	usage := response.Usage.normalized()
+	if err := harness.ValidateUsage(usage); err != nil {
 		return fmt.Errorf("usage: %w", err)
 	}
-	if response.Usage.CacheWriteInputTokens != 0 {
+	if usage.CacheWriteInputTokens != 0 {
 		return errors.New("codex Responses trace reported unsupported cache-write tokens")
 	}
+	state.responseCount++
 	if response.ProviderTotalTokens != nil {
 		total := *response.ProviderTotalTokens
-		if total < 0 || total != response.Usage.InputTokens+response.Usage.OutputTokens {
+		if total < 0 ||
+			usage.InputTokens > math.MaxInt64-usage.OutputTokens ||
+			total != usage.InputTokens+usage.OutputTokens {
 			return errors.New("provider total_tokens is inconsistent")
 		}
+		if total > math.MaxInt64-state.providerTotalSum {
+			return errors.New("provider total token counter overflow")
+		}
+		state.providerTotalSum += total
+	} else {
+		state.providerTotalsComplete = false
 	}
-	if err := addUsage(&state.result.usage, *response.Usage); err != nil {
+	if err := addUsage(&state.result.usage, usage); err != nil {
 		return fmt.Errorf("codex Responses trace usage: %w", err)
 	}
 	if !state.tlsModeObserved {

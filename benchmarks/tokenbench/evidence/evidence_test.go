@@ -35,6 +35,18 @@ func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {
 		capture.Run.Plan.SuiteSHA256 != run.Plan.SuiteSHA256 {
 		t.Fatalf("capture did not round trip: %+v", capture)
 	}
+	if CaptureSchemaVersion != "tokenbench.capture/v4" ||
+		capture.Manifest.SchemaVersion != CaptureSchemaVersion ||
+		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v4+json" ||
+		capture.Run.SchemaVersion != "tokenbench.run/v2" ||
+		capture.Manifest.Baseline.Observation.MediaType !=
+			"application/vnd.tokenbench.observation.v2+json" {
+		t.Fatalf("capture v4 graph identities = %+v", capture)
+	}
+	if total := capture.Run.Baseline.Observation.Usage.ProviderTotalTokens; total == nil || *total != 12 ||
+		total == run.Baseline.Observation.Usage.ProviderTotalTokens {
+		t.Fatalf("capture provider total did not round trip defensively: %v", total)
+	}
 }
 
 func TestCallerConstructedRunCannotBePublishedAsLiveCapture(t *testing.T) {
@@ -80,8 +92,108 @@ func TestReplayIsDeterministicAndDoesNotMutateParent(t *testing.T) {
 	if replay.Manifest.Parent != parent || replay.Baseline == nil || replay.Candidate == nil {
 		t.Fatalf("invalid replay: %+v", replay)
 	}
+	if ReplaySchemaVersion != "tokenbench.replay/v2" ||
+		replay.Manifest.SchemaVersion != ReplaySchemaVersion ||
+		replay.Subject.MediaType != "application/vnd.tokenbench.replay.v2+json" ||
+		replay.Manifest.Candidate.Observation.MediaType !=
+			"application/vnd.tokenbench.observation.v2+json" {
+		t.Fatalf("replay v2 graph identities = %+v", replay)
+	}
+	if total := replay.Candidate.Usage.ProviderTotalTokens; total == nil || *total != 10 {
+		t.Fatalf("replay provider total did not round trip: %v", total)
+	}
 	if _, err := LoadCapture(context.Background(), store, parent, verifier); err != nil {
 		t.Fatalf("parent changed after replay: %v", err)
+	}
+}
+
+func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
+	store := openTestStore(t)
+	run := validRun(t)
+	signer, verifier := testSignerAndVerifier(
+		t, []BundleKind{CaptureBundle, ReplayBundle}, KeyActive,
+	)
+	captureRoot := publishTestRun(t, store, run, signer)
+	capture, err := LoadCapture(context.Background(), store, captureRoot, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldCaptureStatement := capture.Attestation.Statement
+	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v3+json"
+	if err := validateAttestationStatement(oldCaptureStatement); err == nil {
+		t.Fatal("capture.v3 subject media type was accepted as capture.v4")
+	}
+
+	oldCapture := capture.Manifest
+	oldCapture.SchemaVersion = "tokenbench.capture/v3"
+	oldCaptureRoot := putTestAttestedSubject(
+		t, store, signer, CaptureBundle, captureMediaType, oldCapture, nil,
+	)
+	if _, err := LoadCapture(context.Background(), store, oldCaptureRoot, verifier); err == nil ||
+		!strings.Contains(err.Error(), "unexpected capture schema") {
+		t.Fatalf("capture/v3 rejection = %v", err)
+	}
+
+	oldCaptureObservation := capture.Manifest
+	oldCaptureObservationRef := *oldCaptureObservation.Baseline.Observation
+	oldCaptureObservationRef.MediaType = "application/vnd.tokenbench.observation.v1+json"
+	oldCaptureObservation.Baseline.Observation = &oldCaptureObservationRef
+	oldObservationRoot := putTestAttestedSubject(
+		t, store, signer, CaptureBundle, captureMediaType, oldCaptureObservation, nil,
+	)
+	if _, err := LoadCapture(context.Background(), store, oldObservationRoot, verifier); err == nil ||
+		!strings.Contains(err.Error(), "observation media type") {
+		t.Fatalf("capture observation/v1 rejection = %v", err)
+	}
+	oldDecoderIdentity := decoderIdentityForRun(run)
+	oldDecoderIdentity.Version = "tokenbench.codex-adapter/codex-cli-v0.144.0/v2"
+	oldDecoderIdentity.Schema = "codex.exec-jsonl/v0.144.0+responses-trace/v3"
+	if _, err := replayCaptureWithDecoder(
+		context.Background(), store, captureRoot, verifier,
+		fixtureDecoder{identity: oldDecoderIdentity}, signer,
+	); err == nil || !strings.Contains(err.Error(), "decoder") {
+		t.Fatalf("old Codex decoder identity rejection = %v", err)
+	}
+
+	replayResult, err := replayCaptureWithDecoder(
+		context.Background(), store, captureRoot, verifier,
+		fixtureDecoder{identity: decoderIdentityForRun(run)}, signer,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replay, err := LoadReplay(context.Background(), store, replayResult.IntendedRoot, verifier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldReplayStatement := replay.Attestation.Statement
+	oldReplayStatement.Subject.MediaType = "application/vnd.tokenbench.replay.v1+json"
+	if err := validateAttestationStatement(oldReplayStatement); err == nil {
+		t.Fatal("replay.v1 subject media type was accepted as replay.v2")
+	}
+	oldReplay := replay.Manifest
+	oldReplay.SchemaVersion = "tokenbench.replay/v1"
+	oldReplayRoot := putTestAttestedSubject(
+		t, store, signer, ReplayBundle, replayMediaType, oldReplay,
+		[]cas.ObjectRef{captureRoot},
+	)
+	if _, err := LoadReplay(context.Background(), store, oldReplayRoot, verifier); err == nil ||
+		!strings.Contains(err.Error(), "unexpected replay schema") {
+		t.Fatalf("replay/v1 rejection = %v", err)
+	}
+
+	oldReplayObservation := replay.Manifest
+	oldReplayObservationRef := *oldReplayObservation.Candidate.Observation
+	oldReplayObservationRef.MediaType = "application/vnd.tokenbench.observation.v1+json"
+	oldReplayObservation.Candidate.Observation = &oldReplayObservationRef
+	oldReplayObservationRoot := putTestAttestedSubject(
+		t, store, signer, ReplayBundle, replayMediaType, oldReplayObservation,
+		[]cas.ObjectRef{captureRoot},
+	)
+	if _, err := LoadReplay(
+		context.Background(), store, oldReplayObservationRoot, verifier,
+	); err == nil || !strings.Contains(err.Error(), "observation media type") {
+		t.Fatalf("replay observation/v1 rejection = %v", err)
 	}
 }
 
@@ -505,19 +617,27 @@ func validRun(t *testing.T) tokenbench.Run {
 	if err := plan.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	baselineProviderTotal := int64(12)
 	baselineObservation := harness.Observation{
 		FinalAnswer: "baseline answer",
 		Model:       identity.Model,
 		ToolCalls:   []string{},
-		Usage:       harness.Usage{InputTokens: 10, OutputTokens: 2},
-		Completed:   true,
+		Usage: harness.Usage{
+			InputTokens: 10, OutputTokens: 2,
+			ProviderTotalTokens: &baselineProviderTotal,
+		},
+		Completed: true,
 	}
+	candidateProviderTotal := int64(10)
 	candidateObservation := harness.Observation{
 		FinalAnswer: "candidate answer",
 		Model:       identity.Model,
 		ToolCalls:   []string{"repo_view.inspect"},
-		Usage:       harness.Usage{InputTokens: 8, OutputTokens: 2},
-		Completed:   true,
+		Usage: harness.Usage{
+			InputTokens: 8, OutputTokens: 2,
+			ProviderTotalTokens: &candidateProviderTotal,
+		},
+		Completed: true,
 	}
 	baselineRaw, _ := json.Marshal(baselineObservation)
 	candidateRaw, _ := json.Marshal(candidateObservation)

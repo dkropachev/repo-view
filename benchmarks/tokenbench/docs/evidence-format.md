@@ -60,14 +60,14 @@ The root reference file emitted by the CLI is itself the exact compact canonical
 JSON encoding of the attestation `ObjectRef`; it is not an alias or filename
 lookup.
 
-## Capture v3 graph
+## Capture v4 graph
 
 The signed capture subject media type is
-`application/vnd.tokenbench.capture.v3+json`:
+`application/vnd.tokenbench.capture.v4+json`:
 
 ```text
 signed capture root
-  -> capture v3 subject
+  -> capture v4 subject
        -> plan v3
             -> exact suite/prompt commitments
             -> sole-delta invocations and rendered processes
@@ -78,7 +78,7 @@ signed capture root
             -> stdout bytes
             -> stderr bytes
             -> sanitized Codex artifacts
-            -> optional normalized observation OR ordinary failure
+            -> optional normalized observation v2 OR ordinary failure
             -> exact termination/truncation/resource state
        -> candidate attempt (same shape)
        -> executor identity, randomized order, repetition
@@ -99,12 +99,29 @@ declarations/calls, and capture errors within fixed limits. It does not claim
 to retain raw HTTP/2 framing, header order, or header-name casing.
 Authorization headers and upstream credentials are excluded.
 
+Normalized observations use
+`application/vnd.tokenbench.observation.v2+json`. Observation v2 adds the
+optional `usage.provider_total_tokens` counter; omission and a present zero are
+different. Capture loading reconstructs `tokenbench.run/v2` and rejects the old
+observation v1 media type rather than reinterpreting historical bytes.
+
 Complete traces use
 `application/vnd.tokenbench.codex.responses-trace.v3+json`; ordinary terminal
 process failures use
 `application/vnd.tokenbench.codex.partial-responses-trace.v3+json`. A partial
 trace preserves bounded audit evidence but does not turn a provider-routing,
 capture, parity, or cleanup failure into publication authority.
+
+Responses trace v3 is unchanged: each response's existing top-level
+`provider_total_tokens` field carries presence, while its nested v3 `usage`
+object retains the original component-only shape. The observation v2 decoder
+sets an aggregate provider total only when every retained contributing response
+reported that top-level field.
+
+The built-in decoder advertises
+`codex.exec-jsonl/v0.144.0+responses-trace/v3+observation/v2` through
+`tokenbench.codex-adapter/codex-cli-v0.144.0/v3`; the older adapter/decoder
+identity cannot be used to publish or replay observation v2.
 
 An attempt has exactly one of these outcomes:
 
@@ -117,14 +134,14 @@ built-in Codex executable/model/adapter allowlists, common process shape,
 attempt/arm/order consistency, normalized observations, and the full transitive
 graph.
 
-## Replay v1 graph
+## Replay v2 graph
 
 The signed replay subject media type is
-`application/vnd.tokenbench.replay.v1+json`:
+`application/vnd.tokenbench.replay.v2+json`:
 
 ```text
 signed replay root
-  -> replay v1 subject
+  -> replay v2 subject
        -> parent signed capture root
        -> exact built-in decoder identity
        -> baseline decoded observation or retained failure
@@ -143,6 +160,10 @@ The derived root names the parent signed root, not an unsigned subject. Loading 
 replay recursively authenticates both lineages and validates the observations
 again.
 
+Replay v2 also requires observation v2 objects and rejects replay v1 manifests
+and observation v1 references. Capture v3 and replay v1 remain historical wire
+formats; current code does not relabel or rewrite them.
+
 ## Token accounting
 
 Normalized observations preserve provider-native counters separately:
@@ -157,7 +178,7 @@ Missing is distinct from zero. Codex JSONL usage, provider body usage, provider
 header/model state, and raw trace must agree. Tokenbench does not add cached
 input twice or create a discounted “effective token” total. Pricing, exchange
 rates, and cost formulas are separate versioned derived inputs and are not part
-of capture/replay v1.
+of capture v4 or replay v2.
 
 ## Publication authority and signing order
 
