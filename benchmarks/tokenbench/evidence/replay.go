@@ -13,8 +13,8 @@ import (
 )
 
 const (
-	ReplaySchemaVersion    = "tokenbench.replay/v1"
-	replayMediaType        = "application/vnd.tokenbench.replay.v1+json"
+	ReplaySchemaVersion    = "tokenbench.replay/v2"
+	replayMediaType        = "application/vnd.tokenbench.replay.v2+json"
 	maxReplayManifestBytes = 1 << 20
 )
 
@@ -457,8 +457,7 @@ func replayAttempt(
 	if !reflect.DeepEqual(observation, second) {
 		return nil, errors.New("replay decoder is nondeterministic")
 	}
-	clone := observation
-	clone.ToolCalls = append(make([]string, 0, len(observation.ToolCalls)), observation.ToolCalls...)
+	clone := harness.CloneObservation(observation)
 	return &clone, nil
 }
 

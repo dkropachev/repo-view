@@ -193,7 +193,7 @@ func (adapter *Adapter) Decode(
 	if err != nil {
 		return harness.Observation{}, err
 	}
-	if execOutput.usage != trace.usage {
+	if !harness.EqualUsageNativeComponents(execOutput.usage, trace.usage) {
 		return harness.Observation{}, fmt.Errorf(
 			"codex JSONL usage %+v differs from provider usage %+v",
 			execOutput.usage, trace.usage,
@@ -222,7 +222,7 @@ func (adapter *Adapter) Decode(
 			make([]string, 0, len(trace.toolCallNames)),
 			trace.toolCallNames...,
 		),
-		Usage:     trace.usage,
+		Usage:     harness.CloneUsage(trace.usage),
 		Completed: true,
 	}, nil
 }

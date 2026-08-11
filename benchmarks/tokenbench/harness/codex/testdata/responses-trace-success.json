@@ -225,6 +225,7 @@
           "name": "repo_view.inspect"
         }
       ],
+      "provider_total_tokens": 9,
       "usage": {
         "input_tokens": 6,
         "cached_input_tokens": 2,
@@ -269,6 +270,7 @@
           "name": ""
         }
       ],
+      "provider_total_tokens": 6,
       "usage": {
         "input_tokens": 4,
         "cached_input_tokens": 0,

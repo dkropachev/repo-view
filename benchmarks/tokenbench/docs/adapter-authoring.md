@@ -138,10 +138,16 @@ observation requires a bounded final answer. Missing data is not zero. A decoder
 may receive sanitized artifacts such as provider wire trace and effective config
 and should cross-check them rather than trusting stdout alone.
 
-## External adapter protocol v1
+## External adapter protocol v2
 
 Use `harness/process` when the adapter should be an independently versioned
-executable. The protocol is `tokenbench.external-adapter/v1`.
+executable. The protocol is `tokenbench.external-adapter/v2`. Version 2 adds
+the optional `usage.provider_total_tokens` observation field; missing and a
+present zero are distinct.
+
+The test-only in-process fake advertises `tokenbench.fake-adapter/v2` and
+`tokenbench.fake-output/v2` for the same observation change. Old v1 protocol
+and decoder identities are rejected rather than reinterpreted as v2.
 
 For every method call the bridge:
 
@@ -162,7 +168,7 @@ timeout, or executable drift fails the call.
 Every request has:
 
 ```json
-{"protocol_version":"tokenbench.external-adapter/v1","operation":"<name>","<payload>":{}}
+{"protocol_version":"tokenbench.external-adapter/v2","operation":"<name>","<payload>":{}}
 ```
 
 Every response has the protocol version and either exactly one success payload

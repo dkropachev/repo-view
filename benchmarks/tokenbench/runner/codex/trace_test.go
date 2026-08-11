@@ -106,6 +106,9 @@ func TestParseCompletedResponseCommitsOrderedJSONLPayloads(t *testing.T) {
 	if response.ProviderTotalTokens != nil {
 		t.Fatal("omitted provider total_tokens lost its absence")
 	}
+	if response.Usage == nil {
+		t.Fatal("response usage is nil")
+	}
 }
 
 func TestParseUsagePreservesPresentZeroTotalTokens(t *testing.T) {
@@ -117,8 +120,40 @@ func TestParseUsagePreservesPresentZeroTotalTokens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.InputTokens != 0 || usage.OutputTokens != 0 || total == nil || *total != 0 {
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 || total == nil || *total != 0 ||
+		usage.ProviderTotalTokens == nil || *usage.ProviderTotalTokens != 0 {
 		t.Fatalf("usage/total = %#v, %v", usage, total)
+	}
+	if usage.ProviderTotalTokens == total {
+		t.Fatal("normalized usage aliases the provider trace field")
+	}
+}
+
+func TestParseUsageRejectsOverflowingProviderTotalEquation(t *testing.T) {
+	t.Parallel()
+	if _, _, err := parseUsage(map[string]any{
+		"input_tokens":  json.Number("9223372036854775807"),
+		"output_tokens": json.Number("1"),
+		"total_tokens":  json.Number("0"),
+	}); err == nil {
+		t.Fatal("overflowing total_tokens equation was accepted")
+	}
+}
+
+func TestCloneResponseTraceDefensivelyClonesProviderTotals(t *testing.T) {
+	t.Parallel()
+	providerTotal := int64(3)
+	source := harnesscodex.ResponsesResponseTrace{
+		ProviderTotalTokens: &providerTotal,
+		Usage: &harnesscodex.ResponsesUsageTrace{
+			InputTokens: 1, OutputTokens: 2,
+		},
+	}
+	clone := cloneResponseTrace(source)
+	*clone.ProviderTotalTokens = 4
+	clone.Usage.InputTokens = 5
+	if *source.ProviderTotalTokens != 3 || source.Usage.InputTokens != 1 {
+		t.Fatalf("response trace clone aliases source: source=%+v clone=%+v", source, clone)
 	}
 }
 

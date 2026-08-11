@@ -337,11 +337,47 @@ type Observation struct {
 // Usage preserves provider-reported categories. InputTokens includes cached
 // input when that is how the provider reports it; no pricing weights are used.
 type Usage struct {
-	InputTokens           int64 `json:"input_tokens"`
-	CachedInputTokens     int64 `json:"cached_input_tokens"`
-	CacheWriteInputTokens int64 `json:"cache_write_input_tokens"`
-	OutputTokens          int64 `json:"output_tokens"`
-	ReasoningTokens       int64 `json:"reasoning_tokens"`
+	// ProviderTotalTokens is nil when the provider omitted its native total.
+	// A nonnil zero therefore remains distinct from an omitted total.
+	ProviderTotalTokens   *int64 `json:"provider_total_tokens,omitempty"`
+	InputTokens           int64  `json:"input_tokens"`
+	CachedInputTokens     int64  `json:"cached_input_tokens"`
+	CacheWriteInputTokens int64  `json:"cache_write_input_tokens"`
+	OutputTokens          int64  `json:"output_tokens"`
+	ReasoningTokens       int64  `json:"reasoning_tokens"`
+}
+
+// CloneUsage returns a defensive copy, including optional native counters.
+func CloneUsage(source Usage) Usage {
+	clone := source
+	if source.ProviderTotalTokens != nil {
+		providerTotal := *source.ProviderTotalTokens
+		clone.ProviderTotalTokens = &providerTotal
+	}
+	return clone
+}
+
+// CloneObservation returns a defensive copy of normalized observation data.
+func CloneObservation(source Observation) Observation {
+	clone := source
+	if source.ToolCalls != nil {
+		clone.ToolCalls = append(
+			make([]string, 0, len(source.ToolCalls)),
+			source.ToolCalls...,
+		)
+	}
+	clone.Usage = CloneUsage(source.Usage)
+	return clone
+}
+
+// EqualUsageNativeComponents compares the independently reported components
+// shared by provider evidence and adapters whose JSONL omits a provider total.
+func EqualUsageNativeComponents(left, right Usage) bool {
+	return left.InputTokens == right.InputTokens &&
+		left.CachedInputTokens == right.CachedInputTokens &&
+		left.CacheWriteInputTokens == right.CacheWriteInputTokens &&
+		left.OutputTokens == right.OutputTokens &&
+		left.ReasoningTokens == right.ReasoningTokens
 }
 
 // ValidateIdentity checks the fields required to stratify benchmark results.
@@ -391,7 +427,8 @@ func validSHA256(value string) bool {
 func ValidateUsage(usage Usage) error {
 	if usage.InputTokens < 0 || usage.CachedInputTokens < 0 ||
 		usage.CacheWriteInputTokens < 0 ||
-		usage.OutputTokens < 0 || usage.ReasoningTokens < 0 {
+		usage.OutputTokens < 0 || usage.ReasoningTokens < 0 ||
+		(usage.ProviderTotalTokens != nil && *usage.ProviderTotalTokens < 0) {
 		return errors.New("usage counters must be nonnegative")
 	}
 	if usage.CachedInputTokens > usage.InputTokens {

@@ -1,13 +1,18 @@
 package harness
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
 
 func TestValidateUsage(t *testing.T) {
 	t.Parallel()
-	valid := Usage{InputTokens: 10, CachedInputTokens: 5, CacheWriteInputTokens: 3, OutputTokens: 2, ReasoningTokens: 1}
+	providerTotal := int64(12)
+	valid := Usage{
+		InputTokens: 10, CachedInputTokens: 5, CacheWriteInputTokens: 3,
+		OutputTokens: 2, ReasoningTokens: 1, ProviderTotalTokens: &providerTotal,
+	}
 	if err := ValidateUsage(valid); err != nil {
 		t.Fatal(err)
 	}
@@ -17,6 +22,7 @@ func TestValidateUsage(t *testing.T) {
 		{CacheWriteInputTokens: -1},
 		{OutputTokens: -1},
 		{ReasoningTokens: -1},
+		{ProviderTotalTokens: int64Pointer(-1)},
 		{InputTokens: 1, CachedInputTokens: 2},
 	}
 	for index, usage := range tests {
@@ -25,6 +31,60 @@ func TestValidateUsage(t *testing.T) {
 		}
 	}
 }
+
+func TestCloneObservationPreservesProviderTotalPresenceWithoutAliasing(t *testing.T) {
+	t.Parallel()
+	providerTotal := int64(0)
+	source := Observation{
+		ToolCalls: []string{"exec_command"},
+		Usage:     Usage{ProviderTotalTokens: &providerTotal},
+	}
+	clone := CloneObservation(source)
+	if clone.Usage.ProviderTotalTokens == nil || *clone.Usage.ProviderTotalTokens != 0 {
+		t.Fatalf("present zero provider total was lost: %+v", clone.Usage)
+	}
+	if clone.Usage.ProviderTotalTokens == source.Usage.ProviderTotalTokens {
+		t.Fatal("provider total pointer was aliased")
+	}
+	clone.ToolCalls[0] = "changed"
+	*clone.Usage.ProviderTotalTokens = 1
+	if source.ToolCalls[0] != "exec_command" || *source.Usage.ProviderTotalTokens != 0 {
+		t.Fatalf("clone mutated source: %+v", source)
+	}
+	if !EqualUsageNativeComponents(Usage{InputTokens: 1}, Usage{
+		InputTokens: 1, ProviderTotalTokens: int64Pointer(99),
+	}) {
+		t.Fatal("optional provider total affected native-component equality")
+	}
+	if empty := CloneObservation(Observation{ToolCalls: []string{}}); empty.ToolCalls == nil {
+		t.Fatal("defensive clone changed a canonical empty tool-call list to nil")
+	}
+}
+
+func TestUsageJSONDistinguishesMissingFromPresentZeroProviderTotal(t *testing.T) {
+	t.Parallel()
+	absent, err := json.Marshal(Usage{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	present, err := json.Marshal(Usage{ProviderTotalTokens: int64Pointer(0)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(absent), "provider_total_tokens") ||
+		!strings.Contains(string(present), `"provider_total_tokens":0`) {
+		t.Fatalf("provider-total JSON presence: absent=%s present=%s", absent, present)
+	}
+	var roundTrip Usage
+	if err := json.Unmarshal(present, &roundTrip); err != nil {
+		t.Fatal(err)
+	}
+	if roundTrip.ProviderTotalTokens == nil || *roundTrip.ProviderTotalTokens != 0 {
+		t.Fatalf("present zero did not round trip: %+v", roundTrip)
+	}
+}
+
+func int64Pointer(value int64) *int64 { return &value }
 
 func TestValidateProcessSpecRejectsInvalidText(t *testing.T) {
 	t.Parallel()

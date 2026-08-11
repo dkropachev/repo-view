@@ -1,6 +1,18 @@
 # Methodology
 
-> Status: proposed study protocol. It defines the standard future conformant runs must follow; it does not claim that a runner or conformant dataset exists yet.
+> Status: the canonical study policy, blind paired-evaluation boundary, completeness checks, and paired analysis described below are current in `benchmarks/tokenbench/study`. Integration of that study layer with the CLI/evidence workflow and a published conformant dataset remain planned. The remaining protocol text states requirements for conformant studies, not a claim that such a dataset exists.
+
+## Implemented study and analysis boundary
+
+The harness-neutral `study` package implements five versioned v1 objects: the study policy, authenticated-input manifest, blind evaluation packet, evaluator output, and analysis report. Policy JSON is accepted only in its byte-canonical required-field form, with duplicate, unknown, reordered-equivalent, and trailing content rejected. Tasks, fact items, rubric items, and permitted exclusion codes are predeclared and strictly ordered. Included tasks fix repetitions; excluded or pilot tasks remain in the corpus with explicit reasons. Policies commit separate blinding, randomization, and bootstrap seeds and cannot authorize a decision from only one pair or one repository cluster.
+
+`BlindPair` derives the anonymous answer assignment and nonce from the committed secret seed plus the predeclared task/repetition. The evaluator receives only final answer text, objective facts, rubric criteria, anonymous labels, and packet commitments. Treatment names, execution order, repetition, pair/run identity, traces, tool metadata, failure metadata, and token counters are absent. Evaluator output must echo the nonce and commitment and retain exact answer/item order. Verification maps scores back to treatments only after these checks; unverified scores are not accepted by analysis.
+
+`Analyze` requires one ordered record for every included task/repetition. Never-attempted pairs, arm failures, missing final answers, missing quality judgments, and permitted exclusions require explicit reasons; omitting a declared record is an error. Only nonexcluded pairs with complete token observations for both arms enter token statistics. Missing answers still remain visible and prevent quality/decision gates from silently passing.
+
+The v1 primary token total is raw input plus raw output. Cached input, cache-write input, output, reasoning, and an optional provider-native total are reported independently; cached and reasoning subsets are not added twice, and the provider total never replaces the preregistered primary metric. Provider-total paired summaries include only pairs where both arms reported that counter and disclose missingness explicitly. The API accepts no prices or cache weights. Each component reports paired candidate-minus-baseline differences and ratios, with zero/zero and positive-over-zero denominators counted separately rather than assigned invented finite ratios.
+
+Pair-level reports include sums, means, medians, quartiles, extrema, deltas, and ratios. Inference first averages repetitions within each task, then averages tasks within each preregistered repository cluster. It uses exhaustive two-sided repository-cluster sign flips through the predeclared small-corpus limit, otherwise deterministic committed-seed Monte Carlo with a plus-one p-value. A separately committed-seed repository-cluster percentile bootstrap supplies primary-token and quality mean-difference intervals. A token-efficiency decision is produced only if every predeclared coverage, failure, exclusion, missingness, absolute-quality, quality-noninferiority, token-reduction, nonzero-baseline, and p-value gate passes; otherwise the result is explicitly not demonstrated or inconclusive.
 
 ## Research question
 
@@ -12,7 +24,7 @@ The treatment is availability of that MCP registration, not a prompt that tells 
 
 The experimental unit is a task/repository-state/repetition pair. Its baseline and candidate runs start fresh and share one canonical run specification.
 
-The primary token estimand should be preregistered as the paired change in a non-overlapping model token total under one pinned provider accounting contract. Prefer a provider-reported total when its semantics are documented; otherwise derive total as input plus output only when those categories are non-overlapping.
+The primary token estimand is preregistered as the paired change in raw input plus raw output under one pinned provider accounting contract. A provider-reported total is a separate optional paired metric when both arms report it; it is never inferred from components or substituted for the primary estimand.
 
 Always preserve and report the native components:
 
@@ -33,7 +45,7 @@ Baseline and candidate must have byte-identical prompts in the same roles and or
 
 The candidate has exactly one MCP registration in total: the canonical read-only server named `repo_view`. No navigator appendix, tool-use policy, hint, wrapper, environment variable, or candidate-only executable is allowed. The tool declarations resulting from the MCP handshake are part of that one treatment.
 
-A pair is eligible only if a fail-closed comparison proves that removing the registration from candidate produces baseline exactly. The current foundation proves this for semantic invocations and wrapper-level process plans by building common state once and centrally appending only the registration encoding. A future live runner must additionally verify MCP handshake/server identity/read-only tool surface and child-effective configuration before treating a pair as conformant. Unavoidable facts such as attempt ID, timestamp, and randomized position are evidence metadata and must remain invisible to the model.
+A pair is eligible only if a fail-closed comparison proves that removing the registration from candidate produces baseline exactly. The current foundation proves this for semantic invocations and wrapper-level process plans by building common state once and centrally appending only the registration encoding. The current built-in live Codex path additionally fail-closes on MCP handshake/server identity, the read-only tool surface, and child-effective configuration; any alternate live integration needs equivalent proof before treating a pair as conformant. Unavoidable facts such as attempt ID, timestamp, and randomized position are evidence metadata and must remain invisible to the model.
 
 ## Corpus construction
 
