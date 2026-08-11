@@ -14,7 +14,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (
@@ -23,22 +23,22 @@ const (
 	ResponsesTraceArtifactName = "codex.responses_trace"
 	// ResponsesTraceMediaType identifies the strict exported ResponsesTrace JSON
 	// schema below.
-	ResponsesTraceMediaType = "application/vnd.tokenbench.codex.responses-trace.v3+json"
+	ResponsesTraceMediaType = "application/vnd.tokenbench.codex.responses-trace.v4+json"
 	// PartialResponsesTraceArtifactName is emitted for an ordinary terminal arm
 	// so all sanitized provider progress remains auditable even though Decode is
 	// intentionally skipped.
 	PartialResponsesTraceArtifactName = "codex.responses_trace.partial"
 	// PartialResponsesTraceMediaType identifies the strict partial trace schema.
-	PartialResponsesTraceMediaType = "application/vnd.tokenbench.codex.partial-responses-trace.v3+json"
+	PartialResponsesTraceMediaType = "application/vnd.tokenbench.codex.partial-responses-trace.v4+json"
 	// EffectiveConfigArtifactName is the runner-exported effective Codex config.
 	EffectiveConfigArtifactName = "codex.effective_config"
 	// EffectiveConfigMediaType pins the parser profile used for the config bytes.
 	EffectiveConfigMediaType = "application/toml;profile=codex-v0.144.0"
 	// ResponsesTraceSchemaVersion is the sole accepted provider trace schema.
-	ResponsesTraceSchemaVersion = "tokenbench.codex.responses-trace/v3"
+	ResponsesTraceSchemaVersion = "tokenbench.codex.responses-trace/v4"
 	// PartialResponsesTraceSchemaVersion is separate because incomplete request
 	// sequences are never valid decoder input.
-	PartialResponsesTraceSchemaVersion = "tokenbench.codex.partial-responses-trace/v3"
+	PartialResponsesTraceSchemaVersion = "tokenbench.codex.partial-responses-trace/v4"
 
 	ToolKindCommand    = "command"
 	ToolKindMCP        = "mcp"
@@ -49,10 +49,10 @@ const (
 	// MaxEffectiveConfigBytes is the runner and decoder byte limit for config.
 	MaxEffectiveConfigBytes = 1 << 20
 	// MaxProviderResponseBodyBytes is the largest complete provider response
-	// body whose exact bytes may be committed by a v3 trace.
+	// body whose exact bytes may be committed by a v4 trace.
 	MaxProviderResponseBodyBytes = 32 << 20
 	// MaxResponsesTraceRequests bounds ordered requests, attempts, and complete
-	// responses in one v3 trace.
+	// responses in one v4 trace.
 	MaxResponsesTraceRequests = 4096
 	// MaxResponsesTraceSSEEvents bounds dispatched provider SSE data events.
 	MaxResponsesTraceSSEEvents = 100000
@@ -90,15 +90,15 @@ const (
 var allowedMCPTools = []string{"changed", "find", "inspect", "outline"}
 
 var allowedNormalizedMCPCalls = map[string]struct{}{
-	"repo_view.changed": {},
-	"repo_view.find":    {},
-	"repo_view.inspect": {},
-	"repo_view.outline": {},
+	"scopesifter.changed": {},
+	"scopesifter.find":    {},
+	"scopesifter.inspect": {},
+	"scopesifter.outline": {},
 }
 
 // Codex v0.144.0 adds these provider-visible helper tools whenever at least
 // one MCP server is configured. They are Codex's generic MCP resource UI, not
-// resource capabilities advertised by repo-view itself.
+// resource capabilities advertised by scopesifter itself.
 var allowedMCPSupportTools = []string{
 	"list_mcp_resources",
 	"list_mcp_resource_templates",
@@ -114,7 +114,7 @@ var allowedMCPSupportCalls = map[string]struct{}{
 // ResponsesTrace is the credential-free normalized evidence emitted by the
 // runner's Codex Responses proxy. FirstRequest commits the first provider
 // request with its tool list separated from the non-tool payload so pair-level
-// validation can authorize only the repo_view declaration delta.
+// validation can authorize only the scopesifter declaration delta.
 type ResponsesTrace struct {
 	SchemaVersion    string                         `json:"schema_version"`
 	FirstRequest     *ResponsesRequestTrace         `json:"first_request"`
@@ -173,10 +173,6 @@ type ResponsesRequestSnapshot struct {
 // the parity projection normalizes only the validated sticky turn-state nonce.
 type ProviderRequestHeadersTrace struct {
 	ReviewedSemanticSHA256 string `json:"reviewed_semantic_sha256"`
-	// ExactApplicationSHA256 is retained only as a non-serialized source-level
-	// compatibility alias for callers compiled against the v2 Go API. New code
-	// uses ReviewedSemanticSHA256.
-	ExactApplicationSHA256 string `json:"-"`
 	ParityProjectionSHA256 string `json:"parity_projection_sha256"`
 	ContentTypeSHA256      string `json:"content_type_sha256"`
 	UserAgentSHA256        string `json:"user_agent_sha256"`
@@ -270,7 +266,7 @@ type ResponsesResponseTrace struct {
 }
 
 // ResponsesUsageTrace is the frozen component-only usage object in Responses
-// trace v3. Provider total presence belongs only to the enclosing response's
+// trace v4. Provider total presence belongs only to the enclosing response's
 // pre-existing provider_total_tokens field.
 type ResponsesUsageTrace struct {
 	InputTokens           int64 `json:"input_tokens"`
@@ -363,14 +359,14 @@ type decodedTrace struct {
 	usage         harness.Usage
 }
 
-// AllowedMCPTools returns the exact repo_view tool allowlist, without the
+// AllowedMCPTools returns the exact scopesifter tool allowlist, without the
 // normalized server prefix used by ResponsesTrace.
 func AllowedMCPTools() []string {
 	return append([]string(nil), allowedMCPTools...)
 }
 
 // AllowedMCPSupportTools returns the exact generic resource-tool delta Codex
-// v0.144.0 exposes when the candidate registers repo-view.
+// v0.144.0 exposes when the candidate registers scopesifter.
 func AllowedMCPSupportTools() []string {
 	return append([]string(nil), allowedMCPSupportTools...)
 }
@@ -574,7 +570,12 @@ func validateTraceContents(
 			return decodedTrace{}, fmt.Errorf("codex request %d changed the requested model", index)
 		}
 		if request.ToolsSHA256 != requestToolsSHA256 {
-			return decodedTrace{}, fmt.Errorf("codex request %d tool commitment drifted", index)
+			return decodedTrace{}, fmt.Errorf(
+				"codex request %d tool commitment drifted: got %s, want %s",
+				index,
+				request.ToolsSHA256,
+				requestToolsSHA256,
+			)
 		}
 	}
 	if err := requestTraceMatchesSnapshot(first, requests[0], requestToolsSHA256); err != nil {
@@ -740,7 +741,7 @@ func validateFirstRequest(
 		case ToolKindMCP:
 			if declaration.WireType != "function" || declaration.Strict == nil || *declaration.Strict {
 				return nil, "", fmt.Errorf(
-					"repo_view declaration %q has an unsupported wire shape",
+					"scopesifter declaration %q has an unsupported wire shape",
 					declaration.Name,
 				)
 			}
@@ -767,7 +768,7 @@ func validateFirstRequest(
 		return nil, "", errors.New("codex first request omitted the pinned command tool")
 	}
 	if len(mcpDeclarations) != 0 && len(mcpDeclarations) != len(allowedNormalizedMCPCalls) {
-		return nil, "", errors.New("codex first request has a partial repo_view tool surface")
+		return nil, "", errors.New("codex first request has a partial scopesifter tool surface")
 	}
 	if len(mcpSupportDeclarations) != 0 &&
 		len(mcpSupportDeclarations) != len(allowedMCPSupportCalls) {
@@ -967,10 +968,6 @@ func equalTLSConnectionTraces(left, right []TLSConnectionTrace) bool {
 }
 
 func validateProviderRequestHeaders(headers ProviderRequestHeadersTrace) error {
-	if headers.ExactApplicationSHA256 != "" &&
-		headers.ExactApplicationSHA256 != headers.ReviewedSemanticSHA256 {
-		return errors.New("deprecated request-header alias differs from reviewed commitment")
-	}
 	for name, value := range map[string]string{
 		"reviewed semantic": headers.ReviewedSemanticSHA256,
 		"parity projection": headers.ParityProjectionSHA256,

@@ -16,7 +16,7 @@ import (
 	"reflect"
 	"sort"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const adapterVersion = "tokenbench.fake-adapter/v2"

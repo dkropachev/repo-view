@@ -1,5 +1,5 @@
 {
-  "schema_version": "tokenbench.codex.responses-trace/v3",
+  "schema_version": "tokenbench.codex.responses-trace/v4",
   "production_tls_required": false,
   "first_request": {
     "model": "gpt-5.4",
@@ -59,7 +59,7 @@
       },
       {
         "kind": "mcp",
-        "name": "repo_view.changed",
+        "name": "scopesifter.changed",
         "wire_type": "function",
         "strict": false,
         "description_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
@@ -67,7 +67,7 @@
       },
       {
         "kind": "mcp",
-        "name": "repo_view.find",
+        "name": "scopesifter.find",
         "wire_type": "function",
         "strict": false,
         "description_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
@@ -75,7 +75,7 @@
       },
       {
         "kind": "mcp",
-        "name": "repo_view.inspect",
+        "name": "scopesifter.inspect",
         "wire_type": "function",
         "strict": false,
         "description_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
@@ -83,7 +83,7 @@
       },
       {
         "kind": "mcp",
-        "name": "repo_view.outline",
+        "name": "scopesifter.outline",
         "wire_type": "function",
         "strict": false,
         "description_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
@@ -97,7 +97,7 @@
       "model": "gpt-5.4",
       "exact_body_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
       "nonce_normalized_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-      "tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "tools_sha256": "ac481885505dc8fa3629cb54b15127a971d3c0133d3c24727614be0516946541",
       "headers": {
         "reviewed_semantic_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
         "parity_projection_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
@@ -123,7 +123,7 @@
       "model": "gpt-5.4",
       "exact_body_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
       "nonce_normalized_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
-      "tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "tools_sha256": "ac481885505dc8fa3629cb54b15127a971d3c0133d3c24727614be0516946541",
       "headers": {
         "reviewed_semantic_sha256": "3131313131313131313131313131313131313131313131313131313131313131",
         "parity_projection_sha256": "2121212121212121212121212121212121212121212121212121212121212121",
@@ -205,7 +205,7 @@
       "request_exact_body_sha256": "1010101010101010101010101010101010101010101010101010101010101010",
       "request_nonce_normalized_non_tool_payload_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
       "request_headers_sha256": "2020202020202020202020202020202020202020202020202020202020202020",
-      "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "request_tools_sha256": "ac481885505dc8fa3629cb54b15127a971d3c0133d3c24727614be0516946541",
       "response_model": "gpt-5.4-2026-03-05",
       "provider_model_header": "gpt-5.4-2026-03-05",
       "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",
@@ -222,7 +222,7 @@
           "wire_sha256": "1414141414141414141414141414141414141414141414141414141414141414",
           "payload_sha256": "16bd2b354b5228b655cb7c5bc341fb96cf3fe5ac8395ecb0e2e136d1558ab584",
           "kind": "mcp",
-          "name": "repo_view.inspect"
+          "name": "scopesifter.inspect"
         }
       ],
       "provider_total_tokens": 9,
@@ -250,7 +250,7 @@
       "request_exact_body_sha256": "3030303030303030303030303030303030303030303030303030303030303030",
       "request_nonce_normalized_non_tool_payload_sha256": "1515151515151515151515151515151515151515151515151515151515151515",
       "request_headers_sha256": "3131313131313131313131313131313131313131313131313131313131313131",
-      "request_tools_sha256": "6b93ad2b07b53045be6391905a8484cfd294155e40fc16938053b1ef02b3f6c3",
+      "request_tools_sha256": "ac481885505dc8fa3629cb54b15127a971d3c0133d3c24727614be0516946541",
       "response_model": "gpt-5.4-2026-03-05",
       "provider_model_header": "gpt-5.4-2026-03-05",
       "turn_state_sha256": "1212121212121212121212121212121212121212121212121212121212121212",

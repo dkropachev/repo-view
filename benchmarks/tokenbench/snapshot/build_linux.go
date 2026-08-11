@@ -22,7 +22,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
 
@@ -160,7 +160,7 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		requireStatic bool
 	}{
 		{"Codex", request.Origins.Codex, filepath.Join(toolsPath, "codex"), true},
-		{"repo-view", request.Origins.RepoView, filepath.Join(toolsPath, "repo-view"), true},
+		{"scopesifter", request.Origins.ScopeSifter, filepath.Join(toolsPath, "scopesifter"), true},
 		// Verifier Git runs only during snapshot construction. Requiring a static
 		// image commits all bytes it can execute without an untracked loader or
 		// shared-library surface.
@@ -196,7 +196,7 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 	}
 	allExecutablePaths := append([]string{
 		filepath.Join(toolsPath, "codex"),
-		filepath.Join(toolsPath, "repo-view"),
+		filepath.Join(toolsPath, "scopesifter"),
 		filepath.Join(toolsPath, "verifier-git"),
 		filepath.Join(toolboxPath, "bash"),
 		filepath.Join(toolsPath, "runner-arm-init"),
@@ -291,7 +291,7 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		SourceRoot:             sourcePath,
 		GitMetadataRoot:        filepath.Join(sourcePath, ".git"),
 		CodexExecutable:        filepath.Join(toolsPath, "codex"),
-		RepoViewExecutable:     filepath.Join(toolsPath, "repo-view"),
+		ScopeSifterExecutable:  filepath.Join(toolsPath, "scopesifter"),
 		VerifierGitExecutable:  gitPath,
 		BashExecutable:         filepath.Join(toolboxPath, "bash"),
 		Utilities:              utilityPathsForRoot(toolboxPath),
@@ -322,7 +322,7 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		ReadOnlyPaths:     []string{sourcePath, changedPath},
 		ExecutablePaths: append([]string{
 			filepath.Join(toolsPath, "codex"),
-			filepath.Join(toolsPath, "repo-view"),
+			filepath.Join(toolsPath, "scopesifter"),
 			filepath.Join(toolboxPath, "bash"),
 		}, utilityPathsForRoot(toolboxPath).values()...),
 	}

@@ -1,16 +1,16 @@
 # Contributing to tokenbench
 
 Start with the invariant: a paired run is identical except that candidate has
-one `repo_view` MCP registration and baseline has none. Read [DESIGN.md](DESIGN.md)
+one `scopesifter` MCP registration and baseline has none. Read [DESIGN.md](DESIGN.md)
 and [AGENTS.md](AGENTS.md) before changing code.
 
 ## Change workflow
 
 1. Name the boundary being changed: authored policy, origin verification,
    immutable snapshot, parity, adapter, process containment, capture, evidence,
-   replay, quality, statistics, or legacy migration.
+   replay, quality, or statistics.
 2. Open or link a focused issue. Keep foundational, live-execution,
-   methodology/reporting, and legacy-transition changes in reviewable stages.
+   methodology and reporting changes in reviewable stages.
 3. Update the relevant schema/design text with the implementation. Never
    advertise a command or guarantee that the checked-in code does not provide.
 4. Add a positive fixture and adversarial tests for malformed, aliased,
@@ -92,12 +92,10 @@ scoring, missing/failure/exclusion accounting, paired estimators, exact and
 Monte Carlo paths, deterministic bootstrap, thresholds, and small/adversarial
 samples. Report raw paired observations with uncertainty and quality gates.
 
-### Legacy transition
+### Product identity
 
-Historical `experiments/lsp-replacement` pairs are non-conformant. Do not edit
-their canonical evidence. A compatibility alias may improve ergonomics, and
-replay/resolve may regenerate only in isolated staging before comparing with
-the immutable original. See [docs/migration.md](docs/migration.md).
+Current contracts are bound to ScopeSifter. Pre-rename evidence is preserved
+in Git history, but current loaders do not decode, translate, or republish it.
 
 ## Verification matrix
 

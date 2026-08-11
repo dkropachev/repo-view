@@ -121,7 +121,7 @@ func canonicalPrivateSeal(domain string, value any) ([sha256.Size]byte, error) {
 		return [sha256.Size]byte{}, err
 	}
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/private-canonical-seal/v1\x00"))
+	hasher.Write([]byte("scopesifter/tokenbench/private-canonical-seal/v2\x00"))
 	writeCommitmentField(hasher, []byte(domain))
 	writeCommitmentField(hasher, raw)
 	var seal [sha256.Size]byte

@@ -12,21 +12,21 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
-	"github.com/dkropachev/repo-view/internal/repoviewmcp"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	"github.com/scopesifter/scopesifter/internal/scopesiftermcp"
 )
 
 var normalizedMCPNames = map[string]string{
-	"mcp__repo_view__changed": "repo_view.changed",
-	"mcp__repo_view__find":    "repo_view.find",
-	"mcp__repo_view__inspect": "repo_view.inspect",
-	"mcp__repo_view__outline": "repo_view.outline",
-	"repo_view.changed":       "repo_view.changed",
-	"repo_view.find":          "repo_view.find",
-	"repo_view.inspect":       "repo_view.inspect",
-	"repo_view.outline":       "repo_view.outline",
+	"mcp__scopesifter__changed": "scopesifter.changed",
+	"mcp__scopesifter__find":    "scopesifter.find",
+	"mcp__scopesifter__inspect": "scopesifter.inspect",
+	"mcp__scopesifter__outline": "scopesifter.outline",
+	"scopesifter.changed":       "scopesifter.changed",
+	"scopesifter.find":          "scopesifter.find",
+	"scopesifter.inspect":       "scopesifter.inspect",
+	"scopesifter.outline":       "scopesifter.outline",
 }
 
 func parseResponsesRequest(
@@ -234,24 +234,24 @@ func providerVisibleTreatmentSchema(spec pinnedTreatmentSpec) (map[string]any, e
 	}
 	normalized, err := codexVisibleSchema(spec.schema)
 	if err != nil {
-		return nil, fmt.Errorf("normalize repo_view.%s provider schema: %w", spec.name, err)
+		return nil, fmt.Errorf("normalize scopesifter.%s provider schema: %w", spec.name, err)
 	}
 	raw, err := canonicalJSON(normalized)
 	if err != nil {
 		return nil, err
 	}
 	// v0.144.0 begins lossy large-schema compaction above 5000 normalized
-	// bytes. The four reviewed repo-view schemas must remain below that branch;
+	// bytes. The four reviewed scopesifter schemas must remain below that branch;
 	// crossing it requires pinning the official compaction passes too.
 	if len(raw) > 5000 {
-		return nil, fmt.Errorf("repo-view provider schema %q requires unsupported Codex compaction", spec.name)
+		return nil, fmt.Errorf("scopesifter provider schema %q requires unsupported Codex compaction", spec.name)
 	}
 	return normalized, nil
 }
 
 // codexVisibleSchema mirrors the JsonSchema fields retained by Codex v0.144.0
 // after it parses an MCP input schema and serializes that typed subset onto the
-// Responses wire. Repo-view's local validation-only bounds/defaults are
+// Responses wire. ScopeSifter's local validation-only bounds/defaults are
 // intentionally absent from the provider declaration.
 func codexVisibleSchema(schema map[string]any) (map[string]any, error) {
 	result := make(map[string]any)
@@ -333,10 +333,10 @@ type pinnedTreatmentSpec struct {
 
 func pinnedTreatmentSpecs() []pinnedTreatmentSpec {
 	result := make([]pinnedTreatmentSpec, 0, 7)
-	for _, spec := range repoviewmcp.ToolSpecifications() {
+	for _, spec := range scopesiftermcp.ToolSpecifications() {
 		result = append(result, pinnedTreatmentSpec{
 			kind:        harnesscodex.ToolKindMCP,
-			name:        "repo_view." + spec.Name,
+			name:        "scopesifter." + spec.Name,
 			description: spec.Description,
 			schema:      spec.InputSchema,
 		})
@@ -409,7 +409,7 @@ func normalizeToolName(name string) (string, string, error) {
 			return harnesscodex.ToolKindMCPSupport, name, nil
 		}
 	}
-	if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "repo_view.") {
+	if strings.HasPrefix(name, "mcp__") || strings.HasPrefix(name, "scopesifter.") {
 		return "", "", fmt.Errorf("unsupported MCP tool name %q", name)
 	}
 	if !validToolName(name) {
@@ -453,8 +453,8 @@ func validateArmMCPDeclarations(
 		return fmt.Errorf("candidate Responses request exposed %d MCP tools, want %d", len(names), len(wanted))
 	}
 	for _, name := range wanted {
-		if _, ok := names["repo_view."+name]; !ok {
-			return fmt.Errorf("candidate Responses request omitted repo_view.%s", name)
+		if _, ok := names["scopesifter."+name]; !ok {
+			return fmt.Errorf("candidate Responses request omitted scopesifter.%s", name)
 		}
 	}
 	supportWanted := harnesscodex.AllowedMCPSupportTools()
@@ -942,8 +942,8 @@ func parseCompletedResponse(
 	if err != nil {
 		return harnesscodex.ResponsesResponseTrace{}, err
 	}
-	// Responses trace v3 already has a dedicated provider_total_tokens field.
-	// Keep the nested v3 usage object unchanged; Decode restores the optional
+	// Responses trace v4 already has a dedicated provider_total_tokens field.
+	// Keep the nested component-only usage object unchanged; Decode restores the optional
 	// total after validating and aggregating the explicit provider evidence.
 	traceUsage := harnesscodex.ResponsesUsageTrace{
 		InputTokens:           usage.InputTokens,
@@ -1464,15 +1464,15 @@ func comparePairSnapshots(baseline, candidate armSnapshot) error {
 	}
 	wanted := harnesscodex.AllowedMCPTools()
 	if len(candidateMCP) != len(wanted) {
-		return errors.New("candidate Codex trace does not contain exactly four repo_view declarations")
+		return errors.New("candidate Codex trace does not contain exactly four scopesifter declarations")
 	}
 	seen := make(map[string]struct{}, len(candidateMCP))
 	for _, declaration := range candidateMCP {
 		seen[declaration.Name] = struct{}{}
 	}
 	for _, name := range wanted {
-		if _, ok := seen["repo_view."+name]; !ok {
-			return fmt.Errorf("candidate Codex trace omitted repo_view.%s", name)
+		if _, ok := seen["scopesifter."+name]; !ok {
+			return fmt.Errorf("candidate Codex trace omitted scopesifter.%s", name)
 		}
 	}
 	supportWanted := harnesscodex.AllowedMCPSupportTools()

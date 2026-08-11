@@ -13,16 +13,16 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
 )
 
 const (
-	AttestationSchemaVersion          = "tokenbench.attestation/v1"
-	AttestationStatementSchemaVersion = "tokenbench.attestation-statement/v1"
-	AttestationProject                = "github.com/dkropachev/repo-view/benchmarks/tokenbench"
+	AttestationSchemaVersion          = "tokenbench.attestation/v2"
+	AttestationStatementSchemaVersion = "tokenbench.attestation-statement/v2"
+	AttestationProject                = "github.com/scopesifter/scopesifter/benchmarks/tokenbench"
 
-	attestationMediaType = "application/vnd.tokenbench.attestation.v1+json"
-	attestationDomain    = "repo-view/tokenbench/attestation/ed25519/v1\x00"
+	attestationMediaType = "application/vnd.tokenbench.attestation.v2+json"
+	attestationDomain    = "scopesifter/tokenbench/attestation/ed25519/v2\x00"
 
 	maxAttestationBytes        = 64 << 10
 	maxLineageDepth            = 16
@@ -40,7 +40,7 @@ var (
 	ErrUntrustedAttestation = errors.New("untrusted tokenbench attestation")
 
 	// ErrRevokedAttestation means the current trust policy explicitly revoked
-	// the signing key. Revocation is intentionally retroactive in v1.
+	// the signing key. Revocation is intentionally retroactive in v2.
 	ErrRevokedAttestation = errors.New("revoked tokenbench attestation key")
 
 	// ErrRetiredAttestation means the current policy no longer permits the key

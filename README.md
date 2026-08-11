@@ -1,8 +1,8 @@
-# repo-view
+# ScopeSifter
 
-[![CI](https://github.com/dkropachev/repo-view/actions/workflows/ci.yml/badge.svg)](https://github.com/dkropachev/repo-view/actions/workflows/ci.yml)
+[![CI](https://github.com/scopesifter/scopesifter/actions/workflows/ci.yml/badge.svg)](https://github.com/scopesifter/scopesifter/actions/workflows/ci.yml)
 
-`repo-view` is a Go code navigation library and CLI. It finds where a function,
+`ScopeSifter` is a Go code navigation library and CLI. It finds where a function,
 class, method, type, or other symbol is used and can return:
 
 - `file:line`
@@ -16,20 +16,20 @@ It can also drop comments and Python docstrings from returned snippets.
 Install the latest source with Go:
 
 ```bash
-go install github.com/dkropachev/repo-view/cmd/repo-view@latest
+go install github.com/scopesifter/scopesifter/cmd/scopesifter@latest
 ```
 
 Version tags publish prebuilt Linux, macOS, and Windows binaries, plus a
 `SHA256SUMS` file, on the
-[GitHub Releases page](https://github.com/dkropachev/repo-view/releases).
+[GitHub Releases page](https://github.com/scopesifter/scopesifter/releases).
 
 ## Navigation CLI
 
 ```bash
-repo-view find renderUser parseSession --root ./my-repo --include both --return scope --json
-repo-view inspect src/app.go:42 src/session.go:18 --root ./my-repo --include scope --return scope --json
-repo-view outline src/app.go src/session.go --root ./my-repo --return scope --json
-repo-view changed --root ./my-repo --base main --return context --json
+scopesifter find renderUser parseSession --root ./my-repo --include both --return scope --json
+scopesifter inspect src/app.go:42 src/session.go:18 --root ./my-repo --include scope --return scope --json
+scopesifter outline src/app.go src/session.go --root ./my-repo --return scope --json
+scopesifter changed --root ./my-repo --base main --return context --json
 ```
 
 Each command accepts one kind of input. Do not combine selectors:
@@ -92,7 +92,7 @@ Multiple includes are ORed; any matching exclude wins.
 - `find`: `--include defs|refs|both`; default `both`. Default return is
   `scope`. Its `--limit` is shared across all supplied symbols. Exact text such
   as a dependency module path can be searched in `go.mod`, for example
-  `repo-view find golang.org/x/time --path go.mod --include refs --return line`.
+  `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
   symbol results are all needed in one response.
@@ -114,67 +114,61 @@ Multiple includes are ORed; any matching exclude wins.
 
 ## Codex Integration
 
-Use the wrapper to inject `repo-view` into PATH and add navigation instructions
+Use the wrapper to inject `scopesifter` into PATH and add navigation instructions
 for one Codex invocation. It does not modify Codex config, Codex source, or the
 target repository.
 
 ```bash
-scripts/codex-with-repo-view exec \
+scripts/codex-with-scopesifter exec \
   -C /path/to/repository \
   -s read-only \
   --json \
   "Explain this branch compared with main."
 ```
 
-The wrapper defaults to the quality-confirmed experiment profile:
+The wrapper defaults to a bounded navigation profile:
 
 ```text
-REPO_VIEW_CHANGED_RETURN=context
-REPO_VIEW_CHANGED_CONTEXT=4
-REPO_VIEW_CHANGED_LIMIT=20
-REPO_VIEW_CHANGED_MAX_CODE_LINES=60
-REPO_VIEW_CHANGED_MAX_PATCH_LINES=300
-REPO_VIEW_REASONING_EFFORT=high
-REPO_VIEW_ANSWER_GUARD=on
+SCOPESIFTER_CHANGED_RETURN=context
+SCOPESIFTER_CHANGED_CONTEXT=4
+SCOPESIFTER_CHANGED_LIMIT=20
+SCOPESIFTER_CHANGED_MAX_CODE_LINES=60
+SCOPESIFTER_CHANGED_MAX_PATCH_LINES=300
+SCOPESIFTER_REASONING_EFFORT=high
+SCOPESIFTER_ANSWER_GUARD=on
 ```
 
-Each value can be overridden for one invocation. `REPO_VIEW_ANSWER_GUARD`
+Each value can be overridden for one invocation. `SCOPESIFTER_ANSWER_GUARD`
 accepts `on|off`; reasoning accepts `inherit|low|medium|high|xhigh|ultra`.
 The wrapper compiles the advertised navigation ceilings into every child
-`repo-view` binary: result limit `20`, context `20`, embedded code `60`, and
+`scopesifter` binary: result limit `20`, context `20`, embedded code `60`, and
 changed patch `300`. Environment values are fallback-only, so a command cannot
 disable these ceilings with `env -u`. A command that requests more exits with
 an explicit cap error and is counted as a navigation-bound violation by the
-experiment analyzer.
-`REPO_VIEW_NAVIGATION_CONTEXT_CAP` overrides the default context ceiling; the
-other ceilings follow their corresponding `REPO_VIEW_CHANGED_*` values.
-When both `REPO_VIEW_NAVIGATION_COMMAND_CAP` and
-`REPO_VIEW_NAVIGATION_BUDGET_FILE` are set in a writable integration, JSON
+transcript validator.
+`SCOPESIFTER_NAVIGATION_CONTEXT_CAP` overrides the default context ceiling; the
+other ceilings follow their corresponding `SCOPESIFTER_CHANGED_*` values.
+When both `SCOPESIFTER_NAVIGATION_COMMAND_CAP` and
+`SCOPESIFTER_NAVIGATION_BUDGET_FILE` are set in a writable integration, JSON
 responses include `navigation_budget` with `used`, `limit`, and `remaining`,
-and repo-view invocations after the limit are rejected. For read-only capped
+and scopesifter invocations after the limit are rejected. For read-only capped
 Codex runs, the wrapper requires `--json`, tees live events to an ignored local
-transcript, and compiles its path and cap into repo-view. Each repo-view CLI
+transcript, and compiles its path and cap into scopesifter. Each scopesifter CLI
 invocation is counted from started and completed navigation events, so the
 model cannot bypass the cumulative budget by unsetting environment variables.
 Total Codex tool calls are measured separately. The transcript is removed when
 the wrapper exits.
 
-The controlled [LSP-replacement experiment](experiments/lsp-replacement.md)
-records prompts, token accounting, total/repo-view/other tool-call counts,
-per-operation statistics, inferred call graphs, and answer-quality checks.
-The [reproduction harness](experiments/lsp-replacement/README.md) reruns any
-cohort and stores raw evidence, extracted answers, commands, and regenerated
-metrics under the ignored local evidence directory.
-The [deep-navigation report](experiments/lsp-replacement/deep-navigation-results.md)
-records the historical replacements and retained regression cases. The old
-shell suite driver has been removed; new reproducible comparisons belong in
+Reproducible comparisons belong in
 [`tokenbench`](benchmarks/tokenbench/README.md), whose evidence and parity
-contracts fail closed.
+contracts fail closed. Evidence created under a different product identity is
+not accepted by the current contracts; historical material remains available
+from Git history.
 
 ## Validation
 
 ```bash
-go run ./cmd/repo-view-validate --cases 100
+go run ./cmd/scopesifter-validate --cases 100
 ```
 
 The validator builds an independent line-location index, selects deterministic
@@ -206,14 +200,14 @@ func view() string {
 ## Go Library
 
 ```go
-view, err := repoview.New("./my-repo")
+view, err := navigator.New("./my-repo")
 if err != nil {
 	return err
 }
 
-response, err := view.Find("renderUser", repoview.Options{
-	Include:        repoview.IncludeRefs,
-	Return:         repoview.ReturnScope,
+response, err := view.Find("renderUser", navigator.Options{
+	Include:        navigator.IncludeRefs,
+	Return:         navigator.ReturnScope,
 	Limit:          20,
 	MaxCodeLines:   60,
 	DropComments:   true,

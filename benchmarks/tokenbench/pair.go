@@ -11,46 +11,46 @@ import (
 	"reflect"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
 )
 
 const (
 	// PlanSchemaVersion is the schema emitted after pair resolution.
-	PlanSchemaVersion = "tokenbench.plan/v3"
+	PlanSchemaVersion = "tokenbench.plan/v4"
 	// MaximumPlanObjectBytes is the common pre-execution and evidence-store
 	// ceiling for one canonical plan. Keeping the format limit here lets Pair
 	// reject an oversized embedded snapshot before either arm is launched.
 	MaximumPlanObjectBytes = 64 << 20
 )
 
-// RepoViewTool is the only treatment tokenbench can add. Its fields are
+// ScopeSifterTool is the only treatment tokenbench can add. Its fields are
 // private so task authors cannot add arguments, descriptions, environment
 // variables, or other candidate-only instructions.
-type RepoViewTool struct {
+type ScopeSifterTool struct {
 	executable string
 	sha256     string
 }
 
-// NewRepoViewTool verifies and pins the repo-view MCP executable. The server
+// NewScopeSifterTool verifies and pins the scopesifter MCP executable. The server
 // argv is owned by ResolvePair and cannot be supplied by a suite.
-func NewRepoViewTool(executable string) (RepoViewTool, error) {
+func NewScopeSifterTool(executable string) (ScopeSifterTool, error) {
 	if !filepath.IsAbs(executable) {
-		return RepoViewTool{}, errors.New("repo-view executable must be an absolute path")
+		return ScopeSifterTool{}, errors.New("scopesifter executable must be an absolute path")
 	}
-	if err := requireExecutableFile(executable, "repo-view MCP"); err != nil {
-		return RepoViewTool{}, err
+	if err := requireExecutableFile(executable, "scopesifter MCP"); err != nil {
+		return ScopeSifterTool{}, err
 	}
 	digest, err := FileSHA256(executable)
 	if err != nil {
-		return RepoViewTool{}, err
+		return ScopeSifterTool{}, err
 	}
-	if err := requireExecutableFile(executable, "repo-view MCP"); err != nil {
-		return RepoViewTool{}, err
+	if err := requireExecutableFile(executable, "scopesifter MCP"); err != nil {
+		return ScopeSifterTool{}, err
 	}
-	return RepoViewTool{executable: filepath.Clean(executable), sha256: digest}, nil
+	return ScopeSifterTool{executable: filepath.Clean(executable), sha256: digest}, nil
 }
 
 // PreparedSuite is an unforgeable verified input state. Its fields are private;
@@ -187,13 +187,13 @@ type Difference struct {
 // ParityProof commits to the actual semantic invocations. A valid proof always
 // contains exactly one authorized difference at /mcp_servers.
 type ParityProof struct {
-	SchemaVersion              string       `json:"schema_version"`
-	CommonInvocationSHA256     string       `json:"common_invocation_sha256"`
-	BaselineInvocationSHA256   string       `json:"baseline_invocation_sha256"`
-	CandidateInvocationSHA256  string       `json:"candidate_invocation_sha256"`
-	PromptSHA256               string       `json:"prompt_sha256"`
-	RepoViewRegistrationSHA256 string       `json:"repo_view_registration_sha256"`
-	Differences                []Difference `json:"differences"`
+	SchemaVersion                 string       `json:"schema_version"`
+	CommonInvocationSHA256        string       `json:"common_invocation_sha256"`
+	BaselineInvocationSHA256      string       `json:"baseline_invocation_sha256"`
+	CandidateInvocationSHA256     string       `json:"candidate_invocation_sha256"`
+	PromptSHA256                  string       `json:"prompt_sha256"`
+	ScopeSifterRegistrationSHA256 string       `json:"scopesifter_registration_sha256"`
+	Differences                   []Difference `json:"differences"`
 }
 
 // ResolvedPlan is serializable audit evidence of the one authored suite and
@@ -245,8 +245,8 @@ type Pair struct {
 }
 
 // ResolvePair creates both arms from one loaded suite. It adds only the
-// candidate repo-view MCP registration and proves parity before returning.
-func ResolvePair(prepared PreparedSuite, tool RepoViewTool) (Pair, error) {
+// candidate scopesifter MCP registration and proves parity before returning.
+func ResolvePair(prepared PreparedSuite, tool ScopeSifterTool) (Pair, error) {
 	loaded := prepared.loaded
 	if err := loaded.suite.Validate(); err != nil {
 		return Pair{}, err
@@ -261,7 +261,7 @@ func ResolvePair(prepared PreparedSuite, tool RepoViewTool) (Pair, error) {
 		return Pair{}, errors.New("loaded suite digest does not match exact suite JSON bytes")
 	}
 	if tool.executable == "" || !ValidSHA256(tool.sha256) {
-		return Pair{}, errors.New("repo-view tool was not constructed by NewRepoViewTool")
+		return Pair{}, errors.New("scopesifter tool was not constructed by NewScopeSifterTool")
 	}
 	if prepared.adapter == nil {
 		return Pair{}, errors.New("prepared suite has no bound harness adapter")
@@ -274,7 +274,7 @@ func ResolvePair(prepared PreparedSuite, tool RepoViewTool) (Pair, error) {
 	baseline := cloneInvocation(common)
 	candidate := cloneInvocation(common)
 	candidate.MCPServers = []harness.MCPServer{
-		repoViewRegistration(tool, candidate),
+		scopeSifterRegistration(tool, candidate),
 	}
 	proof, err := ProveParity(baseline, candidate)
 	if err != nil {
@@ -480,7 +480,7 @@ func (plan ResolvedPlan) Validate() error {
 	}
 	if plan.Publishable {
 		if plan.OriginInputs == nil || plan.ExecutionInputs == nil || plan.ArtifactBundle == nil {
-			return errors.New("publishable v3 plan requires origin, execution, and artifact inputs")
+			return errors.New("publishable v4 plan requires origin, execution, and artifact inputs")
 		}
 		if err := executionsnapshot.ValidateBinding(
 			*plan.OriginInputs,
@@ -496,7 +496,7 @@ func (plan ResolvedPlan) Validate() error {
 			return errors.Join(errors.New("plan artifacts differ from this tokenbench binary policy"), err)
 		}
 	} else if plan.OriginInputs != nil || plan.ExecutionInputs != nil || plan.ArtifactBundle != nil {
-		return errors.New("nonpublishable v3 plan must not claim immutable input authority")
+		return errors.New("nonpublishable v4 plan must not claim immutable input authority")
 	}
 	authoredSuite, err := decodeEmbeddedSuite(plan.SuiteJSON)
 	if err != nil {
@@ -622,9 +622,9 @@ func validatePlanSuiteBinding(suite Suite, plan ResolvedPlan) error {
 		case len(plan.Candidate.MCPServers) != 1 ||
 			!reflect.DeepEqual(
 				plan.Candidate.MCPServers[0],
-				repoViewCacheRegistration(*execution, origins.RepoView),
+				scopeSifterCacheRegistration(*execution, origins.ScopeSifter),
 			):
-			return errors.New("publishable plan lacks the exact cache-only repo_view registration")
+			return errors.New("publishable plan lacks the exact cache-only scopesifter registration")
 		}
 		harnessExecutable = execution.CodexExecutable
 		gitExecutable = execution.VerifierGitExecutable
@@ -798,7 +798,7 @@ func reverifyExecutionInputs(
 		return errors.New("harness executable changed after pair resolution")
 	}
 	tool := candidate.MCPServers[0]
-	if err := requireExecutableFile(tool.Command, "repo-view MCP"); err != nil {
+	if err := requireExecutableFile(tool.Command, "scopesifter MCP"); err != nil {
 		return err
 	}
 	digest, err = FileSHA256(tool.Command)
@@ -806,7 +806,7 @@ func reverifyExecutionInputs(
 		return err
 	}
 	if digest != tool.ExecutableSHA256 {
-		return errors.New("repo-view MCP executable changed after pair resolution")
+		return errors.New("scopesifter MCP executable changed after pair resolution")
 	}
 	snapshot, err := source.Verify(ctx, source.Expected{
 		Root:                baseline.WorkingDirectory,
@@ -856,7 +856,7 @@ func (pair Pair) reverifyExecutionInputs(
 }
 
 // Publishable reports whether this Pair retains live immutable snapshot
-// authority. Legacy PrepareSuite/ResolvePair pairs deliberately return false.
+// authority. Audit-only PrepareSuite/ResolvePair pairs deliberately return false.
 func (pair Pair) Publishable() bool {
 	return pair.publishable && pair.snapshotAuthority != nil
 }
@@ -935,8 +935,8 @@ func validateResolvedIdentity(identity harness.Identity, suite Suite) error {
 	}
 }
 
-func repoViewRegistration(
-	tool RepoViewTool,
+func scopeSifterRegistration(
+	tool ScopeSifterTool,
 	invocation harness.Invocation,
 ) harness.MCPServer {
 	return harness.MCPServer{
@@ -948,7 +948,7 @@ func repoViewRegistration(
 			"--git", invocation.GitExecutable,
 			"--git-sha256", invocation.GitExecutableSHA256,
 		},
-		Name:             "repo_view",
+		Name:             "scopesifter",
 		Command:          tool.executable,
 		ExecutableSHA256: tool.sha256,
 		Required:         true,

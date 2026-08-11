@@ -1,5 +1,5 @@
 // Package gitdiffcontract defines the versioned Git diff behavior shared by
-// repo-view's direct backend and tokenbench's precomputed changed-state cache.
+// scopesifter's direct backend and tokenbench's precomputed changed-state cache.
 // It has no dependency on either consumer so semantic changes must be made in
 // one place.
 package gitdiffcontract
@@ -15,7 +15,7 @@ import (
 const (
 	// Version identifies changes that can alter patch bytes, rename
 	// classification, or changed-line locations.
-	Version = "repo-view.git-diff/v1"
+	Version = "scopesifter.git-diff/v2"
 
 	RenameSimilarity = 50
 	RenameLimit      = 20_000
@@ -124,7 +124,7 @@ func patchArguments(base, head string, contextLines int) []string {
 }
 
 // ParseChangedSpans parses and merges new-side hunk ranges. A pure deletion
-// is anchored to the nearest one-based HEAD line, matching repo-view's public
+// is anchored to the nearest one-based HEAD line, matching scopesifter's public
 // response semantics.
 func ParseChangedSpans(
 	patch []byte,

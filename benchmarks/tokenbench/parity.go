@@ -11,10 +11,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
-const paritySchemaVersion = "tokenbench.parity/v1"
+const paritySchemaVersion = "tokenbench.parity/v2"
 
 // ProveParity verifies exact semantic equality after removing the one allowed
 // candidate MCP registration. No broad ignore list is used.
@@ -38,7 +38,7 @@ func ProveParity(
 		)
 	}
 	registration := candidate.MCPServers[0]
-	if err := validateRepoViewRegistration(registration, candidate); err != nil {
+	if err := validateScopeSifterRegistration(registration, candidate); err != nil {
 		return ParityProof{}, err
 	}
 
@@ -71,7 +71,7 @@ func ProveParity(
 	}
 	registrationJSON, err := json.Marshal(registration)
 	if err != nil {
-		return ParityProof{}, fmt.Errorf("marshal repo-view registration: %w", err)
+		return ParityProof{}, fmt.Errorf("marshal scopesifter registration: %w", err)
 	}
 	emptyServersJSON, err := json.Marshal(baseline.MCPServers)
 	if err != nil {
@@ -85,16 +85,16 @@ func ProveParity(
 	return ParityProof{
 		Differences: []Difference{{
 			JSONPointer:     "/mcp_servers",
-			Authorization:   "candidate-only required read-only repo_view MCP registration",
+			Authorization:   "candidate-only required read-only scopesifter MCP registration",
 			BaselineSHA256:  SHA256(emptyServersJSON),
 			CandidateSHA256: SHA256(candidateServersJSON),
 		}},
-		SchemaVersion:              paritySchemaVersion,
-		CommonInvocationSHA256:     SHA256(commonJSON),
-		BaselineInvocationSHA256:   SHA256(baselineJSON),
-		CandidateInvocationSHA256:  SHA256(candidateJSON),
-		PromptSHA256:               SHA256(baseline.Prompt),
-		RepoViewRegistrationSHA256: SHA256(registrationJSON),
+		SchemaVersion:                 paritySchemaVersion,
+		CommonInvocationSHA256:        SHA256(commonJSON),
+		BaselineInvocationSHA256:      SHA256(baselineJSON),
+		CandidateInvocationSHA256:     SHA256(candidateJSON),
+		PromptSHA256:                  SHA256(baseline.Prompt),
+		ScopeSifterRegistrationSHA256: SHA256(registrationJSON),
 	}, nil
 }
 
@@ -177,11 +177,11 @@ func validateInvocation(invocation harness.Invocation) error {
 	}
 }
 
-func validateRepoViewRegistration(
+func validateScopeSifterRegistration(
 	registration harness.MCPServer,
 	invocation harness.Invocation,
 ) error {
-	legacyArguments := []string{
+	gitArguments := []string{
 		"mcp",
 		"--root", invocation.WorkingDirectory,
 		"--base", invocation.SourceBaseRevision,
@@ -201,33 +201,33 @@ func validateRepoViewRegistration(
 		"--changed-state-cache", cachePath,
 		"--changed-state-cache-sha256", "",
 	}
-	validArguments := reflect.DeepEqual(registration.Arguments, legacyArguments)
+	validArguments := reflect.DeepEqual(registration.Arguments, gitArguments)
 	if len(registration.Arguments) == len(cacheArguments) &&
 		ValidSHA256(registration.Arguments[len(registration.Arguments)-1]) {
 		cacheArguments[len(cacheArguments)-1] = registration.Arguments[len(registration.Arguments)-1]
 		validArguments = reflect.DeepEqual(registration.Arguments, cacheArguments)
 	}
 	switch {
-	case registration.Name != "repo_view":
+	case registration.Name != "scopesifter":
 		return fmt.Errorf(
-			"candidate MCP server must be named repo_view, got %q",
+			"candidate MCP server must be named scopesifter, got %q",
 			registration.Name,
 		)
 	case !filepath.IsAbs(registration.Command):
-		return errors.New("repo_view MCP command must be an absolute path")
+		return errors.New("scopesifter MCP command must be an absolute path")
 	case filepath.Clean(registration.Command) != registration.Command:
-		return errors.New("repo_view MCP command must be a canonical path")
+		return errors.New("scopesifter MCP command must be a canonical path")
 	case !ValidSHA256(registration.ExecutableSHA256):
-		return errors.New("repo_view MCP executable digest is invalid")
+		return errors.New("scopesifter MCP executable digest is invalid")
 	case !registration.Required:
-		return errors.New("repo_view MCP server must be required")
+		return errors.New("scopesifter MCP server must be required")
 	case !registration.ReadOnly:
-		return errors.New("repo_view MCP server must be declared read-only")
+		return errors.New("scopesifter MCP server must be declared read-only")
 	case registration.Environment == nil || len(registration.Environment) != 0:
-		return errors.New("repo_view MCP registration must not contain environment hints")
+		return errors.New("scopesifter MCP registration must not contain environment hints")
 	case !validArguments:
 		return fmt.Errorf(
-			"repo_view MCP arguments must be a code-owned Git or cache-only form, got %q",
+			"scopesifter MCP arguments must be a code-owned Git or cache-only form, got %q",
 			registration.Arguments,
 		)
 	default:

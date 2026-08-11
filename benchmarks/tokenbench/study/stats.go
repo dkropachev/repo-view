@@ -9,7 +9,7 @@ import (
 	"sort"
 )
 
-const AnalysisSchemaVersion = "tokenbench.study-analysis/v2"
+const AnalysisSchemaVersion = "tokenbench.study-analysis/v3"
 
 // TokenCounts contains native counters only. Cached input is a subset of
 // input, and reasoning is a subset of output in the strict v1 accounting
@@ -372,7 +372,7 @@ func Analyze(policy Policy, records []PairRecord, seeds AnalysisSeeds) (Analysis
 		InterRater:    interRater,
 		Decision:      decision,
 	}
-	reportSeal, err := canonicalPrivateSeal("analysis-report/v2", report)
+	reportSeal, err := canonicalPrivateSeal("analysis-report/v3", report)
 	if err != nil {
 		return AnalysisReport{}, fmt.Errorf("seal analysis report: %w", err)
 	}
@@ -384,7 +384,7 @@ func EncodeAnalysisReport(report AnalysisReport) ([]byte, error) {
 	if report.SchemaVersion != AnalysisSchemaVersion || !validSHA256(report.PolicySHA256) {
 		return nil, errors.New("analysis report was not produced by Analyze")
 	}
-	expectedSeal, err := canonicalPrivateSeal("analysis-report/v2", report)
+	expectedSeal, err := canonicalPrivateSeal("analysis-report/v3", report)
 	if err != nil {
 		return nil, fmt.Errorf("verify analysis report seal: %w", err)
 	}
@@ -536,7 +536,7 @@ func validateExclusion(policy Policy, exclusion Exclusion) error {
 }
 
 func validatePairedQuality(policy Policy, policySHA, taskID string, repetition int, quality PairedQuality) error {
-	expectedSeal, err := canonicalPrivateSeal("paired-quality/v2", quality)
+	expectedSeal, err := canonicalPrivateSeal("paired-quality/v3", quality)
 	if err != nil {
 		return fmt.Errorf("verify quality seal: %w", err)
 	}
@@ -1248,7 +1248,7 @@ func deterministicIndex(seed []byte, domain string, sample, draw, count int) int
 
 func deterministicDigest(seed []byte, domain string, values ...int) [sha256.Size]byte {
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/study-random/v1\x00"))
+	hasher.Write([]byte("scopesifter/tokenbench/study-random/v2\x00"))
 	writeCommitmentField(hasher, []byte(domain))
 	writeCommitmentField(hasher, seed)
 	var encoded [8]byte

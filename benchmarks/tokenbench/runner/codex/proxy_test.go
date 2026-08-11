@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 func TestProviderResponseHeadersTraceUsesCanonicalOrderedValues(t *testing.T) {

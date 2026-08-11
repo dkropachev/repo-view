@@ -18,18 +18,18 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 const (
 	adapterKind       = "codex"
-	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v3"
+	adapterVersion    = "tokenbench.codex-adapter/codex-cli-v0.144.0/v4"
 	executableVersion = "codex-cli 0.144.0"
-	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v3+observation/v2"
-	configSchema      = "tokenbench.codex-config/v0.144.0/v2"
-	layoutSchema      = "tokenbench.codex-runtime-layout/v3"
-	productionAdapter = "tokenbench.codex-production-adapter/v1"
+	decoderSchema     = "codex.exec-jsonl/v0.144.0+responses-trace/v4+observation/v2"
+	configSchema      = "tokenbench.codex-config/v0.144.0/v3"
+	layoutSchema      = "tokenbench.codex-runtime-layout/v4"
+	productionAdapter = "tokenbench.codex-production-adapter/v2"
 
 	// OfflineLocalProxyCapability is the inert capability marker used for
 	// offline audit plans. Live adapters receive and commit the exact fresh
@@ -704,35 +704,35 @@ func (adapter *Adapter) MCPArguments(
 // CanonicalMCPArguments is the code-owned Codex v0.144 encoding of the sole
 // permitted treatment. The tokenbench parity gate calls this independently of
 // Adapter.MCPArguments, so a process adapter cannot smuggle unrelated config
-// overrides into the candidate suffix while claiming to encode repo_view.
+// overrides into the candidate suffix while claiming to encode scopesifter.
 func CanonicalMCPArguments(server harness.MCPServer) ([]string, error) {
 	if err := validateMCPServer(server); err != nil {
 		return nil, err
 	}
 	command, err := tomlString(server.Command)
 	if err != nil {
-		return nil, fmt.Errorf("encode repo_view command: %w", err)
+		return nil, fmt.Errorf("encode scopesifter command: %w", err)
 	}
 	arguments, err := tomlStringArray(server.Arguments)
 	if err != nil {
-		return nil, fmt.Errorf("encode repo_view arguments: %w", err)
+		return nil, fmt.Errorf("encode scopesifter arguments: %w", err)
 	}
 	tools, err := tomlStringArray(allowedMCPTools)
 	if err != nil {
-		return nil, fmt.Errorf("encode repo_view tool allowlist: %w", err)
+		return nil, fmt.Errorf("encode scopesifter tool allowlist: %w", err)
 	}
 	assignments := []string{
-		"mcp_servers.repo_view.command=" + command,
-		"mcp_servers.repo_view.args=" + arguments,
-		"mcp_servers.repo_view.env={}",
-		"mcp_servers.repo_view.env_vars=[]",
-		"mcp_servers.repo_view.enabled=true",
-		"mcp_servers.repo_view.required=true",
-		"mcp_servers.repo_view.enabled_tools=" + tools,
-		"mcp_servers.repo_view.disabled_tools=[]",
-		"mcp_servers.repo_view.default_tools_approval_mode=\"auto\"",
-		"mcp_servers.repo_view.startup_timeout_sec=10",
-		"mcp_servers.repo_view.tool_timeout_sec=60",
+		"mcp_servers.scopesifter.command=" + command,
+		"mcp_servers.scopesifter.args=" + arguments,
+		"mcp_servers.scopesifter.env={}",
+		"mcp_servers.scopesifter.env_vars=[]",
+		"mcp_servers.scopesifter.enabled=true",
+		"mcp_servers.scopesifter.required=true",
+		"mcp_servers.scopesifter.enabled_tools=" + tools,
+		"mcp_servers.scopesifter.disabled_tools=[]",
+		"mcp_servers.scopesifter.default_tools_approval_mode=\"auto\"",
+		"mcp_servers.scopesifter.startup_timeout_sec=10",
+		"mcp_servers.scopesifter.tool_timeout_sec=60",
 	}
 	return configArguments(assignments), nil
 }
@@ -885,65 +885,65 @@ func (adapter *Adapter) validateResolveRequest(request harness.ResolveRequest) e
 }
 
 func validateMCPServer(server harness.MCPServer) error {
-	if server.Name != "repo_view" {
+	if server.Name != "scopesifter" {
 		return fmt.Errorf("unsupported MCP server %q", server.Name)
 	}
 	if !server.Required || !server.ReadOnly {
-		return errors.New("repo_view MCP server must be required and read-only")
+		return errors.New("scopesifter MCP server must be required and read-only")
 	}
 	if !validText(server.Command) || !filepath.IsAbs(server.Command) ||
 		filepath.Clean(server.Command) != server.Command {
-		return errors.New("repo_view MCP command must be an absolute canonical path")
+		return errors.New("scopesifter MCP command must be an absolute canonical path")
 	}
 	if !validSHA256(server.ExecutableSHA256) {
-		return errors.New("repo_view MCP executable digest is invalid")
+		return errors.New("scopesifter MCP executable digest is invalid")
 	}
 	if server.Environment == nil || len(server.Environment) != 0 {
-		return errors.New("repo_view MCP environment must be a canonical empty object")
+		return errors.New("scopesifter MCP environment must be a canonical empty object")
 	}
 	if len(server.Arguments) != 9 && len(server.Arguments) != 11 ||
 		server.Arguments[0] != "mcp" ||
 		server.Arguments[1] != "--root" ||
 		server.Arguments[3] != "--base" {
-		return errors.New("repo_view MCP arguments do not match the canonical registration")
+		return errors.New("scopesifter MCP arguments do not match the canonical registration")
 	}
 	if !validText(server.Arguments[2]) ||
 		!filepath.IsAbs(server.Arguments[2]) ||
 		filepath.Clean(server.Arguments[2]) != server.Arguments[2] {
-		return errors.New("repo_view MCP root must be an absolute canonical path")
+		return errors.New("scopesifter MCP root must be an absolute canonical path")
 	}
 	if !validGitObjectID(server.Arguments[4]) {
-		return errors.New("repo_view MCP base revision is invalid")
+		return errors.New("scopesifter MCP base revision is invalid")
 	}
 	if len(server.Arguments) == 9 {
 		if server.Arguments[5] != "--git" || server.Arguments[7] != "--git-sha256" {
-			return errors.New("repo_view MCP Git arguments are not canonical")
+			return errors.New("scopesifter MCP Git arguments are not canonical")
 		}
 		if !validText(server.Arguments[6]) ||
 			!filepath.IsAbs(server.Arguments[6]) ||
 			filepath.Clean(server.Arguments[6]) != server.Arguments[6] {
-			return errors.New("repo_view MCP Git executable must be an absolute canonical path")
+			return errors.New("scopesifter MCP Git executable must be an absolute canonical path")
 		}
 		if !validSHA256(server.Arguments[8]) {
-			return errors.New("repo_view MCP Git executable digest is invalid")
+			return errors.New("scopesifter MCP Git executable digest is invalid")
 		}
 		return nil
 	}
 	if server.Arguments[5] != "--head" ||
 		server.Arguments[7] != "--changed-state-cache" ||
 		server.Arguments[9] != "--changed-state-cache-sha256" {
-		return errors.New("repo_view MCP cache arguments are not canonical")
+		return errors.New("scopesifter MCP cache arguments are not canonical")
 	}
 	if !validGitObjectID(server.Arguments[6]) {
-		return errors.New("repo_view MCP cache head revision is invalid")
+		return errors.New("scopesifter MCP cache head revision is invalid")
 	}
 	if !validText(server.Arguments[8]) ||
 		!filepath.IsAbs(server.Arguments[8]) ||
 		filepath.Clean(server.Arguments[8]) != server.Arguments[8] {
-		return errors.New("repo_view MCP cache must be an absolute canonical path")
+		return errors.New("scopesifter MCP cache must be an absolute canonical path")
 	}
 	if !validSHA256(server.Arguments[10]) {
-		return errors.New("repo_view MCP cache digest is invalid")
+		return errors.New("scopesifter MCP cache digest is invalid")
 	}
 	return nil
 }

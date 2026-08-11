@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
 )
 
 type memoryTaskArtifactAuthority struct {

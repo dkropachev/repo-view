@@ -548,11 +548,10 @@ func validCatalogUnbiasedText(value string, maximum int) bool {
 	for index, word := range words {
 		switch word {
 		case "baseline", "candidate", "treatment", "arm", "order", "token", "tokens",
-			"tool", "tools", "toolcall", "toolcalls", "mcp", "repoview", "scopesifter":
+			"tool", "tools", "toolcall", "toolcalls", "mcp", "navigator", "scopesifter":
 			return false
 		}
-		if index > 0 && ((words[index-1] == "repo" && word == "view") ||
-			(words[index-1] == "scope" && word == "sifter")) {
+		if index > 0 && words[index-1] == "scope" && word == "sifter" {
 			return false
 		}
 	}

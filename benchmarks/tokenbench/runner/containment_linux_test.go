@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 	"golang.org/x/sys/unix"
 )
 
@@ -487,7 +487,7 @@ func TestCommonFD5IsReadOnlySealedExecutableImage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	common := filepath.Join(t.TempDir(), "repo-view")
+	common := filepath.Join(t.TempDir(), "scopesifter")
 	if err := os.WriteFile(common, content, 0o555); err != nil {
 		t.Fatal(err)
 	}

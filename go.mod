@@ -1,4 +1,4 @@
-module github.com/dkropachev/repo-view
+module github.com/scopesifter/scopesifter
 
 go 1.26
 

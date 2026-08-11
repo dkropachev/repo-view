@@ -9,7 +9,7 @@ Baseline and candidate must be identical in every semantic input and effective
 configuration value except one:
 
 - baseline has zero MCP registrations;
-- candidate has exactly one required, read-only registration named `repo_view`.
+- candidate has exactly one required, read-only registration named `scopesifter`.
 
 The resulting candidate MCP declarations are part of that registration. No
 other arm difference is allowed.
@@ -18,7 +18,7 @@ Do not add candidate-only prompt text, navigation hints, answer facts, tool-use
 requirements, wrappers, executable paths, descriptors, environment variables,
 `PATH` entries, permissions, timeouts, model/reasoning settings, feature flags,
 source preparation, runtime directories, retry rules, or capture behavior. Do
-not make repo-view available as a candidate-only shell executable. If a harness
+not make scopesifter available as a candidate-only shell executable. If a harness
 needs any such difference, it is a different experiment and must not produce
 tokenbench evidence.
 
@@ -50,7 +50,7 @@ tokenbench evidence.
 - Reject unknown/duplicate/trailing JSON and noncanonical encodings where the
   schema requires canonical bytes. Bound every string, list, object, raw stream,
   recursion depth, and statistical work factor before allocation or execution.
-- Central code alone creates the `repo_view` registration and candidate arm.
+- Central code alone creates the `scopesifter` registration and candidate arm.
   `Adapter.Build` receives the MCP-free common invocation exactly once;
   candidate is a central deep clone plus only `MCPArguments(registration)`.
 - `ResolveRequest` and `MCPArguments` must not carry an arm label, prompt/rubric
@@ -158,9 +158,10 @@ tokenbench evidence.
 - Use typed errors or concrete private state for security decisions. Error text
   is diagnostic, not authority. Avoid errors that reveal secret/path contents
   unnecessarily.
-- Do not edit or regenerate `experiments/lsp-replacement` evidence to make it
-  conform. Legacy replay must work on staging copies and preserve source bytes.
-- Update schema, golden, design, migration, and adapter documentation in the
+- Do not translate or republish evidence created under another product
+  identity. Current loaders must accept only the current ScopeSifter-bound
+  contracts; historical bytes remain in Git history.
+- Update schema, golden, design, and adapter documentation in the
   same change as a contract modification. Label unsupported behavior plainly.
 - Add positive, negative, corruption, aliasing, mutation-race, cleanup-failure,
   and serialization tests at the affected boundary. Tests must not require a

@@ -11,10 +11,10 @@ import (
 	"reflect"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
 	"github.com/pelletier/go-toml/v2"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
 )
 
 func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) (_ []byte, resultErr error) {
@@ -107,13 +107,13 @@ func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) (_ []byte, 
 
 func compareEffectiveConfigs(baseline, candidate armSnapshot) error {
 	if len(baseline.configDelta) != 0 {
-		return errors.New("baseline effective config contains repo_view configuration")
+		return errors.New("baseline effective config contains scopesifter configuration")
 	}
 	if len(candidate.configDelta) == 0 {
-		return errors.New("candidate effective config omitted repo_view configuration")
+		return errors.New("candidate effective config omitted scopesifter configuration")
 	}
 	if !bytes.Equal(baseline.configCommon, candidate.configCommon) {
-		return errors.New("paired Codex effective configuration drifted outside repo_view")
+		return errors.New("paired Codex effective configuration drifted outside scopesifter")
 	}
 	return nil
 }
@@ -152,33 +152,33 @@ func normalizeEffectiveConfig(
 	if !ok || servers == nil {
 		return nil, nil, errors.New("effective config MCP registry is not a table")
 	}
-	repoViewValue, hasRepoView := servers["repo_view"]
-	delete(servers, "repo_view")
+	scopeSifterValue, hasScopeSifter := servers["scopesifter"]
+	delete(servers, "scopesifter")
 	if len(servers) != 0 {
-		return nil, nil, errors.New("effective config contains an MCP server other than repo_view")
+		return nil, nil, errors.New("effective config contains an MCP server other than scopesifter")
 	}
 
 	var delta []byte
 	switch arm {
 	case genericrunner.BaselineArm:
-		if hasRepoView || registration != nil {
-			return nil, nil, errors.New("baseline effective config contains repo_view")
+		if hasScopeSifter || registration != nil {
+			return nil, nil, errors.New("baseline effective config contains scopesifter")
 		}
 	case genericrunner.CandidateArm:
-		if !hasRepoView || registration == nil {
-			return nil, nil, errors.New("candidate effective config omitted repo_view")
+		if !hasScopeSifter || registration == nil {
+			return nil, nil, errors.New("candidate effective config omitted scopesifter")
 		}
-		repoView, ok := repoViewValue.(map[string]any)
-		if !ok || repoView == nil {
-			return nil, nil, errors.New("candidate repo_view effective config is not a table")
+		scopeSifter, ok := scopeSifterValue.(map[string]any)
+		if !ok || scopeSifter == nil {
+			return nil, nil, errors.New("candidate scopesifter effective config is not a table")
 		}
-		if err := validateEffectiveRepoView(repoView, *registration); err != nil {
+		if err := validateEffectiveScopeSifter(scopeSifter, *registration); err != nil {
 			return nil, nil, err
 		}
 		var err error
-		delta, err = json.Marshal(repoView)
+		delta, err = json.Marshal(scopeSifter)
 		if err != nil {
-			return nil, nil, fmt.Errorf("canonicalize repo_view effective config: %w", err)
+			return nil, nil, fmt.Errorf("canonicalize scopesifter effective config: %w", err)
 		}
 	default:
 		return nil, nil, fmt.Errorf("unsupported arm %q", arm)
@@ -190,7 +190,7 @@ func normalizeEffectiveConfig(
 	return common, delta, nil
 }
 
-func validateEffectiveRepoView(
+func validateEffectiveScopeSifter(
 	observed map[string]any,
 	registration harness.MCPServer,
 ) error {
@@ -209,14 +209,14 @@ func validateEffectiveRepoView(
 	}
 	canonicalObserved, err := normalizeTOMLValue(observed)
 	if err != nil {
-		return fmt.Errorf("normalize repo_view effective config: %w", err)
+		return fmt.Errorf("normalize scopesifter effective config: %w", err)
 	}
 	canonicalWanted, err := normalizeTOMLValue(wanted)
 	if err != nil {
 		return err
 	}
 	if !reflect.DeepEqual(canonicalObserved, canonicalWanted) {
-		return errors.New("candidate effective repo_view config differs from the approved registration")
+		return errors.New("candidate effective scopesifter config differs from the approved registration")
 	}
 	return nil
 }

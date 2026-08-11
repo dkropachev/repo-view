@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 func TestDecodeValidatesJSONLAgainstProviderEvidence(t *testing.T) {
@@ -20,7 +20,7 @@ func TestDecodeValidatesJSONLAgainstProviderEvidence(t *testing.T) {
 	want := harness.Observation{
 		FinalAnswer: "The answer is 42.",
 		Model:       "gpt-5.4",
-		ToolCalls:   []string{"exec_command", "repo_view.inspect"},
+		ToolCalls:   []string{"exec_command", "scopesifter.inspect"},
 		Usage: harness.Usage{
 			InputTokens:         10,
 			CachedInputTokens:   2,
@@ -66,7 +66,7 @@ func TestDecodeRejectsProviderTotalDuplicatedInsideV3Usage(t *testing.T) {
 				`"provider_total_tokens": `+value+`, "input_tokens": 6,`,
 			)
 			if _, err := adapterFixture(t).Decode(context.Background(), execution); err == nil {
-				t.Fatal("Responses trace v3 accepted a provider total inside its usage object")
+				t.Fatal("Responses trace v4 accepted a provider total inside its usage object")
 			}
 		})
 	}
@@ -433,8 +433,8 @@ func TestParseResponsesTraceUsesDecoderValidation(t *testing.T) {
 		t.Fatalf("unexpected parsed trace: %+v", trace)
 	}
 	corrupt := replaceExactlyOnce(t, raw,
-		`"schema_version": "tokenbench.codex.responses-trace/v3",`,
-		`"schema_version": "tokenbench.codex.responses-trace/v3", "unknown": true,`)
+		`"schema_version": "tokenbench.codex.responses-trace/v4",`,
+		`"schema_version": "tokenbench.codex.responses-trace/v4", "unknown": true,`)
 	if _, err := ParseResponsesTrace(corrupt); err == nil {
 		t.Fatal("ParseResponsesTrace accepted an unknown field")
 	}
@@ -614,7 +614,7 @@ func TestDecodeAcceptsReportedMCPFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(observation.ToolCalls, []string{"exec_command", "repo_view.inspect"}) {
+	if !reflect.DeepEqual(observation.ToolCalls, []string{"exec_command", "scopesifter.inspect"}) {
 		t.Fatalf("failed provider-issued tool call was lost: %+v", observation)
 	}
 }
@@ -633,14 +633,14 @@ func TestDecodeAcceptsPinnedMCPResourceSupportCall(t *testing.T) {
 	})
 	started := `{"type":"item.started","item":{"id":"resource-1","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":null,"error":null,"status":"in_progress"}}` + "\n"
 	completed := `{"type":"item.completed","item":{"id":"resource-1","type":"mcp_tool_call","server":"codex","tool":"list_mcp_resources","arguments":{},"result":{"content":[],"_meta":null,"structured_content":null},"error":null,"status":"completed"}}` + "\n"
-	needle := `{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","server":"repo_view","tool":"inspect","arguments":{"line":1,"path":"README.md"},"result":{"content":[],"_meta":null,"structured_content":{"text":"README"}},"error":null,"status":"completed"}}` + "\n"
+	needle := `{"type":"item.completed","item":{"id":"mcp-1","type":"mcp_tool_call","server":"scopesifter","tool":"inspect","arguments":{"line":1,"path":"README.md"},"result":{"content":[],"_meta":null,"structured_content":{"text":"README"}},"error":null,"status":"completed"}}` + "\n"
 	execution.Stdout = replaceExactlyOnce(t, execution.Stdout, needle, needle+started+completed)
 
 	observation, err := adapterFixture(t).Decode(context.Background(), execution)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"exec_command", "repo_view.inspect", "list_mcp_resources"}
+	want := []string{"exec_command", "scopesifter.inspect", "list_mcp_resources"}
 	if !reflect.DeepEqual(observation.ToolCalls, want) {
 		t.Fatalf("support tool calls = %q, want %q", observation.ToolCalls, want)
 	}
@@ -694,14 +694,14 @@ func TestDecodeRejectsInvalidArtifacts(t *testing.T) {
 		{"trace duplicate key", func(t *testing.T, value *harness.RawExecution) {
 			t.Helper()
 			value.Artifacts[0].Data = replaceExactlyOnce(t, value.Artifacts[0].Data,
-				`"schema_version": "tokenbench.codex.responses-trace/v3",`,
-				`"schema_version": "tokenbench.codex.responses-trace/v3", "schema_version": "tokenbench.codex.responses-trace/v3",`)
+				`"schema_version": "tokenbench.codex.responses-trace/v4",`,
+				`"schema_version": "tokenbench.codex.responses-trace/v4", "schema_version": "tokenbench.codex.responses-trace/v4",`)
 		}},
 		{"trace unknown field", func(t *testing.T, value *harness.RawExecution) {
 			t.Helper()
 			value.Artifacts[0].Data = replaceExactlyOnce(t, value.Artifacts[0].Data,
-				`"schema_version": "tokenbench.codex.responses-trace/v3",`,
-				`"schema_version": "tokenbench.codex.responses-trace/v3", "unknown": true,`)
+				`"schema_version": "tokenbench.codex.responses-trace/v4",`,
+				`"schema_version": "tokenbench.codex.responses-trace/v4", "unknown": true,`)
 		}},
 		{"unsupported provider model", func(_ *testing.T, value *harness.RawExecution) {
 			value.Artifacts[0].Data = []byte(strings.ReplaceAll(

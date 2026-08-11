@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/schemas/artifact-manifest-v2.schema.json",
+  "title": "Tokenbench trusted execution-artifact manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provenance",
+    "codex",
+    "scopesifter",
+    "static_git",
+    "static_bash",
+    "utilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "tokenbench.artifact-manifest/v2"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "codex": {
+      "$ref": "#/$defs/artifact"
+    },
+    "scopesifter": {
+      "$ref": "#/$defs/artifact"
+    },
+    "static_git": {
+      "$ref": "#/$defs/artifact"
+    },
+    "static_bash": {
+      "$ref": "#/$defs/artifact"
+    },
+    "utilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rg",
+        "sed",
+        "awk",
+        "find",
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "cut",
+        "tr",
+        "cat",
+        "ls",
+        "grep",
+        "xargs"
+      ],
+      "properties": {
+        "rg": { "$ref": "#/$defs/artifact" },
+        "sed": { "$ref": "#/$defs/artifact" },
+        "awk": { "$ref": "#/$defs/artifact" },
+        "find": { "$ref": "#/$defs/artifact" },
+        "head": { "$ref": "#/$defs/artifact" },
+        "tail": { "$ref": "#/$defs/artifact" },
+        "wc": { "$ref": "#/$defs/artifact" },
+        "sort": { "$ref": "#/$defs/artifact" },
+        "cut": { "$ref": "#/$defs/artifact" },
+        "tr": { "$ref": "#/$defs/artifact" },
+        "cat": { "$ref": "#/$defs/artifact" },
+        "ls": { "$ref": "#/$defs/artifact" },
+        "grep": { "$ref": "#/$defs/artifact" },
+        "xargs": { "$ref": "#/$defs/artifact" }
+      }
+    }
+  },
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\\\).+$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_uri",
+        "source_revision",
+        "recipe_sha256",
+        "builder_image_digest"
+      ],
+      "properties": {
+        "source_uri": {
+          "type": "string",
+          "format": "uri",
+          "minLength": 1,
+          "maxLength": 2048
+        },
+        "source_revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\s\\u0000]+$"
+        },
+        "recipe_sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "builder_image_digest": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

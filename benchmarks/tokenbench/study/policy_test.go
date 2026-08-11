@@ -118,7 +118,7 @@ func TestPolicyCanonicalGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.ReadFile(filepath.Join("testdata", "study-policy-v2.json"))
+	want, err := os.ReadFile(filepath.Join("testdata", "study-policy-v3.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -393,15 +393,15 @@ func TestVersionedSchemasAreJSONDocuments(t *testing.T) {
 		t.Fatalf("schema count = %d, want 9", len(entries))
 	}
 	want := map[string]bool{
-		"blind-evaluation-v2.schema.json":       true,
-		"evaluator-output-v2.schema.json":       true,
+		"blind-evaluation-v3.schema.json":       true,
+		"evaluator-output-v3.schema.json":       true,
 		"objective-code-quality-v1.schema.json": true,
-		"study-analysis-v2.schema.json":         true,
-		"study-inputs-v1.schema.json":           true,
-		"study-policy-v2.schema.json":           true,
+		"study-analysis-v3.schema.json":         true,
+		"study-inputs-v2.schema.json":           true,
+		"study-policy-v3.schema.json":           true,
 		"task-bundle-v1.schema.json":            true,
 		"task-catalog-v1.schema.json":           true,
-		"verified-quality-v2.schema.json":       true,
+		"verified-quality-v3.schema.json":       true,
 	}
 	for _, entry := range entries {
 		t.Run(entry.Name(), func(t *testing.T) {

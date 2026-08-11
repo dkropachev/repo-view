@@ -11,9 +11,9 @@ func TestTreatmentNeutralityRejectsNamesPoliciesAndHints(t *testing.T) {
 		developer string
 		prompt    string
 	}{
-		{prompt: "Use repo_view to inspect the implementation."},
-		{prompt: "Use repo--view to inspect the implementation."},
-		{prompt: "Call the repo-view MCP server first."},
+		{prompt: "Use scopesifter to inspect the implementation."},
+		{prompt: "Use scope--sifter to inspect the implementation."},
+		{prompt: "Call the scopesifter MCP server first."},
 		{prompt: "Call the M-C-P server first."},
 		{prompt: "Explain the Model Context Protocol integration."},
 		{prompt: "You have access to additional tools."},

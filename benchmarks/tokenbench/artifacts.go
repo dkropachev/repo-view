@@ -17,15 +17,15 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 const (
 	// ArtifactManifestSchemaVersion is the canonical authored execution bundle
 	// schema. The JSON encoding must exactly equal json.Marshal of this model.
-	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v1"
-	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v1"
-	ArtifactManifestFilename      = "tokenbench-artifacts-v1.json"
+	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v2"
+	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v2"
+	ArtifactManifestFilename      = "tokenbench-artifacts-v2.json"
 
 	maximumArtifactManifestBytes = 64 << 10
 	maximumArtifactFileBytes     = int64(256 << 20)
@@ -36,7 +36,7 @@ const (
 
 // trustedArtifactManifestSHA256 is set only at link time, for example:
 //
-//	-X github.com/dkropachev/repo-view/benchmarks/tokenbench.trustedArtifactManifestSHA256=<sha256>
+//	-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<sha256>
 //
 // A blank or malformed value disables publishable artifact preparation. It is
 // intentionally unexported: runtime callers cannot widen the binary's policy.
@@ -76,19 +76,19 @@ type ArtifactUtilities struct {
 	Xargs   ArtifactFile `json:"xargs"`
 }
 
-// ArtifactManifest is the canonical strict v1 execution-artifact manifest.
+// ArtifactManifest is the canonical strict v2 execution-artifact manifest.
 // Every executable must be a distinct static ELF image.
 type ArtifactManifest struct {
 	SchemaVersion string             `json:"schema_version"`
 	Provenance    ArtifactProvenance `json:"provenance"`
 	Codex         ArtifactFile       `json:"codex"`
-	RepoView      ArtifactFile       `json:"repo_view"`
+	ScopeSifter   ArtifactFile       `json:"scopesifter"`
 	StaticGit     ArtifactFile       `json:"static_git"`
 	StaticBash    ArtifactFile       `json:"static_bash"`
 	Utilities     ArtifactUtilities  `json:"utilities"`
 }
 
-// ArtifactBundleAudit is serialized into publishable v3 plans. RawManifest is
+// ArtifactBundleAudit is serialized into publishable v4 plans. RawManifest is
 // the exact authored byte sequence; Manifest and Provenance make review
 // structured without weakening the byte commitment.
 type ArtifactBundleAudit struct {
@@ -108,7 +108,7 @@ type artifactRole struct {
 func (manifest ArtifactManifest) roles() []artifactRole {
 	return []artifactRole{
 		{"codex", manifest.Codex},
-		{"repo-view", manifest.RepoView},
+		{"scopesifter", manifest.ScopeSifter},
 		{"static Git", manifest.StaticGit},
 		{"static Bash", manifest.StaticBash},
 		{"rg", manifest.Utilities.Ripgrep},
@@ -246,11 +246,11 @@ type preparedArtifactBundle struct {
 }
 
 type artifactOriginSet struct {
-	Codex     executionsnapshot.FileOrigin
-	RepoView  executionsnapshot.FileOrigin
-	Git       executionsnapshot.FileOrigin
-	Bash      executionsnapshot.FileOrigin
-	Utilities executionsnapshot.UtilityOrigins
+	Codex       executionsnapshot.FileOrigin
+	ScopeSifter executionsnapshot.FileOrigin
+	Git         executionsnapshot.FileOrigin
+	Bash        executionsnapshot.FileOrigin
+	Utilities   executionsnapshot.UtilityOrigins
 }
 
 // LoadArtifactBundle strictly loads the code-owned manifest filename below an
@@ -435,7 +435,7 @@ func verifyArtifactFiles(
 		verified[role.name] = origin
 	}
 	return artifactOriginSet{
-		Codex: verified["codex"], RepoView: verified["repo-view"],
+		Codex: verified["codex"], ScopeSifter: verified["scopesifter"],
 		Git: verified["static Git"], Bash: verified["static Bash"],
 		Utilities: executionsnapshot.UtilityOrigins{
 			Ripgrep: verified["rg"], Sed: verified["sed"], Awk: verified["awk"],
@@ -587,7 +587,7 @@ func (audit ArtifactBundleAudit) validateBinding(origins executionsnapshot.Origi
 		}
 	}
 	actual := map[string]executionsnapshot.FileOrigin{
-		"codex": origins.Codex, "repo-view": origins.RepoView,
+		"codex": origins.Codex, "scopesifter": origins.ScopeSifter,
 		"static Git": origins.Git, "static Bash": origins.Bash,
 		"rg": origins.Utilities.Ripgrep, "sed": origins.Utilities.Sed,
 		"awk": origins.Utilities.Awk, "find": origins.Utilities.Find,

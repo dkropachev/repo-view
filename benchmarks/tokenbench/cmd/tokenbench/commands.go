@@ -12,20 +12,20 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
-	runnercodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner/codex"
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	runnercodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 const (
-	verifyResultSchema = "tokenbench.verify-result/v1"
-	runResultSchema    = "tokenbench.run-result/v1"
-	replayResultSchema = "tokenbench.replay-result/v1"
+	verifyResultSchema = "tokenbench.verify-result/v2"
+	runResultSchema    = "tokenbench.run-result/v2"
+	replayResultSchema = "tokenbench.replay-result/v2"
 	closeTimeout       = 15 * time.Second
 	maxCASObjectBytes  = int64(harness.MaxArtifactBytes)
 )
@@ -88,15 +88,15 @@ func planCommand(
 	flags := flag.NewFlagSet("plan", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	suitePath := flags.String("suite", "", "path to a built-in Codex suite JSON document")
-	repoViewPath := flags.String("repo-view-mcp", "", "absolute repo-view MCP executable path")
+	scopeSifterPath := flags.String("scopesifter-mcp", "", "absolute scopesifter MCP executable path")
 	stateRoot := flags.String("state-root", "", "absolute runtime root represented in this audit plan")
 	outputPath := flags.String("out", "-", "new exclusive plan path, or - for stdout")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *suitePath == "" || *repoViewPath == "" || *stateRoot == "" || flags.NArg() != 0 {
+	if *suitePath == "" || *scopeSifterPath == "" || *stateRoot == "" || flags.NArg() != 0 {
 		return errors.New(
-			"plan requires --suite PATH, --repo-view-mcp PATH, and --state-root PATH",
+			"plan requires --suite PATH, --scopesifter-mcp PATH, and --state-root PATH",
 		)
 	}
 	root, err := requireAbsoluteClean(*stateRoot, "plan state root")
@@ -114,7 +114,7 @@ func planCommand(
 	if err != nil {
 		return err
 	}
-	pair, err := prepareCodexPair(ctx, loaded, adapter, *repoViewPath)
+	pair, err := prepareCodexPair(ctx, loaded, adapter, *scopeSifterPath)
 	if err != nil {
 		return err
 	}
@@ -572,18 +572,18 @@ func prepareCodexPair(
 	ctx context.Context,
 	loaded tokenbench.LoadedSuite,
 	adapter *harnesscodex.Adapter,
-	repoViewPath string,
+	scopeSifterPath string,
 ) (tokenbench.Pair, error) {
 	prepared, err := tokenbench.PrepareSuite(ctx, loaded, adapter)
 	if err != nil {
 		return tokenbench.Pair{}, fmt.Errorf("prepare built-in Codex suite: %w", err)
 	}
-	repoViewAbsolute, err := filepath.Abs(repoViewPath)
+	scopeSifterAbsolute, err := filepath.Abs(scopeSifterPath)
 	if err != nil {
-		return tokenbench.Pair{}, fmt.Errorf("resolve repo-view MCP executable: %w", err)
+		return tokenbench.Pair{}, fmt.Errorf("resolve scopesifter MCP executable: %w", err)
 	}
-	repoViewAbsolute = filepath.Clean(repoViewAbsolute)
-	tool, err := tokenbench.NewRepoViewTool(repoViewAbsolute)
+	scopeSifterAbsolute = filepath.Clean(scopeSifterAbsolute)
+	tool, err := tokenbench.NewScopeSifterTool(scopeSifterAbsolute)
 	if err != nil {
 		return tokenbench.Pair{}, err
 	}
@@ -651,16 +651,16 @@ func executeCodexPair(
 			pair.CloseExecutionSnapshot(),
 		)
 	}
-	repoViewSHA256, err := tokenbench.FileSHA256(executionInputs.RepoViewExecutable)
+	scopeSifterSHA256, err := tokenbench.FileSHA256(executionInputs.ScopeSifterExecutable)
 	if err != nil {
-		return closePairOnError(fmt.Errorf("pin common repo-view executable: %w", err))
+		return closePairOnError(fmt.Errorf("pin common scopesifter executable: %w", err))
 	}
 	executor, err := runner.NewConformant(runner.Config{
 		Lifecycle:                 lifecycle,
 		ReadOnlyPaths:             executionInputs.ReadOnlyPaths,
 		ExecutablePaths:           executionInputs.ExecutablePaths,
-		CommonMCPExecutable:       executionInputs.RepoViewExecutable,
-		CommonMCPExecutableSHA256: repoViewSHA256,
+		CommonMCPExecutable:       executionInputs.ScopeSifterExecutable,
+		CommonMCPExecutableSHA256: scopeSifterSHA256,
 	})
 	if err != nil {
 		return closePairOnError(err)

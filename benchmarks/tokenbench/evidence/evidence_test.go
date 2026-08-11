@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {
@@ -35,13 +35,13 @@ func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {
 		capture.Run.Plan.SuiteSHA256 != run.Plan.SuiteSHA256 {
 		t.Fatalf("capture did not round trip: %+v", capture)
 	}
-	if CaptureSchemaVersion != "tokenbench.capture/v4" ||
+	if CaptureSchemaVersion != "tokenbench.capture/v5" ||
 		capture.Manifest.SchemaVersion != CaptureSchemaVersion ||
-		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v4+json" ||
-		capture.Run.SchemaVersion != "tokenbench.run/v2" ||
+		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v5+json" ||
+		capture.Run.SchemaVersion != "tokenbench.run/v3" ||
 		capture.Manifest.Baseline.Observation.MediaType !=
 			"application/vnd.tokenbench.observation.v2+json" {
-		t.Fatalf("capture v4 graph identities = %+v", capture)
+		t.Fatalf("capture v5 graph identities = %+v", capture)
 	}
 	if total := capture.Run.Baseline.Observation.Usage.ProviderTotalTokens; total == nil || *total != 12 ||
 		total == run.Baseline.Observation.Usage.ProviderTotalTokens {
@@ -92,12 +92,12 @@ func TestReplayIsDeterministicAndDoesNotMutateParent(t *testing.T) {
 	if replay.Manifest.Parent != parent || replay.Baseline == nil || replay.Candidate == nil {
 		t.Fatalf("invalid replay: %+v", replay)
 	}
-	if ReplaySchemaVersion != "tokenbench.replay/v2" ||
+	if ReplaySchemaVersion != "tokenbench.replay/v3" ||
 		replay.Manifest.SchemaVersion != ReplaySchemaVersion ||
-		replay.Subject.MediaType != "application/vnd.tokenbench.replay.v2+json" ||
+		replay.Subject.MediaType != "application/vnd.tokenbench.replay.v3+json" ||
 		replay.Manifest.Candidate.Observation.MediaType !=
 			"application/vnd.tokenbench.observation.v2+json" {
-		t.Fatalf("replay v2 graph identities = %+v", replay)
+		t.Fatalf("replay v3 graph identities = %+v", replay)
 	}
 	if total := replay.Candidate.Usage.ProviderTotalTokens; total == nil || *total != 10 {
 		t.Fatalf("replay provider total did not round trip: %v", total)
@@ -119,19 +119,19 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldCaptureStatement := capture.Attestation.Statement
-	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v3+json"
+	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v4+json"
 	if err := validateAttestationStatement(oldCaptureStatement); err == nil {
-		t.Fatal("capture.v3 subject media type was accepted as capture.v4")
+		t.Fatal("capture.v4 subject media type was accepted as capture.v5")
 	}
 
 	oldCapture := capture.Manifest
-	oldCapture.SchemaVersion = "tokenbench.capture/v3"
+	oldCapture.SchemaVersion = "tokenbench.capture/v4"
 	oldCaptureRoot := putTestAttestedSubject(
 		t, store, signer, CaptureBundle, captureMediaType, oldCapture, nil,
 	)
 	if _, err := LoadCapture(context.Background(), store, oldCaptureRoot, verifier); err == nil ||
 		!strings.Contains(err.Error(), "unexpected capture schema") {
-		t.Fatalf("capture/v3 rejection = %v", err)
+		t.Fatalf("capture/v4 rejection = %v", err)
 	}
 
 	oldCaptureObservation := capture.Manifest
@@ -146,7 +146,7 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatalf("capture observation/v1 rejection = %v", err)
 	}
 	oldDecoderIdentity := decoderIdentityForRun(run)
-	oldDecoderIdentity.Version = "tokenbench.codex-adapter/codex-cli-v0.144.0/v2"
+	oldDecoderIdentity.Version = "tokenbench.codex-adapter/codex-cli-v0.144.0/v3"
 	oldDecoderIdentity.Schema = "codex.exec-jsonl/v0.144.0+responses-trace/v3"
 	if _, err := replayCaptureWithDecoder(
 		context.Background(), store, captureRoot, verifier,
@@ -167,19 +167,19 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldReplayStatement := replay.Attestation.Statement
-	oldReplayStatement.Subject.MediaType = "application/vnd.tokenbench.replay.v1+json"
+	oldReplayStatement.Subject.MediaType = "application/vnd.tokenbench.replay.v2+json"
 	if err := validateAttestationStatement(oldReplayStatement); err == nil {
-		t.Fatal("replay.v1 subject media type was accepted as replay.v2")
+		t.Fatal("replay.v2 subject media type was accepted as replay.v3")
 	}
 	oldReplay := replay.Manifest
-	oldReplay.SchemaVersion = "tokenbench.replay/v1"
+	oldReplay.SchemaVersion = "tokenbench.replay/v2"
 	oldReplayRoot := putTestAttestedSubject(
 		t, store, signer, ReplayBundle, replayMediaType, oldReplay,
 		[]cas.ObjectRef{captureRoot},
 	)
 	if _, err := LoadReplay(context.Background(), store, oldReplayRoot, verifier); err == nil ||
 		!strings.Contains(err.Error(), "unexpected replay schema") {
-		t.Fatalf("replay/v1 rejection = %v", err)
+		t.Fatalf("replay/v2 rejection = %v", err)
 	}
 
 	oldReplayObservation := replay.Manifest
@@ -528,9 +528,9 @@ func validRun(t *testing.T) tokenbench.Run {
 	candidate := common
 	candidate.MCPServers = []harness.MCPServer{{
 		Environment:      map[string]string{},
-		Name:             "repo_view",
-		Command:          "/usr/bin/repo-view",
-		ExecutableSHA256: tokenbench.SHA256([]byte("repo-view")),
+		Name:             "scopesifter",
+		Command:          "/usr/bin/scopesifter",
+		ExecutableSHA256: tokenbench.SHA256([]byte("scopesifter")),
 		Arguments: []string{
 			"mcp",
 			"--root", "/source",
@@ -632,7 +632,7 @@ func validRun(t *testing.T) tokenbench.Run {
 	candidateObservation := harness.Observation{
 		FinalAnswer: "candidate answer",
 		Model:       identity.Model,
-		ToolCalls:   []string{"repo_view.inspect"},
+		ToolCalls:   []string{"scopesifter.inspect"},
 		Usage: harness.Usage{
 			InputTokens: 8, OutputTokens: 2,
 			ProviderTotalTokens: &candidateProviderTotal,
@@ -669,7 +669,7 @@ func validRun(t *testing.T) tokenbench.Run {
 		},
 		ExecutorIdentity: tokenbench.ExecutorIdentity{
 			Kind:         "process",
-			Version:      "tokenbench.process-executor/v2",
+			Version:      "tokenbench.process-executor/v3",
 			ConfigSHA256: tokenbench.SHA256([]byte("executor")),
 		},
 		SchemaVersion: tokenbench.RunSchemaVersion,

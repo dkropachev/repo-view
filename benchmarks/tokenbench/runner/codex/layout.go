@@ -13,7 +13,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (
@@ -24,7 +24,7 @@ const (
 	OfflineLocalProxyCapability = harness.OfflineLocalProxyCapability
 
 	responsesPath = "/v1/responses"
-	layoutSchema  = "tokenbench.codex-runtime-layout/v3"
+	layoutSchema  = "tokenbench.codex-runtime-layout/v4"
 )
 
 // RuntimeLayout is the code-owned, publishable launch layout shared by the

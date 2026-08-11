@@ -231,7 +231,7 @@ func originFixture(t *testing.T) OriginInputs {
 			Base: strings.Repeat("b", 40), TreeSHA256: strings.Repeat("c", 64),
 			GitMetadataSHA256: strings.Repeat("d", 64),
 		},
-		file("codex"), file("repo-view"), file("git"), file("bash"),
+		file("codex"), file("scopesifter"), file("git"), file("bash"),
 		UtilityOrigins{
 			Ripgrep: file("rg"), Sed: file("sed"), Awk: file("awk"),
 			Find: file("find"), Head: file("head"), Tail: file("tail"),
@@ -287,7 +287,7 @@ func executionFixture(t *testing.T) ExecutionInputs {
 	}
 	filePaths := append([]string{
 		filepath.Join(root, "tools", "codex"),
-		filepath.Join(root, "tools", "repo-view"),
+		filepath.Join(root, "tools", "scopesifter"),
 		filepath.Join(root, "tools", "verifier-git"),
 		filepath.Join(root, "tools", "runner-arm-init"),
 		filepath.Join(root, "toolbox", "bash"),
@@ -327,7 +327,7 @@ func executionFixture(t *testing.T) ExecutionInputs {
 		SourceRoot:            filepath.Join(root, "source"),
 		GitMetadataRoot:       filepath.Join(root, "source", ".git"),
 		CodexExecutable:       filepath.Join(root, "tools", "codex"),
-		RepoViewExecutable:    filepath.Join(root, "tools", "repo-view"),
+		ScopeSifterExecutable: filepath.Join(root, "tools", "scopesifter"),
 		VerifierGitExecutable: filepath.Join(root, "tools", "verifier-git"),
 		BashExecutable:        filepath.Join(root, "toolbox", "bash"),
 		Utilities:             utilities, ToolboxRoot: filepath.Join(root, "toolbox"),
@@ -349,7 +349,7 @@ func executionFixture(t *testing.T) ExecutionInputs {
 		ReadOnlyPaths: []string{filepath.Join(root, "source"), cachePath},
 		ExecutablePaths: append([]string{
 			filepath.Join(root, "tools", "codex"),
-			filepath.Join(root, "tools", "repo-view"),
+			filepath.Join(root, "tools", "scopesifter"),
 			filepath.Join(root, "toolbox", "bash"),
 		}, utilities.values()...),
 	}

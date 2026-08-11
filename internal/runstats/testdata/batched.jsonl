@@ -1,2 +1,2 @@
-{"type":"item.started","item":{"id":"batch-1","type":"command_execution","command":"/usr/bin/zsh -lc 'repo-view find Alpha --root . --json; repo-view find Beta --root . --json'","status":"in_progress"}}
-{"type":"item.completed","item":{"id":"batch-1","type":"command_execution","command":"/usr/bin/zsh -lc 'repo-view find Alpha --root . --json; repo-view find Beta --root . --json'","aggregated_output":"[]\n[]","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"batch-1","type":"command_execution","command":"/usr/bin/zsh -lc 'scopesifter find Alpha --root . --json; scopesifter find Beta --root . --json'","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"batch-1","type":"command_execution","command":"/usr/bin/zsh -lc 'scopesifter find Alpha --root . --json; scopesifter find Beta --root . --json'","aggregated_output":"[]\n[]","exit_code":0,"status":"completed"}}

@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
 
@@ -33,7 +33,7 @@ func TestValidateAndPlanRejectNonCodexAdapter(t *testing.T) {
 		t.Fatal(err)
 	}
 	harnessPath := commandTestExecutable(t, directory, "fake-harness", "harness")
-	repoViewPath := commandTestExecutable(t, directory, "repo-view", "repo-view")
+	scopeSifterPath := commandTestExecutable(t, directory, "scopesifter", "scopesifter")
 	gitExecutable, gitSHA256 := commandTestGitIdentity(t)
 	prompt := []byte("Explain the repository change.\n")
 	promptPath := filepath.Join(directory, "prompt.md")
@@ -75,7 +75,7 @@ func TestValidateAndPlanRejectNonCodexAdapter(t *testing.T) {
 	for _, arguments := range [][]string{
 		{"validate", "--suite", suitePath},
 		{
-			"plan", "--suite", suitePath, "--repo-view-mcp", repoViewPath,
+			"plan", "--suite", suitePath, "--scopesifter-mcp", scopeSifterPath,
 			"--state-root", filepath.Join(directory, "planned-runtime"),
 		},
 	} {
@@ -95,7 +95,7 @@ func TestValidateRejectsCandidateOverride(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := []byte(`{
-  "schema_version":"tokenbench.suite/v1",
+  "schema_version":"tokenbench.suite/v2",
   "candidate_prompt":"answer key"
 }`)
 	suitePath := filepath.Join(directory, "suite.json")
@@ -135,9 +135,9 @@ func TestCLIRejectsSerializedPlanAndExternalAdapterAuthority(t *testing.T) {
 			want: "flag provided but not defined: -plan",
 		},
 		{
-			name: "legacy repo-view path cannot bypass bundle",
-			args: []string{"run", "--repo-view-mcp", "/repo-view"},
-			want: "flag provided but not defined: -repo-view-mcp",
+			name: "unbundled scopesifter path cannot bypass bundle",
+			args: []string{"run", "--scopesifter-mcp", "/scopesifter"},
+			want: "flag provided but not defined: -scopesifter-mcp",
 		},
 		{
 			name: "external adapter",

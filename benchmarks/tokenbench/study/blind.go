@@ -13,9 +13,9 @@ import (
 )
 
 const (
-	EvaluationPacketSchemaVersion     = "tokenbench.blind-evaluation/v2"
-	EvaluationOutputSchemaVersion     = "tokenbench.evaluator-output/v2"
-	VerifiedQualitySchemaVersion      = "tokenbench.verified-quality/v2"
+	EvaluationPacketSchemaVersion     = "tokenbench.blind-evaluation/v3"
+	EvaluationOutputSchemaVersion     = "tokenbench.evaluator-output/v3"
+	VerifiedQualitySchemaVersion      = "tokenbench.verified-quality/v3"
 	ObjectiveCodeQualitySchemaVersion = "tokenbench.objective-code-quality/v1"
 
 	maxAnswerBytes    = 16 << 20
@@ -432,7 +432,7 @@ func VerifyEvaluations(
 		BaselinePass:      baselineScore >= policy.Quality.MinimumAnswerScorePPM,
 		CandidatePass:     candidateScore >= policy.Quality.MinimumAnswerScorePPM,
 	}
-	seal, err := canonicalPrivateSeal("paired-quality/v2", quality)
+	seal, err := canonicalPrivateSeal("paired-quality/v3", quality)
 	if err != nil {
 		return PairedQuality{}, fmt.Errorf("seal verified quality: %w", err)
 	}
@@ -503,7 +503,7 @@ func verifiedJudgment(
 		for itemIndex, item := range answer.Items {
 			criterion := packet.Criteria[itemIndex]
 			if item.Score > maxQualityPoints-total || criterion.MaximumPoints > maxQualityPoints-answerMaximum {
-				return IndividualJudgment{}, 0, 0, 0, errors.New("quality score total exceeds the v2 limit")
+				return IndividualJudgment{}, 0, 0, 0, errors.New("quality score total exceeds the v3 limit")
 			}
 			total += item.Score
 			answerMaximum += criterion.MaximumPoints
@@ -597,14 +597,14 @@ func evaluationPacketCommitment(packet EvaluationPacket) (string, error) {
 		return "", fmt.Errorf("encode blind packet commitment payload: %w", err)
 	}
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/blind-evaluation/v2\x00"))
+	hasher.Write([]byte("scopesifter/tokenbench/blind-evaluation/v3\x00"))
 	writeCommitmentField(hasher, raw)
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func deriveSecret(seed []byte, purpose string, fields ...string) []byte {
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/blind-derive/v1\x00"))
+	hasher.Write([]byte("scopesifter/tokenbench/blind-derive/v2\x00"))
 	writeCommitmentField(hasher, []byte(purpose))
 	writeCommitmentField(hasher, seed)
 	for _, field := range fields {

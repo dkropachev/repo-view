@@ -13,10 +13,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 func TestInputManifestCanonicalGolden(t *testing.T) {
@@ -28,7 +28,7 @@ func TestInputManifestCanonicalGolden(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want, err := os.ReadFile(filepath.Join("testdata", "study-inputs-v1.json"))
+	want, err := os.ReadFile(filepath.Join("testdata", "study-inputs-v2.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -411,7 +411,7 @@ func bindingRunFixture(t *testing.T, task TaskPolicy, repetition int) tokenbench
 		Model:                      "pinned-model",
 		ModelRevision:              "pinned-model@2026-08-01",
 		ReasoningEffort:            "medium",
-		DecoderSchema:              "tokenbench.codex.responses-trace/v3",
+		DecoderSchema:              "tokenbench.codex.responses-trace/v4",
 	}
 	invocation := harness.Invocation{
 		HarnessIdentity: identity,
@@ -437,7 +437,7 @@ func bindingRunFixture(t *testing.T, task TaskPolicy, repetition int) tokenbench
 	return tokenbench.Run{
 		Plan: plan,
 		ExecutorIdentity: tokenbench.ExecutorIdentity{
-			Kind: "process", Version: "tokenbench.process-executor/v2",
+			Kind: "process", Version: "tokenbench.process-executor/v3",
 			ConfigSHA256: strings.Repeat("5", 64),
 		},
 		Order: order, Repetition: repetition,

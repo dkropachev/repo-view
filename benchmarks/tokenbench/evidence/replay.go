@@ -6,15 +6,15 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 const (
-	ReplaySchemaVersion    = "tokenbench.replay/v2"
-	replayMediaType        = "application/vnd.tokenbench.replay.v2+json"
+	ReplaySchemaVersion    = "tokenbench.replay/v3"
+	replayMediaType        = "application/vnd.tokenbench.replay.v3+json"
 	maxReplayManifestBytes = 1 << 20
 )
 
