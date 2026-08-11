@@ -2290,10 +2290,6 @@ func (r *RepoView) gitOutput(args ...string) ([]byte, error) {
 	return r.gitOutputContext(r.operationContext(), args...)
 }
 
-func (r *RepoView) gitOutputLimit(limit int, args ...string) ([]byte, error) {
-	return r.gitOutputContextLimit(r.operationContext(), limit, args...)
-}
-
 func (r *RepoView) gitOutputContext(
 	ctx context.Context,
 	args ...string,
