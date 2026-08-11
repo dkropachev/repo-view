@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (
@@ -565,7 +565,7 @@ func parseItem(raw json.RawMessage, typeName, phase string) (itemState, error) {
 						return itemState{}, errors.New("completed MCP support call has unexpected structured content")
 					}
 				} else if len(structured) == 0 || bytes.Equal(structured, []byte("null")) {
-					return itemState{}, errors.New("completed repo_view call omitted structured content")
+					return itemState{}, errors.New("completed scopesifter call omitted structured content")
 				}
 			case "failed":
 				if item.Result != nil || item.Error == nil ||
@@ -590,7 +590,7 @@ func parseItem(raw json.RawMessage, typeName, phase string) (itemState, error) {
 
 func validateMCPItemIdentity(item mcpItem) (string, error) {
 	if _, ok := allowedNormalizedMCPCalls[item.Server+"."+item.Tool]; ok {
-		if item.Server != "repo_view" {
+		if item.Server != "scopesifter" {
 			return "", fmt.Errorf("unsupported MCP server %q in Codex JSONL", item.Server)
 		}
 		return ToolKindMCP, nil
@@ -610,7 +610,7 @@ func validateMCPItemIdentity(item mcpItem) (string, error) {
 		server := ""
 		if raw, exists := arguments["server"]; exists {
 			server, err = requiredRawString(raw, "server")
-			if err != nil || server != "repo_view" {
+			if err != nil || server != "scopesifter" {
 				return "", errors.New("mcp support list call has an invalid server argument")
 			}
 		}
@@ -636,7 +636,7 @@ func validateMCPItemIdentity(item mcpItem) (string, error) {
 			return "", errors.New("read_mcp_resource omitted server or uri")
 		}
 		server, err := requiredRawString(serverRaw, "server")
-		if err != nil || server != "repo_view" || item.Server != "repo_view" {
+		if err != nil || server != "scopesifter" || item.Server != "scopesifter" {
 			return "", errors.New("read_mcp_resource has an invalid server")
 		}
 		if _, err := requiredRawString(uriRaw, "uri"); err != nil {

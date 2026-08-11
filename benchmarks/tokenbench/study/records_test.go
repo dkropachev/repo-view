@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 func TestBuildPairRecordsDerivesAuthenticatedObservationsDefensively(t *testing.T) {
@@ -480,7 +480,7 @@ func recordsCorpusFixture(t *testing.T, policy Policy) AuthenticatedCorpus {
 		}
 		candidate := recordsObservation(
 			"Authenticated candidate answer for "+inputSlot.TaskID+".",
-			[]string{"repo_view.find"},
+			[]string{"scopesifter.find"},
 			candidateUsage,
 		)
 		root := *inputSlot.Root

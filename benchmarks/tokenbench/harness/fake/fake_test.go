@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/conformance"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/conformance"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
 )
 
 func TestConformance(t *testing.T) {
@@ -61,9 +61,9 @@ func TestBuildPreservesPromptAndOnlyRendersMCPDelta(t *testing.T) {
 	candidate.MCPServers = []harness.MCPServer{{
 		Environment:      map[string]string{},
 		Arguments:        []string{"mcp", "--root", "/source", "--base", strings.Repeat("0", 40)},
-		Name:             "repo_view",
-		Command:          "/tools/repo-view",
-		ExecutableSHA256: tokenbench.SHA256([]byte("repo-view")),
+		Name:             "scopesifter",
+		Command:          "/tools/scopesifter",
+		ExecutableSHA256: tokenbench.SHA256([]byte("scopesifter")),
 		Required:         true,
 		ReadOnly:         true,
 	}}

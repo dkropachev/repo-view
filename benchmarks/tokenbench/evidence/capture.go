@@ -9,17 +9,17 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 const (
-	CaptureSchemaVersion = "tokenbench.capture/v4"
+	CaptureSchemaVersion = "tokenbench.capture/v5"
 
-	captureMediaType     = "application/vnd.tokenbench.capture.v4+json"
-	planMediaType        = "application/vnd.tokenbench.plan.v3+json"
+	captureMediaType     = "application/vnd.tokenbench.capture.v5+json"
+	planMediaType        = "application/vnd.tokenbench.plan.v4+json"
 	observationMediaType = "application/vnd.tokenbench.observation.v2+json"
 	stdoutMediaType      = "application/vnd.tokenbench.stdout"
 	stderrMediaType      = "application/vnd.tokenbench.stderr"
@@ -315,7 +315,7 @@ func loadCaptureSubject(
 func validateConformantCapture(run tokenbench.Run) error {
 	identity := run.ExecutorIdentity
 	if identity.Kind != "process" ||
-		identity.Version != "tokenbench.process-executor/v2" ||
+		identity.Version != "tokenbench.process-executor/v3" ||
 		!tokenbench.ValidSHA256(identity.ConfigSHA256) {
 		return fmt.Errorf(
 			"%w: capture executor is not the built-in conformant process runner",
@@ -357,7 +357,7 @@ func validateConformantCapture(run tokenbench.Run) error {
 		return fmt.Errorf("%w: Codex model snapshot is not allowlisted", ErrInvalidAttestation)
 	}
 	// Plan.Validate proves that the candidate is this exact common process plus
-	// the sole committed repo_view treatment encoding. The adapter's canonical
+	// the sole committed scopesifter treatment encoding. The adapter's canonical
 	// validator deliberately accepts only the common (baseline) invocation.
 	if err := harnesscodex.ValidateCanonicalProcess(
 		run.Plan.Baseline,

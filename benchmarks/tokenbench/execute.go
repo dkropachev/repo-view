@@ -14,12 +14,12 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
 )
 
 // RunSchemaVersion is the current reconstructed run schema.
-const RunSchemaVersion = "tokenbench.run/v2"
+const RunSchemaVersion = "tokenbench.run/v3"
 
 // Arm identifies one side of a paired attempt.
 type Arm string
@@ -102,7 +102,7 @@ type AttemptFailure struct {
 
 // ArmRun contains raw capture and a normalized observation when decoding
 // succeeds. Failed arms are retained; they are never silently dropped.
-type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v2 JSON.
+type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v3 JSON.
 	Failure     *AttemptFailure      `json:"failure,omitempty"`
 	Observation *harness.Observation `json:"observation,omitempty"`
 	Raw         harness.RawExecution `json:"raw"`
@@ -111,7 +111,7 @@ type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench
 
 // Run is one randomized, paired execution. The embedded plan is audit data;
 // it still cannot be used as an execution capability.
-type Run struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v2 JSON.
+type Run struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v3 JSON.
 	Plan             ResolvedPlan     `json:"plan"`
 	Baseline         ArmRun           `json:"baseline"`
 	Candidate        ArmRun           `json:"candidate"`
@@ -152,7 +152,7 @@ func (pair Pair) Execute(
 	if executor == nil {
 		return Run{}, errors.New("executor is required")
 	}
-	if !executor.Publishable() || !executor.Conformant() {
+	if !executor.Publishable() {
 		return Run{}, errors.New("executor is not the conformant built-in Codex runner")
 	}
 	if !pair.Publishable() {
@@ -197,8 +197,8 @@ func (pair Pair) validateExecutorPolicyIdentity(policy runner.ConformancePolicyI
 		SchemaVersion:             runner.ConformancePolicySchemaVersion,
 		ReadOnlyPaths:             readOnly,
 		ExecutablePaths:           executable,
-		CommonMCPExecutable:       pair.executionInputs.RepoViewExecutable,
-		CommonMCPExecutableSHA256: pair.originInputs.RepoView.SHA256,
+		CommonMCPExecutable:       pair.executionInputs.ScopeSifterExecutable,
+		CommonMCPExecutableSHA256: pair.originInputs.ScopeSifter.SHA256,
 		ArmInitExecutableSHA256:   pair.originInputs.Runner.SHA256,
 	}
 	if !reflect.DeepEqual(policy, expected) {
@@ -433,22 +433,22 @@ func validateObservation(
 	case len(observation.ToolCalls) > harness.MaxObservationToolCalls:
 		return errors.New("observation tool-call count exceeds its schema limit")
 	}
-	allowedRepoView := map[string]struct{}{
-		"repo_view.changed": {},
-		"repo_view.find":    {},
-		"repo_view.inspect": {},
-		"repo_view.outline": {},
+	allowedScopeSifter := map[string]struct{}{
+		"scopesifter.changed": {},
+		"scopesifter.find":    {},
+		"scopesifter.inspect": {},
+		"scopesifter.outline": {},
 	}
 	for _, call := range observation.ToolCalls {
 		if !validPublicText(call, 512) {
 			return errors.New("observation tool call contains invalid text")
 		}
-		if strings.HasPrefix(call, "repo_view.") {
+		if strings.HasPrefix(call, "scopesifter.") {
 			if arm == BaselineArm {
-				return errors.New("baseline observation contains a repo_view tool call")
+				return errors.New("baseline observation contains a scopesifter tool call")
 			}
-			if _, ok := allowedRepoView[call]; !ok {
-				return fmt.Errorf("candidate observation contains unsupported repo_view call %q", call)
+			if _, ok := allowedScopeSifter[call]; !ok {
+				return fmt.Errorf("candidate observation contains unsupported scopesifter call %q", call)
 			}
 		}
 	}

@@ -59,7 +59,7 @@ Central tokenbench code, never the adapter, performs:
 ```text
 common     = resolve one authored suite
 baseline   = deep clone common; mcp_servers = []
-candidate  = deep clone common; mcp_servers = [approved repo_view]
+candidate  = deep clone common; mcp_servers = [approved scopesifter]
 proof      = remove candidate registration and require deep equality
 
 process    = adapter.Build(common-with-no-MCP)       // once
@@ -77,8 +77,8 @@ Current live central code constructs this exact registration from the immutable
 snapshot:
 
 ```text
-name: repo_view
-command: <immutable tools/repo-view>
+name: scopesifter
+command: <immutable tools/scopesifter>
 arguments:
   mcp --root <immutable source/worktree>
       --base <full base object id>
@@ -90,8 +90,8 @@ required: true
 read_only: true
 ```
 
-The cache-only repo-view backend cannot fall back to Git. Baseline inherits the
-same pinned repo-view image at the same fixed descriptor and has the same
+The cache-only scopesifter backend cannot fall back to Git. Baseline inherits the
+same pinned scopesifter image at the same fixed descriptor and has the same
 filesystem/execute policy, but has no MCP configuration that references it.
 
 ## Identity ownership
@@ -134,7 +134,7 @@ secret values by dictionary attack. The key and values are never evidence.
 - strings are valid UTF-8 and contain no NUL.
 
 Central code checks all fields before appending the candidate suffix and
-reverifies source, Git, runner, harness, repo-view, artifact bundle, and snapshot
+reverifies source, Git, runner, harness, scopesifter, artifact bundle, and snapshot
 authority around adapter calls.
 
 `Decode` must reject malformed/ambiguous raw state. Counters are nonnegative,

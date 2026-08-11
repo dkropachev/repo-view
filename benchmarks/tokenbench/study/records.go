@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const recordsAttestationKeyPrefix = "ed25519-sha256:"
@@ -293,14 +293,14 @@ func validateAuthenticatedArmForRecords(
 		if !validBoundedText(call, 512) {
 			return errors.New("authenticated observation tool call is invalid")
 		}
-		if strings.HasPrefix(call, "repo_view.") {
+		if strings.HasPrefix(call, "scopesifter.") {
 			if baseline {
-				return errors.New("baseline observation contains a repo_view tool call")
+				return errors.New("baseline observation contains a scopesifter tool call")
 			}
 			switch call {
-			case "repo_view.changed", "repo_view.find", "repo_view.inspect", "repo_view.outline":
+			case "scopesifter.changed", "scopesifter.find", "scopesifter.inspect", "scopesifter.outline":
 			default:
-				return errors.New("candidate observation contains an unsupported repo_view tool call")
+				return errors.New("candidate observation contains an unsupported scopesifter tool call")
 			}
 		}
 	}

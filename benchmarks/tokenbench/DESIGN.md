@@ -10,7 +10,7 @@ For one task, repository state, and repetition:
 
 ```text
 baseline  = common configuration with mcp_servers = []
-candidate = the same configuration with mcp_servers = [repo_view]
+candidate = the same configuration with mcp_servers = [scopesifter]
 ```
 
 Removing candidate's one registration must produce baseline exactly. The
@@ -97,8 +97,8 @@ the same common authored suite for both arms before it can authorize execution.
 
 ## Trusted artifacts and immutable execution image
 
-The fixed artifact-manifest v1 contains a closed set of exact executable roles:
-Codex, repo-view, static verifier Git, static Bash, and 14 native utilities. It
+The fixed artifact-manifest v2 contains a closed set of exact executable roles:
+Codex, scopesifter, static verifier Git, static Bash, and 14 native utilities. It
 also contains bounded source/recipe/builder provenance. The manifest is accepted
 only when three commitments agree: authored suite, exact manifest bytes, and an
 unexported digest embedded in the tokenbench executable at link time.
@@ -114,7 +114,7 @@ The snapshot builder:
 2. copies the source and closed executable set without crossing filesystems,
    following links, or accepting special files;
 3. derives a bounded, canonical base-to-head changed-state cache using the same
-   diff contract as live Git-backed repo-view;
+   diff contract as live Git-backed scopesifter;
 4. enables and measures fs-verity for every regular file;
 5. creates a self-bind mount, makes it read-only, `nosuid`, and `nodev`, and
    verifies its mount namespace, parent propagation state, filesystem root,
@@ -132,8 +132,8 @@ Central code derives both invocations from one common value. Baseline has a
 non-nil empty MCP list; candidate receives one private, code-owned registration:
 
 ```text
-name: repo_view
-command: immutable snapshot repo-view path
+name: scopesifter
+command: immutable snapshot scopesifter path
 arguments: mcp, immutable root/base/head, immutable changed-state cache + digest
 environment: {}
 required: true
@@ -177,7 +177,7 @@ the child into it. The arm-init process establishes:
   capture-proxy port; code-owned proxy logic separately pins the upstream
   production route and TLS policy.
 
-The model process inherits the same read-only repo-view image at fixed FD 5 in
+The model process inherits the same read-only scopesifter image at fixed FD 5 in
 both arms. Candidate configuration references it; baseline configuration does
 not. This keeps executable availability, descriptors, and sandbox policy common
 while preserving the one intended configuration delta.
@@ -213,7 +213,7 @@ normalized common config must match across arms; baseline must have no MCP
 entry, and candidate must have exactly the approved entry. Provider requests
 must have the same nonce-normalized non-tool payload and native tool
 declarations. Baseline must expose no MCP declarations; candidate must expose
-exactly the four repo-view operations and the expected Codex MCP support tools.
+exactly the four scopesifter operations and the expected Codex MCP support tools.
 Missing capture, request-count asymmetry, provider model drift, tool drift, or
 an unmatched arm blocks publication.
 
@@ -256,22 +256,22 @@ reports are derived layers with their own versioned policy and lineage.
 
 ## Family-aware quality boundary
 
-Study policy v2 classifies every task as `code`, `review`, or `explain`.
+Study policy v3 classifies every task as `code`, `review`, or `explain`.
 Review/explain tasks preregister exactly two distinct canonical evaluator IDs
 and deterministic arithmetic-mean aggregation. Both evaluators independently
-receive defensive copies of the same v2 blind packet. The packet contains final
+receive defensive copies of the same v3 blind packet. The packet contains final
 answers, anonymous labels, and preregistered criteria, but no treatment, order,
 repetition, trace, token, failure, or other-evaluator metadata.
 
 Verification requires both outputs in preregistered evaluator order, exact
 answer/item order, and matching packet nonce and commitment. It preserves each
 complete canonical output, its SHA-256, and its treatment-mapped item matrix
-before computing the aggregate. Analysis v2 discloses
+before computing the aggregate. Analysis v3 discloses
 evaluator identities, exact agreement and disagreement at pair and answer/item
 levels, agreement rate, and normalized absolute score differences. Distinct
 identifiers enforce protocol completeness and non-aliasing; operational judge
 independence remains a study-procedure obligation and must be documented.
-Post hoc adjudication is not accepted by v2; an explicit-adjudication design
+Post hoc adjudication is not accepted by v3; an explicit-adjudication design
 would require a separately preregistered, versioned protocol.
 
 Code tasks cannot enter the blind prose-evaluator path or contain prose quality

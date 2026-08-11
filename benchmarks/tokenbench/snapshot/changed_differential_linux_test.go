@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/internal/gitdiffcontract"
-	"github.com/dkropachev/repo-view/repoview"
+	"github.com/scopesifter/scopesifter/internal/gitdiffcontract"
+	"github.com/scopesifter/scopesifter/navigator"
 )
 
 func TestChangedStateCacheMatchesCanonicalDirectGit(t *testing.T) {
@@ -82,11 +82,11 @@ func TestChangedStateCacheMatchesCanonicalDirectGit(t *testing.T) {
 	if err := os.WriteFile(cachePath, raw, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	direct, err := repoview.NewWithGit(root, gitPath, gitSHA256)
+	direct, err := navigator.NewWithGit(root, gitPath, gitSHA256)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cached, err := repoview.NewWithChangedStateCache(
+	cached, err := navigator.NewWithChangedStateCache(
 		root, cachePath, digest(raw), base, head,
 	)
 	if err != nil {
@@ -110,11 +110,11 @@ func TestChangedStateCacheMatchesCanonicalDirectGit(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			options := repoview.Options{
+			options := navigator.Options{
 				Base:          base,
 				PathGlobs:     append([]string(nil), test.includes...),
 				ExcludeGlobs:  append([]string(nil), test.excludes...),
-				Return:        repoview.ReturnLocations,
+				Return:        navigator.ReturnLocations,
 				Context:       3,
 				Limit:         10_000,
 				MaxCodeLines:  20,
@@ -137,15 +137,15 @@ func TestChangedStateCacheMatchesCanonicalDirectGit(t *testing.T) {
 			}
 		})
 	}
-	directFind, err := direct.Find("SharedTarget", repoview.Options{
-		Base: base, ChangedOnly: true, Return: repoview.ReturnLocations,
+	directFind, err := direct.Find("SharedTarget", navigator.Options{
+		Base: base, ChangedOnly: true, Return: navigator.ReturnLocations,
 		Limit: 100, MaxCodeLines: 20, MaxPatchLines: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	cachedFind, err := cached.Find("SharedTarget", repoview.Options{
-		Base: base, ChangedOnly: true, Return: repoview.ReturnLocations,
+	cachedFind, err := cached.Find("SharedTarget", navigator.Options{
+		Base: base, ChangedOnly: true, Return: navigator.ReturnLocations,
 		Limit: 100, MaxCodeLines: 20, MaxPatchLines: 100,
 	})
 	if err != nil {

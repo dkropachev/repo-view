@@ -45,7 +45,7 @@ Copyright (c) 2021 alex-pinkus
 
 ## treesitter-go
 
-The compiled `repo-view` binary incorporates
+The compiled `scopesifter` binary incorporates
 [`github.com/dcosson/treesitter-go`](https://github.com/dcosson/treesitter-go)
 version `v0.1.0`. The upstream software is licensed under the MIT License
 reproduced below.
@@ -54,7 +54,7 @@ Copyright (c) 2026 Danny Cosson
 
 That module implements the runtime against tree-sitter `v0.26.6` and embeds
 generated parse tables and scanner ports from the following grammar releases
-used by `repo-view`:
+used by `scopesifter`:
 
 - [`tree-sitter-c`](https://github.com/tree-sitter/tree-sitter-c) `v0.24.1`;
 - [`tree-sitter-cpp`](https://github.com/tree-sitter/tree-sitter-cpp) `v0.23.4`;
@@ -84,7 +84,7 @@ Copyright (c) 2017 Maxim Sokolov (Rust grammar)
 
 ## golang.org/x/text
 
-The compiled `repo-view` binary incorporates
+The compiled `scopesifter` binary incorporates
 [`golang.org/x/text`](https://pkg.go.dev/golang.org/x/text) version `v0.37.0`.
 The upstream software is licensed under the BSD 3-Clause License reproduced
 below and includes the additional patent grant reproduced below.
@@ -93,18 +93,18 @@ Copyright 2009 The Go Authors.
 
 ## Unicode Character Database 17.0.0
 
-`repoview/java_lex.go` and `repoview/javascript_unicode.go` contain compact
-identifier-property ranges, and `repoview/cpp_unicode17_names.go` contains
+`navigator/java_lex.go` and `navigator/javascript_unicode.go` contain compact
+identifier-property ranges, and `navigator/cpp_unicode17_names.go` contains
 compact C++ character-name data, derived from the
 [Unicode Character Database 17.0.0](https://www.unicode.org/Public/17.0.0/ucd/),
-copyright © 2025 Unicode, Inc. `repoview/python_xid.go` contains identifier
+copyright © 2025 Unicode, Inc. `navigator/python_xid.go` contains identifier
 property ranges derived through CPython 3.14.4's Unicode 16.0.0 identifier
 predicates. The Unicode data is licensed under the Unicode License V3
 reproduced below.
 
 ## unicode-ident
 
-`repoview/rust_xid.go` contains generated identifier-property data derived
+`navigator/rust_xid.go` contains generated identifier-property data derived
 from [unicode-ident 1.0.24](https://github.com/dtolnay/unicode-ident), by David
 Tolnay. The upstream generated data is licensed under the Unicode License V3
 and, at the recipient's option, the MIT License reproduced below.

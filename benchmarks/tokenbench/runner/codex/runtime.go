@@ -26,14 +26,14 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
 )
 
 const (
-	lifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v2"
-	stateMarkerName  = ".tokenbench-codex-runtime-v2"
+	lifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v3"
+	stateMarkerName  = ".tokenbench-codex-runtime-v3"
 	stateMarkerData  = lifecycleVersion + "\n"
 
 	productionUpstreamOrigin = "https://api.openai.com"
@@ -815,7 +815,7 @@ func resolveLimits(config Config) (limits, error) {
 		resolved.maxEvents > harnesscodex.MaxResponsesTraceSSEEvents ||
 		resolved.maxSSEEventBytes > harnesscodex.MaxResponsesSSEEventBytes {
 		return limits{}, errors.New(
-			"codex proxy limits exceed Responses trace v3 evidence bounds",
+			"codex proxy limits exceed Responses trace v4 evidence bounds",
 		)
 	}
 	return resolved, nil
@@ -846,7 +846,7 @@ func lifecycleIdentity(
 	productionRoute string,
 	productionNetwork string,
 ) (string, error) {
-	manifest := struct { //nolint:govet,nolintlint // Field order is the v2 lifecycle identity contract.
+	manifest := struct { //nolint:govet,nolintlint // Field order is the v3 lifecycle identity contract.
 		Version              string        `json:"version"`
 		Layout               RuntimeLayout `json:"layout"`
 		UpstreamOrigin       string        `json:"upstream_origin"`
@@ -1034,8 +1034,8 @@ func (lifecycle *Lifecycle) validateRequest(request genericrunner.ExecutionReque
 		return errors.New("codex baseline unexpectedly contains an MCP registration")
 	}
 	if request.Arm == genericrunner.CandidateArm &&
-		(len(request.Invocation.MCPServers) != 1 || request.Invocation.MCPServers[0].Name != "repo_view") {
-		return errors.New("codex candidate does not contain exactly the repo_view registration")
+		(len(request.Invocation.MCPServers) != 1 || request.Invocation.MCPServers[0].Name != "scopesifter") {
+		return errors.New("codex candidate does not contain exactly the scopesifter registration")
 	}
 	return nil
 }

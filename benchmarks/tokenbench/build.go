@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
 )
 
 // ProcessPair contains adapter-built target processes after the second parity
@@ -191,16 +191,16 @@ func validateTreatmentEncoding(
 		expected, err = fake.CanonicalMCPArguments(server)
 	default:
 		return fmt.Errorf(
-			"harness kind %q has no code-owned repo_view treatment encoder",
+			"harness kind %q has no code-owned scopesifter treatment encoder",
 			harnessKind,
 		)
 	}
 	if err != nil {
-		return fmt.Errorf("validate code-owned repo_view treatment encoding: %w", err)
+		return fmt.Errorf("validate code-owned scopesifter treatment encoding: %w", err)
 	}
 	if !reflect.DeepEqual(observed, expected) {
 		return errors.New(
-			"candidate argv suffix differs from the code-owned repo_view treatment encoding",
+			"candidate argv suffix differs from the code-owned scopesifter treatment encoding",
 		)
 	}
 	return nil

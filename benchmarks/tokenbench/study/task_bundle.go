@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
 )
 
 const (

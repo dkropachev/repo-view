@@ -53,15 +53,15 @@ jobs:
           for target in "${targets[@]}"; do
             os="${target%/*}"
             arch="${target#*/}"
-            archive="repo-view_${version}_${os}_${arch}"
-            binary="repo-view"
+            archive="scopesifter_${version}_${os}_${arch}"
+            binary="scopesifter"
             if [[ "$os" == "windows" ]]; then
-              binary="repo-view.exe"
+              binary="scopesifter.exe"
             fi
 
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
               go build -trimpath -ldflags='-s -w' \
-              -o "build/$binary" ./cmd/repo-view
+              -o "build/$binary" ./cmd/scopesifter
 
             if [[ "$os" == "windows" ]]; then
               (cd build && zip -q "../dist/$archive.zip" \
@@ -73,7 +73,7 @@ jobs:
             rm "build/$binary"
           done
 
-          for archive in dist/repo-view_*; do
+          for archive in dist/scopesifter_*; do
             case "$archive" in
               *.zip) contents="$(unzip -Z1 "$archive")" ;;
               *.tar.gz) contents="$(tar -tzf "$archive")" ;;
@@ -86,7 +86,7 @@ jobs:
             fi
           done
 
-          (cd dist && sha256sum repo-view_* > SHA256SUMS)
+          (cd dist && sha256sum scopesifter_* > SHA256SUMS)
 
       - name: Publish GitHub release
         env:
@@ -94,5 +94,5 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/* \
             --generate-notes \
-            --title "repo-view $GITHUB_REF_NAME" \
+            --title "ScopeSifter $GITHUB_REF_NAME" \
             --verify-tag

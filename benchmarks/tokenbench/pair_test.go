@@ -10,11 +10,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
 )
 
 func TestCurrentRunnerIdentityUsesPinnedRunningImage(t *testing.T) {
@@ -85,10 +85,10 @@ func TestPlanByteCeilingIsSharedByConstructionAndDecode(t *testing.T) {
 	}
 }
 
-func TestResolvePairDiffIsExactlyRepoViewMCP(t *testing.T) {
+func TestResolvePairDiffIsExactlyScopeSifterMCP(t *testing.T) {
 	t.Parallel()
 	loaded := validLoadedSuite()
-	tool := repoViewToolFixture()
+	tool := scopeSifterToolFixture()
 	pair, err := ResolvePair(preparedSuiteFixture(loaded), tool)
 	if err != nil {
 		t.Fatal(err)
@@ -121,33 +121,33 @@ func TestResolvePairDiffIsExactlyRepoViewMCP(t *testing.T) {
 	}
 }
 
-func TestNewRepoViewToolPinsActualExecutable(t *testing.T) {
+func TestNewScopeSifterToolPinsActualExecutable(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "repo-view")
+	path := filepath.Join(t.TempDir(), "scopesifter")
 	content := []byte("executable fixture")
 	if err := os.WriteFile(path, content, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	tool, err := NewRepoViewTool(path)
+	tool, err := NewScopeSifterTool(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if tool.executable != path || tool.sha256 != SHA256(content) {
 		t.Fatalf("unexpected tool binding: %+v", tool)
 	}
-	link := filepath.Join(t.TempDir(), "repo-view-link")
+	link := filepath.Join(t.TempDir(), "scopesifter-link")
 	if err := os.Symlink(path, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewRepoViewTool(link); err == nil {
-		t.Fatal("symlinked repo-view executable was accepted")
+	if _, err := NewScopeSifterTool(link); err == nil {
+		t.Fatal("symlinked scopesifter executable was accepted")
 	}
-	hardlink := filepath.Join(t.TempDir(), "repo-view-hardlink")
+	hardlink := filepath.Join(t.TempDir(), "scopesifter-hardlink")
 	if err := os.Link(path, hardlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewRepoViewTool(path); err == nil {
-		t.Fatal("hard-linked repo-view executable was accepted")
+	if _, err := NewScopeSifterTool(path); err == nil {
+		t.Fatal("hard-linked scopesifter executable was accepted")
 	}
 }
 
@@ -196,7 +196,7 @@ func TestResolvedIdentityMustMatchEveryRequestedField(t *testing.T) {
 
 func TestResolvePairRejectsZeroPreparedSuite(t *testing.T) {
 	t.Parallel()
-	if _, err := ResolvePair(PreparedSuite{}, repoViewToolFixture()); err == nil {
+	if _, err := ResolvePair(PreparedSuite{}, scopeSifterToolFixture()); err == nil {
 		t.Fatal("zero prepared suite was accepted")
 	}
 }
@@ -307,7 +307,7 @@ func TestParityRejectsWrongMCPCardinality(t *testing.T) {
 	candidate = pair.Candidate()
 	candidate.MCPServers = []harness.MCPServer{}
 	if _, err := ProveParity(baseline, candidate); err == nil {
-		t.Fatal("candidate without repo_view MCP was accepted")
+		t.Fatal("candidate without scopesifter MCP was accepted")
 	}
 
 	candidate = pair.Candidate()
@@ -338,7 +338,7 @@ func TestParityRejectsOpaqueCommonEscapeHatches(t *testing.T) {
 	}
 }
 
-func TestParityRejectsNonGenericRepoViewRegistration(t *testing.T) {
+func TestParityRejectsNonGenericScopeSifterRegistration(t *testing.T) {
 	t.Parallel()
 	pair := mustPair(t)
 	tests := map[string]func(*harness.MCPServer){
@@ -356,7 +356,7 @@ func TestParityRejectsNonGenericRepoViewRegistration(t *testing.T) {
 			candidate := pair.Candidate()
 			mutate(&candidate.MCPServers[0])
 			if _, err := ProveParity(pair.Baseline(), candidate); err == nil {
-				t.Fatal("invalid repo-view registration was accepted")
+				t.Fatal("invalid scopesifter registration was accepted")
 			}
 		})
 	}
@@ -533,7 +533,7 @@ func TestPairBuildReverifiesInputsAndUsesBoundAdapter(t *testing.T) {
 	}
 	if _, err := pair.Build(context.Background()); err == nil ||
 		!strings.Contains(err.Error(), "changed") {
-		t.Fatalf("changed repo-view executable was accepted: %v", err)
+		t.Fatalf("changed scopesifter executable was accepted: %v", err)
 	}
 }
 
@@ -643,8 +643,8 @@ func buildReadyPair(t *testing.T, adapter harness.Adapter) (Pair, string) {
 	if err := os.WriteFile(harnessPath, []byte("harness"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	toolPath := filepath.Join(directory, "repo-view")
-	if err := os.WriteFile(toolPath, []byte("repo-view"), 0o700); err != nil {
+	toolPath := filepath.Join(directory, "scopesifter")
+	if err := os.WriteFile(toolPath, []byte("scopesifter"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	prompt := []byte("Explain the change.\n")
@@ -681,7 +681,7 @@ func buildReadyPair(t *testing.T, adapter harness.Adapter) (Pair, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tool, err := NewRepoViewTool(toolPath)
+	tool, err := NewScopeSifterTool(toolPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +744,7 @@ func mustPair(t *testing.T) Pair {
 	t.Helper()
 	pair, err := ResolvePair(
 		preparedSuiteFixture(validLoadedSuite()),
-		repoViewToolFixture(),
+		scopeSifterToolFixture(),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -779,7 +779,7 @@ func recommitPlan(t *testing.T, plan *ResolvedPlan) {
 	plan.Parity.BaselineInvocationSHA256 = mustJSONSHA256(t, plan.Baseline)
 	plan.Parity.CandidateInvocationSHA256 = mustJSONSHA256(t, plan.Candidate)
 	plan.Parity.PromptSHA256 = SHA256(plan.Baseline.Prompt)
-	plan.Parity.RepoViewRegistrationSHA256 = mustJSONSHA256(
+	plan.Parity.ScopeSifterRegistrationSHA256 = mustJSONSHA256(
 		t,
 		plan.Candidate.MCPServers[0],
 	)
@@ -848,9 +848,9 @@ func preparedSuiteFixture(loaded LoadedSuite) PreparedSuite {
 	}
 }
 
-func repoViewToolFixture() RepoViewTool {
-	return RepoViewTool{
-		executable: "/tools/repo-view",
+func scopeSifterToolFixture() ScopeSifterTool {
+	return ScopeSifterTool{
+		executable: "/tools/scopesifter",
 		sha256:     SHA256([]byte("tool")),
 	}
 }

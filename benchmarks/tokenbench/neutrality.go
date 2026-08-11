@@ -10,7 +10,7 @@ import (
 
 // ValidateTreatmentNeutrality rejects task text that names, recommends, or
 // forbids a navigation/tool mechanism. Tokenbench measures availability of
-// repo_view; a prompt-side tool policy would be a second treatment even when
+// scopesifter; a prompt-side tool policy would be a second treatment even when
 // its bytes were copied to both arms.
 func ValidateTreatmentNeutrality(
 	developerInstructions string,
@@ -33,15 +33,13 @@ func validateNeutralText(label, value string) error {
 	for index, token := range tokens {
 		compact := strings.NewReplacer("_", "", "-", "").Replace(token)
 		switch {
-		case compact == "repoview" || compact == "mcp" ||
+		case compact == "scopesifter" || compact == "mcp" ||
 			compact == "modelcontextprotocol":
 			return fmt.Errorf(
 				"%s names the benchmark treatment %q",
 				label,
 				token,
 			)
-		case index+1 < len(tokens) && token == "repo" && tokens[index+1] == "view":
-			return fmt.Errorf("%s names the repo_view treatment", label)
 		case index+2 < len(tokens) && token == "model" &&
 			tokens[index+1] == "context" && tokens[index+2] == "protocol":
 			return fmt.Errorf("%s names the MCP treatment", label)

@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
-	runnercodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner/codex"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	runnercodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
 )
 
 type fakeLifecycle struct{}
 
 func (fakeLifecycle) Identity() string {
-	return "tokenbench.codex-runner/codex-cli-v0.144.0/v2/sha256:" +
+	return "tokenbench.codex-runner/codex-cli-v0.144.0/v3/sha256:" +
 		"0000000000000000000000000000000000000000000000000000000000000000"
 }
 
@@ -34,7 +34,7 @@ func TestGenericConstructionIsNeverPublishable(t *testing.T) {
 		if err != nil {
 			t.Fatalf("New(): %v", err)
 		}
-		if executor.Publishable() || executor.Conformant() {
+		if executor.Publishable() {
 			t.Fatal("generic construction obtained publication provenance")
 		}
 	}
@@ -90,7 +90,7 @@ func TestOnlyConcreteBuiltInCodexLifecycleIsPublishable(t *testing.T) {
 			t.Errorf("Executor.Close(): %v", err)
 		}
 	})
-	if !conformant.Publishable() || !conformant.Conformant() {
+	if !conformant.Publishable() {
 		t.Fatal("built-in Codex lifecycle did not receive conformant provenance")
 	}
 	if conformant.Identity() == generic.Identity() {

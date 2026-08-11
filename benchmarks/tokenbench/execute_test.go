@@ -11,10 +11,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/fake"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 type recordingExecutor struct {
@@ -79,7 +79,7 @@ func (prepared *recordingPrepared) Execute(
 	}
 	toolCalls := []string{}
 	if request.Arm == CandidateArm {
-		toolCalls = []string{"repo_view.inspect"}
+		toolCalls = []string{"scopesifter.inspect"}
 	}
 	stdout, err := json.Marshal(struct {
 		FinalAnswer string        `json:"final_answer"`
@@ -125,13 +125,13 @@ func TestPairExecuteRunsBothArmsAndPreservesSoleDelta(t *testing.T) {
 	if err := run.Validate(); err != nil {
 		t.Fatalf("validate run: %v", err)
 	}
-	if run.SchemaVersion != "tokenbench.run/v2" {
+	if run.SchemaVersion != "tokenbench.run/v3" {
 		t.Fatalf("run schema = %q", run.SchemaVersion)
 	}
 	oldVersion := run
-	oldVersion.SchemaVersion = "tokenbench.run/v1"
+	oldVersion.SchemaVersion = "tokenbench.run/v2"
 	if err := oldVersion.Validate(); err == nil {
-		t.Fatal("run/v1 was accepted as run/v2")
+		t.Fatal("run/v2 was accepted as run/v3")
 	}
 	if run.Baseline.Observation == nil || run.Candidate.Observation == nil {
 		t.Fatalf("missing observations: %+v", run)
@@ -442,13 +442,13 @@ func TestPairExecuteRejectsOpenRunnerConstruction(t *testing.T) {
 func TestExecutorPolicyMustExactlyMatchImmutableExecutionInputs(t *testing.T) {
 	pair := Pair{
 		executionInputs: executionsnapshot.ExecutionInputs{
-			ReadOnlyPaths:      []string{"/snapshot/source", "/snapshot/cache"},
-			ExecutablePaths:    []string{"/snapshot/bin/repo-view", "/snapshot/bin/runner"},
-			RepoViewExecutable: "/snapshot/bin/repo-view",
+			ReadOnlyPaths:         []string{"/snapshot/source", "/snapshot/cache"},
+			ExecutablePaths:       []string{"/snapshot/bin/scopesifter", "/snapshot/bin/runner"},
+			ScopeSifterExecutable: "/snapshot/bin/scopesifter",
 		},
 		originInputs: executionsnapshot.OriginInputs{
-			RepoView: executionsnapshot.FileOrigin{SHA256: strings.Repeat("a", 64)},
-			Runner:   executionsnapshot.FileOrigin{SHA256: strings.Repeat("b", 64)},
+			ScopeSifter: executionsnapshot.FileOrigin{SHA256: strings.Repeat("a", 64)},
+			Runner:      executionsnapshot.FileOrigin{SHA256: strings.Repeat("b", 64)},
 		},
 	}
 	want := runner.ConformancePolicyIdentity{
@@ -458,10 +458,10 @@ func TestExecutorPolicyMustExactlyMatchImmutableExecutionInputs(t *testing.T) {
 			"/snapshot/source",
 		},
 		ExecutablePaths: []string{
-			"/snapshot/bin/repo-view",
 			"/snapshot/bin/runner",
+			"/snapshot/bin/scopesifter",
 		},
-		CommonMCPExecutable:       "/snapshot/bin/repo-view",
+		CommonMCPExecutable:       "/snapshot/bin/scopesifter",
 		CommonMCPExecutableSHA256: strings.Repeat("a", 64),
 		ArmInitExecutableSHA256:   strings.Repeat("b", 64),
 	}

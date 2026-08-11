@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 func TestParseCompletedResponseCommitsOrderedJSONLPayloads(t *testing.T) {
@@ -207,7 +207,7 @@ func TestParseOutputItemCommitsCanonicalMCPArguments(t *testing.T) {
 	t.Parallel()
 	output, err := parseOutputItem("function_call", map[string]any{
 		"type":      "function_call",
-		"name":      "mcp__repo_view__inspect",
+		"name":      "mcp__scopesifter__inspect",
 		"arguments": `{"path":"README.md","line":1}`,
 		"call_id":   "call-mcp",
 	})
@@ -217,7 +217,7 @@ func TestParseOutputItemCommitsCanonicalMCPArguments(t *testing.T) {
 	want := bytesDigest([]byte(`{"line":1,"path":"README.md"}`))
 	if output.Type != harnesscodex.OutputTypeToolCall ||
 		output.Kind != harnesscodex.ToolKindMCP ||
-		output.Name != "repo_view.inspect" || output.PayloadSHA256 != want {
+		output.Name != "scopesifter.inspect" || output.PayloadSHA256 != want {
 		t.Fatalf("MCP output = %#v", output)
 	}
 }

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	PolicySchemaVersion = "tokenbench.study-policy/v2"
+	PolicySchemaVersion = "tokenbench.study-policy/v3"
 	PPM                 = int64(1_000_000)
 
 	BlindingSeedPurpose      = "blinding"
@@ -56,7 +56,7 @@ const (
 	TaskExcluded TaskStatus = "excluded"
 )
 
-// Policy is the complete v2 preregistration. Tasks and every nested item list
+// Policy is the complete v3 preregistration. Tasks and every nested item list
 // are strictly sorted so equivalent corpora have one canonical encoding.
 //
 //nolint:govet,nolintlint // Field order is the byte-level canonical policy wire order.
@@ -148,7 +148,7 @@ func DecodePolicy(raw []byte) (Policy, error) {
 	return policy, nil
 }
 
-// EncodePolicy returns the sole canonical JSON representation of a valid v2
+// EncodePolicy returns the sole canonical JSON representation of a valid v3
 // policy. It never sorts or repairs caller input.
 func EncodePolicy(policy Policy) ([]byte, error) {
 	if err := policy.Validate(); err != nil {
@@ -288,7 +288,7 @@ func validateTask(task TaskPolicy) error {
 		}
 		seen[item.ItemID] = struct{}{}
 		if item.MaximumPoints > maxQualityPoints-points {
-			return errors.New("quality points exceed the v2 limit")
+			return errors.New("quality points exceed the v3 limit")
 		}
 		points += item.MaximumPoints
 	}
@@ -305,7 +305,7 @@ func validateTask(task TaskPolicy) error {
 		}
 		seen[item.ItemID] = struct{}{}
 		if item.MaximumPoints > maxQualityPoints-points {
-			return errors.New("quality points exceed the v2 limit")
+			return errors.New("quality points exceed the v3 limit")
 		}
 		points += item.MaximumPoints
 	}
@@ -409,7 +409,7 @@ func CommitSeed(purpose string, seed []byte) (string, error) {
 		return "", fmt.Errorf("%s seed must contain at least %d bytes", purpose, minimumSeedBytes)
 	}
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/study-seed/v1\x00"))
+	hasher.Write([]byte("scopesifter/tokenbench/study-seed/v2\x00"))
 	writeCommitmentField(hasher, []byte(purpose))
 	writeCommitmentField(hasher, seed)
 	return hex.EncodeToString(hasher.Sum(nil)), nil
@@ -462,7 +462,7 @@ func validEvaluationText(value string, maximum int) bool {
 	for _, word := range words {
 		switch word {
 		case "baseline", "candidate", "treatment", "arm", "order", "token", "tokens",
-			"tool", "tools", "toolcall", "toolcalls", "mcp", "repo_view", "repoview":
+			"tool", "tools", "toolcall", "toolcalls", "mcp", "scopesifter", "navigator":
 			return false
 		}
 	}

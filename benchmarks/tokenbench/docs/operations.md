@@ -1,7 +1,7 @@
 # Tokenbench operator guide
 
 This guide covers the publishable built-in Codex path. It does not turn a
-prototype adapter or the historical experiment suite into conformant evidence.
+prototype adapter or evidence created under another identity into conformant evidence.
 Read [DESIGN.md](../DESIGN.md) before operating a live run and
 [evidence-format.md](evidence-format.md) before moving or disclosing evidence.
 
@@ -33,7 +33,7 @@ document. Important bindings are:
 - the supported model/revision and Codex digest are the values documented in
   [README.md](../README.md#current-status);
 - prompt and developer-instruction bytes are treatment-neutral and contain no
-  repo-view/tool-use hint.
+  scopesifter/tool-use hint.
 
 Unknown, duplicate, null, and trailing fields are rejected. The suite's exact
 bytes and prompt bytes are committed to evidence, even though suite JSON does
@@ -45,7 +45,7 @@ The artifact build is a separate reproducible supply-chain step. Build all
 images from the provenance named in the manifest, then place this closed set
 below one canonical absolute directory:
 
-- Codex, repo-view, static Git, and static Bash;
+- Codex, scopesifter, static Git, and static Bash;
 - distinct `rg`, `sed`, `awk`, `find`, `head`, `tail`, `wc`, `sort`, `cut`,
   `tr`, `cat`, `ls`, `grep`, and `xargs` images.
 
@@ -56,9 +56,9 @@ applets, and cross-role byte aliases are rejected. Only listed roles enter the
 immutable snapshot; an extra bundle file grants no executable authority and
 should be excluded from a reproducible bundle.
 
-Write the fixed file `tokenbench-artifacts-v1.json` at the bundle root. Its
+Write the fixed file `tokenbench-artifacts-v2.json` at the bundle root. Its
 shape is defined by
-[`artifact-manifest-v1.schema.json`](../schemas/artifact-manifest-v1.schema.json),
+[`artifact-manifest-v2.schema.json`](../schemas/artifact-manifest-v2.schema.json),
 but schema validation alone is insufficient: the loader requires the exact
 compact bytes produced by Go `json.Marshal(tokenbench.ArtifactManifest)`, with
 no trailing newline. The exported `ArtifactManifest.Validate` method checks the
@@ -77,11 +77,11 @@ Build tokenbench at its final canonical path. A normal development build or
 `go run` has no artifact policy and cannot publish a live result.
 
 ```sh
-manifest=/absolute/artifacts/tokenbench-artifacts-v1.json
+manifest=/absolute/artifacts/tokenbench-artifacts-v2.json
 manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
 
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/dkropachev/repo-view/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
@@ -111,8 +111,8 @@ key: key_id, public_key, roles, status
 Its fixed context is:
 
 ```text
-schema_version = tokenbench.trust-policy/v1
-project        = github.com/dkropachev/repo-view/benchmarks/tokenbench
+schema_version = tokenbench.trust-policy/v2
+project        = github.com/scopesifter/scopesifter/benchmarks/tokenbench
 ```
 
 For each key, `public_key` is the unpadded base64url encoding of the raw 32-byte
@@ -120,7 +120,7 @@ Ed25519 public key and `key_id` is
 `ed25519-sha256:` followed by the lowercase SHA-256 of those public-key bytes.
 Keys are strictly sorted by key ID; roles are strictly sorted and drawn from
 `capture`, `replay`; status is `active`, `retired`, or `revoked`. Only an active
-key with the required role verifies under policy v1. Generate canonical policy
+key with the required role verifies under policy v2. Generate canonical policy
 bytes with Go `json.Marshal(evidence.TrustPolicy)` and authenticate those exact
 bytes out of band.
 

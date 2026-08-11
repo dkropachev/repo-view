@@ -20,4 +20,4 @@ model call. Add a smoke suite here only when it:
 
 A `plan` file is audit-only. A signed capture/replay root proves integrity and
 provenance for its exact inputs; it is not, by itself, a general claim that
-repo-view saves tokens.
+scopesifter saves tokens.

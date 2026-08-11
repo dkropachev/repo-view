@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	armInitVersion                 = "tokenbench.arm-init/v2"
+	armInitVersion                 = "tokenbench.arm-init/v3"
 	armInitMarkerEnvironment       = "TOKENBENCH_INTERNAL_ARM_INIT_V1"
 	armInitFDLayoutEnvironment     = "TOKENBENCH_INTERNAL_FD_LAYOUT_V1"
 	armInitProbeEnvironment        = "TOKENBENCH_INTERNAL_ARM_PROBE_V1"
@@ -438,7 +438,7 @@ func runArmInit() error {
 		return err
 	}
 	// FD5 deliberately remains non-CLOEXEC. Both arms receive the same opened,
-	// read-only repo-view inode; only the candidate references it as MCP command.
+	// read-only scopesifter inode; only the candidate references it as MCP command.
 	return unix.Exec(
 		fmt.Sprintf("/proc/self/fd/%d", armInitTargetFD),
 		os.Args,

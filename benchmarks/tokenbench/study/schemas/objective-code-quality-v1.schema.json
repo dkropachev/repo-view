@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/objective-code-quality-v1.schema.json",
+  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/objective-code-quality-v1.schema.json",
   "title": "Tokenbench authenticated objective code quality boundary v1",
   "$comment": "No production constructor or code runner exists in this milestone.",
   "type": "object",

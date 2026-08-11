@@ -6,19 +6,19 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (
-	InputManifestSchemaVersion = "tokenbench.study-inputs/v1"
+	InputManifestSchemaVersion = "tokenbench.study-inputs/v2"
 
 	maxInputManifestBytes    = 256 << 20
 	maxInputReasonBytes      = 2_000
 	maxInputAttestationBytes = 64 << 10
-	attestationMediaType     = "application/vnd.tokenbench.attestation.v1+json"
+	attestationMediaType     = "application/vnd.tokenbench.attestation.v2+json"
 )
 
 // InputManifest assigns exactly one authenticated evidence root or explicit

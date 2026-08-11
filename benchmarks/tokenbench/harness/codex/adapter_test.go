@@ -11,9 +11,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/conformance"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/internal/selfexec"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/conformance"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 type decodeForgingAdapterWrapper struct{ *Adapter }
@@ -128,10 +128,10 @@ func TestBuildPreservesCommonInputAndPinsArgv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := digestJSON(t, suffix); got != "631d2c44aae1c8599ac300a1bf1a479239ae9ac2a5e280a587961191ae6b5987" {
+	if got := digestJSON(t, suffix); got != "d73bd17eb0db3400973e455556cf2015e3d16f24ca97e60e3c8cd75c84f14e1b" {
 		t.Fatalf("Codex v0.144.0 MCP argv snapshot changed: got %s", got)
 	}
-	if !containsPair(suffix, "-c", `mcp_servers.repo_view.enabled_tools=["changed","find","inspect","outline"]`) {
+	if !containsPair(suffix, "-c", `mcp_servers.scopesifter.enabled_tools=["changed","find","inspect","outline"]`) {
 		t.Fatalf("MCP suffix omitted exact tool allowlist: %q", suffix)
 	}
 	if containsJoined(suffix, "/source") == false ||
@@ -233,8 +233,8 @@ func TestCanonicalProcessValidationRejectsSharedHiddenOverrides(t *testing.T) {
 
 func TestResolvePinsIdentityAndSnapshotAllowlist(t *testing.T) {
 	t.Parallel()
-	if adapterVersion != "tokenbench.codex-adapter/codex-cli-v0.144.0/v3" ||
-		decoderSchema != "codex.exec-jsonl/v0.144.0+responses-trace/v3+observation/v2" {
+	if adapterVersion != "tokenbench.codex-adapter/codex-cli-v0.144.0/v4" ||
+		decoderSchema != "codex.exec-jsonl/v0.144.0+responses-trace/v4+observation/v2" {
 		t.Fatalf("Codex observation contract = %q / %q", adapterVersion, decoderSchema)
 	}
 	adapter := adapterFixture(t)
@@ -255,10 +255,10 @@ func TestResolvePinsIdentityAndSnapshotAllowlist(t *testing.T) {
 		first.Model != request.Model || first.ModelRevision != request.ExpectedModelRevision {
 		t.Fatalf("unexpected resolved identity: %+v", first)
 	}
-	if first.AdapterControlConfigSHA256 != "10cba9aa6b5e0c5136c9c56470d44842375654bf3881a89a8828a3a63f9d960b" {
+	if first.AdapterControlConfigSHA256 != "2eac4c6ff5d186ca9b51697fe753ce7279fc079fbc1f04ada51b2f81ecb2b4c9" {
 		t.Fatalf("Codex control manifest snapshot changed: got %s", first.AdapterControlConfigSHA256)
 	}
-	if first.AdapterConfigSHA256 != "4abc48e987ab8f041960711d0b880befe0e1e620956152f8cfb9b638e430b8a0" {
+	if first.AdapterConfigSHA256 != "3a167f87d25ff805686e8f7c7cf3cd643a29bc6876f652c29a368db9ca2b6b79" {
 		t.Fatalf("Codex resolved configuration snapshot changed: got %s", first.AdapterConfigSHA256)
 	}
 	if err := harness.ValidateIdentity(first); err != nil {
@@ -393,7 +393,7 @@ func TestNewRejectsInvalidRuntimeLayout(t *testing.T) {
 	if err != nil || got != base {
 		t.Fatalf("RuntimeLayout() = %+v, %v; want %+v", got, err, base)
 	}
-	if commitment, err := base.Commitment(); err != nil || commitment != "f4d5b9b7630c4f3db0662154672af392706e9fd64e14bbf6211f2bf3e37d8490" {
+	if commitment, err := base.Commitment(); err != nil || commitment != "641add767129c82a0563d5899f8e548e85e7e58a56111a7992b78eb09a1cbff7" {
 		t.Fatalf("RuntimeLayout commitment = %q, %v", commitment, err)
 	}
 	if !reflect.DeepEqual(base.Environment(), runtimeEnvironment(base)) {
@@ -521,7 +521,7 @@ func TestMCPArgumentsRejectsNoncanonicalRegistration(t *testing.T) {
 		{"name", func(value *harness.MCPServer) { value.Name = "other" }},
 		{"optional", func(value *harness.MCPServer) { value.Required = false }},
 		{"writable", func(value *harness.MCPServer) { value.ReadOnly = false }},
-		{"relative command", func(value *harness.MCPServer) { value.Command = "repo-view" }},
+		{"relative command", func(value *harness.MCPServer) { value.Command = "scopesifter" }},
 		{"bad command digest", func(value *harness.MCPServer) { value.ExecutableSHA256 = "bad" }},
 		{"nil environment", func(value *harness.MCPServer) { value.Environment = nil }},
 		{"nonempty environment", func(value *harness.MCPServer) { value.Environment["SECRET"] = "value" }},
@@ -676,8 +676,8 @@ func adapterFixture(t *testing.T) *Adapter {
 func mcpServerFixture() harness.MCPServer {
 	return harness.MCPServer{
 		Environment:      map[string]string{},
-		Name:             "repo_view",
-		Command:          "/tools/repo-view",
+		Name:             "scopesifter",
+		Command:          "/tools/scopesifter",
 		ExecutableSHA256: strings.Repeat("f", 64),
 		Arguments: []string{
 			"mcp",

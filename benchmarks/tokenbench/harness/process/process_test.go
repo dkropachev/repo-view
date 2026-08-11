@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/conformance"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/conformance"
 )
 
 func TestExternalAdapterConformance(t *testing.T) {
@@ -84,8 +84,8 @@ func TestExternalAdapterConformance(t *testing.T) {
 	candidate.Prompt = append([]byte(nil), invocation.Prompt...)
 	candidate.MCPServers = []harness.MCPServer{{
 		Environment:      map[string]string{},
-		Name:             "repo_view",
-		Command:          "/tools/repo-view",
+		Name:             "scopesifter",
+		Command:          "/tools/scopesifter",
 		ExecutableSHA256: strings.Repeat("6", 64),
 		Arguments:        []string{"mcp", "--root", "/tmp", "--base", strings.Repeat("0", 40)},
 		Required:         true,
@@ -233,7 +233,7 @@ func TestExternalAdapterRejectsInvalidProcessStrings(t *testing.T) {
 func TestExternalAdapterRejectsInvalidMCPArgument(t *testing.T) {
 	t.Parallel()
 	adapter := helperAdapter(t, "mcp-argument-nul")
-	_, err := adapter.MCPArguments(context.Background(), harness.MCPServer{Name: "repo_view"})
+	_, err := adapter.MCPArguments(context.Background(), harness.MCPServer{Name: "scopesifter"})
 	if err == nil || !strings.Contains(err.Error(), "invalid text") {
 		t.Fatalf("expected invalid MCP argument error, got %v", err)
 	}

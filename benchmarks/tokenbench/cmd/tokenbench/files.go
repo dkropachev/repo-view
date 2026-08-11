@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/evidence"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
 	"golang.org/x/sys/unix"
 )
 
@@ -53,8 +53,8 @@ const (
 	maxRootRefBytes        = 4 << 10
 	maxRecoveryBytes       = 16 << 10
 	credentialPipeTimeout  = 5 * time.Second
-	attestationRootType    = "application/vnd.tokenbench.attestation.v1+json"
-	recoverySchema         = "tokenbench.publication-recovery/v1"
+	attestationRootType    = "application/vnd.tokenbench.attestation.v2+json"
+	recoverySchema         = "tokenbench.publication-recovery/v2"
 	recoveryCompleteOutput = "complete_root_output_not_finalized"
 	recoveryIncomplete     = "publication_incomplete"
 )

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	executionsnapshot "github.com/dkropachev/repo-view/benchmarks/tokenbench/snapshot"
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/source"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
 )
 
 // PreparedOrigins is the adapter-free first phase. Its private fields make it
@@ -64,7 +64,7 @@ func PrepareOrigins(
 			GitMetadataSHA256: verified.GitMetadataSHA256,
 		},
 		artifacts.Codex,
-		artifacts.RepoView,
+		artifacts.ScopeSifter,
 		artifacts.Git,
 		artifacts.Bash,
 		artifacts.Utilities,
@@ -258,7 +258,7 @@ func BindAdapter(
 	baseline := cloneInvocation(common)
 	candidate := cloneInvocation(common)
 	candidate.MCPServers = []harness.MCPServer{
-		repoViewCacheRegistration(prepared.inputs, prepared.origins.RepoView),
+		scopeSifterCacheRegistration(prepared.inputs, prepared.origins.ScopeSifter),
 	}
 	proof, err := ProveParity(baseline, candidate)
 	if err != nil {
@@ -333,13 +333,13 @@ func invocationFromExecution(
 	}
 }
 
-func repoViewCacheRegistration(
+func scopeSifterCacheRegistration(
 	inputs executionsnapshot.ExecutionInputs,
 	origin executionsnapshot.FileOrigin,
 ) harness.MCPServer {
 	return harness.MCPServer{
-		Environment: map[string]string{}, Name: "repo_view",
-		Command: inputs.RepoViewExecutable, ExecutableSHA256: origin.SHA256,
+		Environment: map[string]string{}, Name: "scopesifter",
+		Command: inputs.ScopeSifterExecutable, ExecutableSHA256: origin.SHA256,
 		Arguments: []string{
 			"mcp", "--root", inputs.SourceRoot,
 			"--base", inputs.SourceBaseRevision,

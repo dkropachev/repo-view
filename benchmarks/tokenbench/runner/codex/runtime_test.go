@@ -27,9 +27,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
 )
 
 const (
@@ -41,8 +41,8 @@ const (
 		"sandbox_mode = \"read-only\"\n" +
 		"[config.mcp_servers]\n"
 	candidateConfig = baselineConfig +
-		"[config.mcp_servers.repo_view]\n" +
-		"command = \"/repo-view\"\n" +
+		"[config.mcp_servers.scopesifter]\n" +
+		"command = \"/scopesifter\"\n" +
 		"args = [\"mcp\", \"--root\", \"/source\", \"--base\", \"0000000000000000000000000000000000000000\", \"--git\", \"/usr/bin/git\", \"--git-sha256\", \"0000000000000000000000000000000000000000000000000000000000000000\"]\n" +
 		"env = {}\n" +
 		"environment_id = \"local\"\n" +
@@ -76,7 +76,7 @@ func TestLifecycleCapturesAndComparesOfflinePair(t *testing.T) {
 		toolCall := ""
 		tools, _ := object["tools"].([]any)
 		if len(tools) == 8 {
-			toolCall = "mcp__repo_view__inspect"
+			toolCall = "mcp__scopesifter__inspect"
 		}
 		setSuccessfulResponseHeaders(writer, "application/json")
 		_, _ = writer.Write(responseJSON(toolCall))
@@ -117,7 +117,7 @@ func TestLifecycleCapturesAndComparesOfflinePair(t *testing.T) {
 		candidateArtifacts[0].Data,
 		[]byte(`"provider_total_tokens"`),
 	); count != 1 {
-		t.Fatalf("Responses trace v3 provider-total field count = %d, want 1", count)
+		t.Fatalf("Responses trace v4 provider-total field count = %d, want 1", count)
 	}
 	assertArtifactContract(t, baselineArtifacts, baselineConfig)
 	assertArtifactContract(t, candidateArtifacts, candidateConfig)
@@ -130,7 +130,7 @@ func TestLifecycleCapturesAndComparesOfflinePair(t *testing.T) {
 		len(candidateTrace.Responses) != 1 ||
 		len(candidateTrace.Responses[0].Outputs) != 2 ||
 		candidateTrace.Responses[0].Outputs[1].Type != harnesscodex.OutputTypeToolCall ||
-		candidateTrace.Responses[0].Outputs[1].Name != "repo_view.inspect" {
+		candidateTrace.Responses[0].Outputs[1].Name != "scopesifter.inspect" {
 		t.Fatalf("unexpected candidate trace: %#v", candidateTrace)
 	}
 	if total := candidateTrace.Responses[0].ProviderTotalTokens; total == nil || *total != 14 {
@@ -294,7 +294,7 @@ func TestResolveLimitsRejectsTraceV3EvidenceOverflow(t *testing.T) {
 			config := maximum
 			test.mutate(&config)
 			if _, err := resolveLimits(config); err == nil ||
-				!strings.Contains(err.Error(), "trace v3 evidence bounds") {
+				!strings.Contains(err.Error(), "trace v4 evidence bounds") {
 				t.Fatalf("resolveLimits() = %v, want evidence-bound rejection", err)
 			}
 		})
@@ -388,9 +388,9 @@ func TestIntermediateSSEAndRequestHeadersChangeExactEvidence(t *testing.T) {
 	}
 	acceptDrift, _ := providerRequestHeadersTrace(100, "text/event-stream", true, "", false, "")
 	betaDrift, _ := providerRequestHeadersTrace(100, "application/json", true, "responses=v2", true, "")
-	if base.ExactApplicationSHA256 == acceptDrift.ExactApplicationSHA256 ||
+	if base.ReviewedSemanticSHA256 == acceptDrift.ReviewedSemanticSHA256 ||
 		base.ParityProjectionSHA256 == acceptDrift.ParityProjectionSHA256 ||
-		base.ExactApplicationSHA256 == betaDrift.ExactApplicationSHA256 ||
+		base.ReviewedSemanticSHA256 == betaDrift.ReviewedSemanticSHA256 ||
 		base.ParityProjectionSHA256 == betaDrift.ParityProjectionSHA256 {
 		t.Fatal("Accept/OpenAI-Beta mutation did not alter request-header evidence")
 	}
@@ -614,7 +614,7 @@ func TestWorkspaceMetadataRemainsInNonToolCommitment(t *testing.T) {
 	}
 }
 
-func TestEffectiveConfigEnvelopeAndRepoViewShapeAreExact(t *testing.T) {
+func TestEffectiveConfigEnvelopeAndScopeSifterShapeAreExact(t *testing.T) {
 	t.Parallel()
 	registration := testRequest(
 		RuntimeLayout{},
@@ -860,9 +860,9 @@ func TestLifecycleUsesFreshCommonCapabilityAndExpiresItBeforePublication(t *test
 }
 
 func TestLifecycleClosesReusedIdleUpstreamBeforePublicationBoundary(t *testing.T) {
-	const wantLifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v2"
+	const wantLifecycleVersion = "tokenbench.codex-runner/codex-cli-v0.144.0/v3"
 	if lifecycleVersion != wantLifecycleVersion ||
-		stateMarkerName != ".tokenbench-codex-runtime-v2" ||
+		stateMarkerName != ".tokenbench-codex-runtime-v3" ||
 		stateMarkerData != wantLifecycleVersion+"\n" {
 		t.Fatalf(
 			"lifecycle version/marker = %q %q %q",
@@ -2337,7 +2337,7 @@ func requestJSON(arm genericrunner.Arm, prompt, commandDescription string) []byt
 			}
 			name := spec.name
 			if spec.kind == harnesscodex.ToolKindMCP {
-				name = "mcp__repo_view__" + strings.TrimPrefix(name, "repo_view.")
+				name = "mcp__scopesifter__" + strings.TrimPrefix(name, "scopesifter.")
 			}
 			tools = append(tools, map[string]any{
 				"type":        "function",
@@ -2490,8 +2490,8 @@ func testRequest(layout RuntimeLayout, arm genericrunner.Arm, repetition int) ge
 	if arm == genericrunner.CandidateArm {
 		servers = append(servers, harness.MCPServer{
 			Environment:      map[string]string{},
-			Name:             "repo_view",
-			Command:          "/repo-view",
+			Name:             "scopesifter",
+			Command:          "/scopesifter",
 			ExecutableSHA256: strings.Repeat("0", 64),
 			Arguments: []string{
 				"mcp",

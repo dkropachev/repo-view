@@ -21,11 +21,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (
-	executorVersion        = "tokenbench.process-executor/v2"
+	executorVersion        = "tokenbench.process-executor/v3"
 	defaultMaxOutput       = harness.MaxRawStreamBytes
 	defaultMaxArtifact     = harness.MaxArtifactBytes
 	defaultWaitDelay       = 500 * time.Millisecond
@@ -244,13 +244,13 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 		switch {
 		case config.CommonMCPExecutable == "" && config.CommonMCPExecutableSHA256 == "":
 			if construction == conformantCodexConstruction {
-				return nil, errors.New("conformant runner requires the common repo-view FD5 executable")
+				return nil, errors.New("conformant runner requires the common scopesifter FD5 executable")
 			}
 			commonSlot, err = os.Open(os.DevNull)
 		case config.CommonMCPExecutable == "" ||
 			config.CommonMCPExecutableSHA256 == "" ||
 			!validSHA256(config.CommonMCPExecutableSHA256):
-			return nil, errors.New("common repo-view executable path and SHA-256 must be complete")
+			return nil, errors.New("common scopesifter executable path and SHA-256 must be complete")
 		default:
 			commonMCP, err = pinExecutable(
 				config.CommonMCPExecutable,
@@ -264,7 +264,7 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 			}
 		}
 		if err != nil {
-			return nil, fmt.Errorf("pin common repo-view executable: %w", err)
+			return nil, fmt.Errorf("pin common scopesifter executable: %w", err)
 		}
 		devNullRule, err = openDevNullRule()
 		if err != nil {
@@ -303,7 +303,7 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 		config.CommonMCPExecutableSHA256 != "" {
 		return nil, errors.New("landlock and common FD5 policy require cgroup containment")
 	}
-	canonical := struct { //nolint:govet,nolintlint // Field order defines the v2 configuration hash.
+	canonical := struct { //nolint:govet,nolintlint // Field order defines the v3 configuration hash.
 		Version              string   `json:"version"`
 		Construction         string   `json:"construction"`
 		LifecycleIdentity    string   `json:"lifecycle_identity"`
@@ -340,7 +340,7 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 	}
 	if containment != nil {
 		canonical.Containment = containment.identity()
-		canonical.ArmInit = struct { //nolint:govet,nolintlint // Field order defines the v2 arm-init hash input.
+		canonical.ArmInit = struct { //nolint:govet,nolintlint // Field order defines the v3 arm-init hash input.
 			Version            string `json:"version"`
 			ExecutableSHA256   string `json:"executable_sha256"`
 			LandlockABI        int    `json:"landlock_abi"`
@@ -527,7 +527,7 @@ func (executor *Executor) Prepare(
 		}
 		if executor.commonMCP != nil {
 			if err := executor.commonMCP.reverify(); err != nil {
-				return prepared, NewIntegrityError("reverify common repo-view executable", err)
+				return prepared, NewIntegrityError("reverify common scopesifter executable", err)
 			}
 		}
 		roots, err := openWritableRoots(executor.writablePaths)
@@ -872,7 +872,7 @@ func (prepared *preparedExecution) run(
 		if executor.commonMCP != nil {
 			if err := executor.commonMCP.reverify(); err != nil {
 				return harness.RawExecution{}, NewIntegrityError(
-					"reverify common repo-view after execution",
+					"reverify common scopesifter after execution",
 					err,
 				)
 			}

@@ -23,26 +23,26 @@ func analyzeFixture(t *testing.T, name string) Stats {
 
 func TestAnalyzeSimple(t *testing.T) {
 	stats := analyzeFixture(t, "simple")
-	if stats.TotalToolCalls != 1 || stats.RepoViewToolCalls != 1 ||
-		stats.OtherToolCalls != 0 || stats.RepoViewInvocations != 1 {
+	if stats.TotalToolCalls != 1 || stats.ScopeSifterToolCalls != 1 ||
+		stats.OtherToolCalls != 0 || stats.ScopeSifterInvocations != 1 {
 		t.Fatalf("unexpected totals: %+v", stats)
 	}
-	if !stats.RepoViewCommandShapeValid ||
-		len(stats.RepoViewShapeViolations) != 0 {
+	if !stats.ScopeSifterCommandShapeValid ||
+		len(stats.ScopeSifterShapeViolations) != 0 {
 		t.Fatalf("unexpected command-shape result: %+v", stats)
 	}
-	if got := stats.Calls[0].PrimaryOperation; got != "repo-view.changed" {
+	if got := stats.Calls[0].PrimaryOperation; got != "scopesifter.changed" {
 		t.Fatalf("primary operation = %q", got)
 	}
 	if count := findCount(stats.Operations, "find"); count.ToolCalls != 0 {
-		t.Fatalf("repo-view subcommand counted as shell find: %+v", count)
+		t.Fatalf("scopesifter subcommand counted as shell find: %+v", count)
 	}
 }
 
 func TestAnalyzeChainedCallGraph(t *testing.T) {
 	stats := analyzeFixture(t, "chained")
-	if stats.TotalToolCalls != 4 || stats.RepoViewToolCalls != 2 ||
-		stats.OtherToolCalls != 2 || stats.RepoViewInvocations != 2 {
+	if stats.TotalToolCalls != 4 || stats.ScopeSifterToolCalls != 2 ||
+		stats.OtherToolCalls != 2 || stats.ScopeSifterInvocations != 2 {
 		t.Fatalf("unexpected totals: %+v", stats)
 	}
 	if stats.TemporalEdgeCount != 3 {
@@ -65,17 +65,17 @@ func TestAnalyzeChainedCallGraph(t *testing.T) {
 
 func TestAnalyzeBatchedInvocations(t *testing.T) {
 	stats := analyzeFixture(t, "batched")
-	if stats.TotalToolCalls != 1 || stats.RepoViewToolCalls != 1 ||
-		stats.RepoViewInvocations != 2 {
+	if stats.TotalToolCalls != 1 || stats.ScopeSifterToolCalls != 1 ||
+		stats.ScopeSifterInvocations != 2 {
 		t.Fatalf("unexpected batched totals: %+v", stats)
 	}
-	if stats.RepoViewCommandShapeValid ||
-		len(stats.RepoViewShapeViolations) != 1 {
+	if stats.ScopeSifterCommandShapeValid ||
+		len(stats.ScopeSifterShapeViolations) != 1 {
 		t.Fatalf("compound navigation was not rejected: %+v", stats)
 	}
-	count := findCount(stats.Operations, "repo-view.find")
+	count := findCount(stats.Operations, "scopesifter.find")
 	if count.ToolCalls != 1 || count.Invocations != 2 {
-		t.Fatalf("repo-view.find count = %+v", count)
+		t.Fatalf("scopesifter.find count = %+v", count)
 	}
 }
 
@@ -125,19 +125,19 @@ func TestAnalyzeRejectsInvalidJSON(t *testing.T) {
 
 func TestAnalyzeRejectsInvalidCommandLifecycle(t *testing.T) {
 	tests := map[string]string{
-		"missing start":      `{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json","aggregated_output":"[]","exit_code":0,"status":"completed"}}`,
-		"missing completion": `{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json"}}`,
+		"missing start":      `{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json","aggregated_output":"[]","exit_code":0,"status":"completed"}}`,
+		"missing completion": `{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json"}}`,
 		"changed command": strings.Join([]string{
-			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json"}}`,
-			`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"repo-view find Y --json","aggregated_output":"[]","exit_code":0,"status":"completed"}}`,
+			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json"}}`,
+			`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"scopesifter find Y --json","aggregated_output":"[]","exit_code":0,"status":"completed"}}`,
 		}, "\n"),
 		"duplicate ID": strings.Join([]string{
-			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json"}}`,
-			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json"}}`,
+			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json"}}`,
+			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json"}}`,
 		}, "\n"),
 		"inconsistent status": strings.Join([]string{
-			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json"}}`,
-			`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"repo-view find X --json","aggregated_output":"[]","exit_code":1,"status":"completed"}}`,
+			`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json"}}`,
+			`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"scopesifter find X --json","aggregated_output":"[]","exit_code":1,"status":"completed"}}`,
 		}, "\n"),
 	}
 	for name, transcript := range tests {
@@ -149,21 +149,21 @@ func TestAnalyzeRejectsInvalidCommandLifecycle(t *testing.T) {
 	}
 }
 
-func TestValidateRepoViewCommand(t *testing.T) {
+func TestValidateScopeSifterCommand(t *testing.T) {
 	valid := []string{
-		"repo-view find Symbol --root . --json",
-		"/usr/bin/zsh -lc 'repo-view changed --root . --base HEAD''^ --json'",
-		`/usr/bin/zsh -lc "repo-view inspect pkg/file.go:12 --root . --json"`,
+		"scopesifter find Symbol --root . --json",
+		"/usr/bin/zsh -lc 'scopesifter changed --root . --base HEAD''^ --json'",
+		`/usr/bin/zsh -lc "scopesifter inspect pkg/file.go:12 --root . --json"`,
 	}
 	for _, command := range valid {
-		count, err := ValidateRepoViewCommand(command)
+		count, err := ValidateScopeSifterCommand(command)
 		if err != nil || count != 1 {
-			t.Errorf("ValidateRepoViewCommand(%q) = %d, %v", command, count, err)
+			t.Errorf("ValidateScopeSifterCommand(%q) = %d, %v", command, count, err)
 		}
-		subcommand, err := ValidatedRepoViewSubcommand(command)
+		subcommand, err := ValidatedScopeSifterSubcommand(command)
 		if err != nil || subcommand == "" {
 			t.Errorf(
-				"ValidatedRepoViewSubcommand(%q) = %q, %v",
+				"ValidatedScopeSifterSubcommand(%q) = %q, %v",
 				command,
 				subcommand,
 				err,
@@ -172,52 +172,52 @@ func TestValidateRepoViewCommand(t *testing.T) {
 	}
 
 	invalid := []string{
-		"printf fake repo-view find Symbol --root . --json",
-		"/usr/bin/zsh -lc 'for x in A B; do repo-view find $x --root . --json; done'",
-		"/usr/bin/zsh -lc 'repo-view find A --root . --json && repo-view find B --root . --json'",
-		"/usr/bin/zsh -lc 'repo-view find A --root . --json > /dev/null'",
-		"/usr/bin/zsh -lc 'repo-view find A --root .'",
-		`repo-view find "$SYMBOL" --root . --json`,
-		`repo-view find "$@" --root . --json`,
-		`repo-view find "$?" --root . --json`,
-		`repo-view find Symbol* --root . --json`,
-		`repo-view inspect pkg/\{one,two\}.go:1 --root . --json`,
-		`repo-view inspect pkg/file\ name.go:1 --root . --json`,
+		"printf fake scopesifter find Symbol --root . --json",
+		"/usr/bin/zsh -lc 'for x in A B; do scopesifter find $x --root . --json; done'",
+		"/usr/bin/zsh -lc 'scopesifter find A --root . --json && scopesifter find B --root . --json'",
+		"/usr/bin/zsh -lc 'scopesifter find A --root . --json > /dev/null'",
+		"/usr/bin/zsh -lc 'scopesifter find A --root .'",
+		`scopesifter find "$SYMBOL" --root . --json`,
+		`scopesifter find "$@" --root . --json`,
+		`scopesifter find "$?" --root . --json`,
+		`scopesifter find Symbol* --root . --json`,
+		`scopesifter inspect pkg/\{one,two\}.go:1 --root . --json`,
+		`scopesifter inspect pkg/file\ name.go:1 --root . --json`,
 	}
 	for _, command := range invalid {
-		count, err := ValidateRepoViewCommand(command)
+		count, err := ValidateScopeSifterCommand(command)
 		if err == nil || count < 1 {
-			t.Errorf("ValidateRepoViewCommand(%q) = %d, %v", command, count, err)
+			t.Errorf("ValidateScopeSifterCommand(%q) = %d, %v", command, count, err)
 		}
 	}
-	if subcommand, err := ValidatedRepoViewSubcommand("go test ./..."); err != nil ||
+	if subcommand, err := ValidatedScopeSifterSubcommand("go test ./..."); err != nil ||
 		subcommand != "" {
 		t.Fatalf("non-navigation subcommand = %q, %v", subcommand, err)
 	}
-	if count, err := ValidateRepoViewCommand(
-		"notrepo-view find Symbol --json",
+	if count, err := ValidateScopeSifterCommand(
+		"notscopesifter find Symbol --json",
 	); err != nil || count != 0 {
 		t.Fatalf("suffix command count = %d, error = %v", count, err)
 	}
 }
 
-func TestAnalyzeDoesNotCountExecutableSuffixAsRepoView(t *testing.T) {
+func TestAnalyzeDoesNotCountExecutableSuffixAsScopeSifter(t *testing.T) {
 	transcript := strings.Join([]string{
-		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"notrepo-view find Symbol --json"}}`,
-		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"notrepo-view find Symbol --json","aggregated_output":"not found","exit_code":127,"status":"failed"}}`,
+		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"notscopesifter find Symbol --json"}}`,
+		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"notscopesifter find Symbol --json","aggregated_output":"not found","exit_code":127,"status":"failed"}}`,
 	}, "\n")
 	stats, err := Analyze(strings.NewReader(transcript))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.RepoViewToolCalls != 0 || stats.RepoViewInvocations != 0 ||
-		!stats.RepoViewCommandShapeValid {
+	if stats.ScopeSifterToolCalls != 0 || stats.ScopeSifterInvocations != 0 ||
+		!stats.ScopeSifterCommandShapeValid {
 		t.Fatalf("stats = %#v", stats)
 	}
 }
 
-func TestAnalyzeDoesNotCountAssignmentValueAsRepoView(t *testing.T) {
-	const command = `/bin/bash -lc 'X=/usr/bin/repo-view find Symbol --json'`
+func TestAnalyzeDoesNotCountAssignmentValueAsScopeSifter(t *testing.T) {
+	const command = `/bin/bash -lc 'X=/usr/bin/scopesifter find Symbol --json'`
 	transcript := strings.Join([]string{
 		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"` + command + `"}}`,
 		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"` + command + `","aggregated_output":"","exit_code":0,"status":"completed"}}`,
@@ -226,8 +226,8 @@ func TestAnalyzeDoesNotCountAssignmentValueAsRepoView(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.RepoViewToolCalls != 0 || stats.RepoViewInvocations != 0 ||
-		!stats.RepoViewCommandShapeValid {
+	if stats.ScopeSifterToolCalls != 0 || stats.ScopeSifterInvocations != 0 ||
+		!stats.ScopeSifterCommandShapeValid {
 		t.Fatalf("stats = %#v", stats)
 	}
 	if got := stats.Calls[0].PrimaryOperation; got != "find" {

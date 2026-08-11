@@ -1,7 +1,7 @@
 # Tokenbench
 
 Tokenbench is the validity-first paired benchmark for measuring whether making
-the read-only `repo_view` MCP server available changes Codex token use without
+the read-only `scopesifter` MCP server available changes Codex token use without
 reducing answer quality.
 
 The invariant is deliberately narrow:
@@ -9,7 +9,7 @@ The invariant is deliberately narrow:
 | Arm | MCP configuration |
 | --- | --- |
 | Baseline | no MCP registrations |
-| Candidate | exactly one required registration named `repo_view` |
+| Candidate | exactly one required registration named `scopesifter` |
 
 Everything else is derived once and shared: exact prompt bytes and roles,
 developer instructions, requested and provider-resolved model revision,
@@ -23,8 +23,8 @@ value, or repository preparation is a parity failure, not a benchmark result.
 
 The checked-in implementation provides:
 
-- strict `tokenbench.suite/v2`, artifact-manifest v1, plan v3, run v2,
-  observation v2, capture v4, signed-root, trust-policy, and replay v2
+- strict `tokenbench.suite/v2`, artifact-manifest v2, plan v4, run v3,
+  observation v2, capture v5, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
   `0.144.0`, exact executable SHA-256
@@ -32,7 +32,7 @@ The checked-in implementation provides:
 - one allowed model snapshot: requested `gpt-5.4`, immutable identity
   `gpt-5.4@gpt-5.4-2026-03-05`, provider value
   `gpt-5.4-2026-03-05`;
-- immutable source, standalone `.git`, changed-state cache, Codex, repo-view,
+- immutable source, standalone `.git`, changed-state cache, Codex, scopesifter,
   Git, Bash, runner, and closed native-tool snapshots backed by fs-verity and a
   private read-only self-bind mount;
 - fresh arm state, randomized counterbalanced order, complete process and
@@ -123,9 +123,9 @@ sorted key IDs for `capture`, `replay`, or both roles.
 ## Building a publishable binary
 
 Publishable execution uses a closed artifact bundle. Its fixed manifest name is
-`tokenbench-artifacts-v1.json`; the exact compact JSON bytes must match
-[`schemas/artifact-manifest-v1.schema.json`](schemas/artifact-manifest-v1.schema.json).
-It names exact, single-link, native static ELF images for Codex, repo-view,
+`tokenbench-artifacts-v2.json`; the exact compact JSON bytes must match
+[`schemas/artifact-manifest-v2.schema.json`](schemas/artifact-manifest-v2.schema.json).
+It names exact, single-link, native static ELF images for Codex, scopesifter,
 verifier Git, Bash, and each allowlisted utility, with reproducible provenance.
 No symlink, dynamic loader, multicall alias, unlisted executable, or digest drift
 is accepted.
@@ -135,9 +135,9 @@ digest. Build tokenbench itself as a static executable and bind that digest at
 link time:
 
 ```sh
-manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v1.json | awk '{print $1}')"
+manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v2.json | awk '{print $1}')"
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/dkropachev/repo-view/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
@@ -190,14 +190,14 @@ benchmarks/tokenbench/
   study/                separate methodology stage for blinded paired analysis
   schemas/              authored JSON contracts
   scripts/              fail-closed privileged validation
-  docs/                 operations, methodology, evidence, adapter, and migration guides
+  docs/                 operations, methodology, evidence, and adapter guides
 ```
 
 Read [DESIGN.md](DESIGN.md) before changing an authority boundary,
 [AGENTS.md](AGENTS.md) before editing code, and
 [docs/adapter-authoring.md](docs/adapter-authoring.md) before adding another
 harness. Operators should follow the end-to-end
-[artifact, signing, run, and recovery guide](docs/operations.md). Historical
-`experiments/lsp-replacement` output is explicitly
-non-conformant and is not pooled with tokenbench evidence; see
-[docs/migration.md](docs/migration.md).
+[artifact, signing, run, and recovery guide](docs/operations.md). Current
+loaders accept only the ScopeSifter-bound contracts documented here;
+pre-rename evidence remains available from Git history and is not pooled with
+Tokenbench evidence.

@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	OriginSchemaVersion    = "tokenbench.origin-inputs/v1"
-	ExecutionSchemaVersion = "tokenbench.execution-inputs/v1"
+	OriginSchemaVersion    = "tokenbench.origin-inputs/v2"
+	ExecutionSchemaVersion = "tokenbench.execution-inputs/v2"
 
 	ManifestKindDirectory = "directory"
 	ManifestKindFile      = "regular-file"
@@ -30,7 +30,7 @@ const (
 	logicalToolsRoot    = "tools"
 	logicalToolboxRoot  = "toolbox"
 	logicalCodex        = "tool/codex"
-	logicalRepoView     = "tool/repo-view"
+	logicalScopeSifter  = "tool/scopesifter"
 	logicalGit          = "tool/verifier-git"
 	logicalBash         = "tool/bash"
 	logicalRunnerInit   = "tool/runner-arm-init"
@@ -83,7 +83,7 @@ type OriginInputs struct {
 	SchemaVersion string         `json:"schema_version"`
 	Source        SourceOrigin   `json:"source"`
 	Codex         FileOrigin     `json:"codex"`
-	RepoView      FileOrigin     `json:"repo_view"`
+	ScopeSifter   FileOrigin     `json:"scopesifter"`
 	Git           FileOrigin     `json:"git"`
 	Bash          FileOrigin     `json:"bash"`
 	Utilities     UtilityOrigins `json:"utilities"`
@@ -134,7 +134,7 @@ type ChangedFileState struct { //nolint:govet,nolintlint // Field order defines 
 }
 
 // ChangedStateCache is the complete Git-derived state consumed by the
-// cache-only repo-view backend. Patch is the full bounded base...HEAD patch.
+// cache-only scopesifter backend. Patch is the full bounded base...HEAD patch.
 type ChangedStateCache struct { //nolint:govet,nolintlint // Field order defines canonical cache JSON.
 	SchemaVersion string             `json:"schema_version"`
 	BaseCommit    string             `json:"base_commit"`
@@ -313,7 +313,7 @@ type ManifestEntry struct { //nolint:govet,nolintlint // Field order defines can
 }
 
 // ExecutionInputs is the common immutable filesystem authority committed by
-// a v3 plan. Both arms use these exact paths and policy lists. The lists are
+// a v4 plan. Both arms use these exact paths and policy lists. The lists are
 // derived by this package and are not accepted as Build input.
 type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines canonical execution JSON.
 	SchemaVersion          string               `json:"schema_version"`
@@ -321,7 +321,7 @@ type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines c
 	SourceRoot             string               `json:"source_root"`
 	GitMetadataRoot        string               `json:"git_metadata_root"`
 	CodexExecutable        string               `json:"codex_executable"`
-	RepoViewExecutable     string               `json:"repo_view_executable"`
+	ScopeSifterExecutable  string               `json:"scopesifter_executable"`
 	VerifierGitExecutable  string               `json:"verifier_git_executable"`
 	BashExecutable         string               `json:"bash_executable"`
 	Utilities              UtilityPaths         `json:"utilities"`
@@ -347,7 +347,7 @@ type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines c
 // NewOriginInputs validates and commits the explicit code-owned origin roles.
 func NewOriginInputs(
 	source SourceOrigin,
-	codex, repoView, git, bash FileOrigin,
+	codex, scopeSifter, git, bash FileOrigin,
 	utilities UtilityOrigins,
 	runnerArmInit FileOrigin,
 ) (OriginInputs, error) {
@@ -355,7 +355,7 @@ func NewOriginInputs(
 		SchemaVersion: OriginSchemaVersion,
 		Source:        source,
 		Codex:         codex,
-		RepoView:      repoView,
+		ScopeSifter:   scopeSifter,
 		Git:           git,
 		Bash:          bash,
 		Utilities:     utilities,
@@ -394,7 +394,7 @@ func (inputs OriginInputs) Validate() error {
 		file FileOrigin
 	}{
 		{"Codex", inputs.Codex},
-		{"repo-view", inputs.RepoView},
+		{"scopesifter", inputs.ScopeSifter},
 		{"Git", inputs.Git},
 		{"bash", inputs.Bash},
 		{"runner", inputs.Runner},
@@ -409,7 +409,7 @@ func (inputs OriginInputs) Validate() error {
 	}
 	uniqueRoles := []FileOrigin{
 		inputs.Codex,
-		inputs.RepoView,
+		inputs.ScopeSifter,
 		inputs.Git,
 		inputs.Bash,
 		inputs.Runner,
@@ -459,12 +459,12 @@ func (inputs ExecutionInputs) Validate() error {
 		return errors.New("execution snapshot root must be absolute, canonical, and non-root")
 	}
 	wantPaths := struct {
-		source, metadata, codex, repoView, verifierGit, bash, runner, cache string
+		source, metadata, codex, scopeSifter, verifierGit, bash, runner, cache string
 	}{
 		source:      filepath.Join(inputs.SnapshotRoot, "source"),
 		metadata:    filepath.Join(inputs.SnapshotRoot, "source", ".git"),
 		codex:       filepath.Join(inputs.SnapshotRoot, "tools", "codex"),
-		repoView:    filepath.Join(inputs.SnapshotRoot, "tools", "repo-view"),
+		scopeSifter: filepath.Join(inputs.SnapshotRoot, "tools", "scopesifter"),
 		verifierGit: filepath.Join(inputs.SnapshotRoot, "tools", "verifier-git"),
 		bash:        filepath.Join(inputs.SnapshotRoot, "toolbox", "bash"),
 		runner:      filepath.Join(inputs.SnapshotRoot, "tools", "runner-arm-init"),
@@ -477,8 +477,8 @@ func (inputs ExecutionInputs) Validate() error {
 		return errors.New("execution Git metadata path is not code-owned")
 	case inputs.CodexExecutable != wantPaths.codex:
 		return errors.New("execution Codex path is not code-owned")
-	case inputs.RepoViewExecutable != wantPaths.repoView:
-		return errors.New("execution repo-view path is not code-owned")
+	case inputs.ScopeSifterExecutable != wantPaths.scopeSifter:
+		return errors.New("execution scopesifter path is not code-owned")
 	case inputs.VerifierGitExecutable != wantPaths.verifierGit:
 		return errors.New("execution verifier Git path is not code-owned")
 	case inputs.BashExecutable != wantPaths.bash ||
@@ -502,7 +502,7 @@ func (inputs ExecutionInputs) Validate() error {
 	wantReadOnly := []string{inputs.SourceRoot, wantPaths.cache}
 	wantExecutable := []string{
 		inputs.CodexExecutable,
-		inputs.RepoViewExecutable,
+		inputs.ScopeSifterExecutable,
 		inputs.BashExecutable,
 	}
 	wantUtilities := utilityPathsForRoot(inputs.ToolboxRoot)
@@ -552,7 +552,7 @@ func (inputs ExecutionInputs) Validate() error {
 	}
 	executablePaths := append([]string{
 		inputs.CodexExecutable,
-		inputs.RepoViewExecutable,
+		inputs.ScopeSifterExecutable,
 		inputs.VerifierGitExecutable,
 		inputs.BashExecutable,
 		inputs.RunnerExecutable,
@@ -605,7 +605,7 @@ func (inputs ExecutionInputs) Validate() error {
 	return nil
 }
 
-// ValidateBinding is the pure v3 bridge between mutable origins and the
+// ValidateBinding is the pure v4 bridge between mutable origins and the
 // immutable image. It proves that every copied executable's manifest bytes and
 // every source identity equal the committed origin role.
 func ValidateBinding(origins OriginInputs, execution ExecutionInputs) error {
@@ -634,7 +634,7 @@ func ValidateBinding(origins OriginInputs, execution ExecutionInputs) error {
 		path   string
 	}{
 		{"Codex", origins.Codex, execution.CodexExecutable},
-		{"repo-view", origins.RepoView, execution.RepoViewExecutable},
+		{"scopesifter", origins.ScopeSifter, execution.ScopeSifterExecutable},
 		{"verifier Git", origins.Git, execution.VerifierGitExecutable},
 		{"bash", origins.Bash, execution.BashExecutable},
 		{"runner/arm-init", origins.Runner, execution.RunnerExecutable},
@@ -767,8 +767,8 @@ func logicalOriginForPath(root, path string) (string, bool) {
 		return "cache", true
 	case "tools/codex":
 		return logicalCodex, true
-	case "tools/repo-view":
-		return logicalRepoView, true
+	case "tools/scopesifter":
+		return logicalScopeSifter, true
 	case "tools/verifier-git":
 		return logicalGit, true
 	case "tools/runner-arm-init":

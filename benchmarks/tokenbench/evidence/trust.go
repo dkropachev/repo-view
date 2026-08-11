@@ -10,12 +10,12 @@ import (
 )
 
 const (
-	TrustPolicySchemaVersion = "tokenbench.trust-policy/v1"
+	TrustPolicySchemaVersion = "tokenbench.trust-policy/v2"
 	maxTrustPolicyBytes      = 64 << 10
 	maxTrustedKeys           = 64
 )
 
-// KeyStatus controls current verification. Because v1 has no trusted
+// KeyStatus controls current verification. Because v2 has no trusted
 // timestamp, both retired and revoked keys are rejected by a current policy.
 type KeyStatus string
 

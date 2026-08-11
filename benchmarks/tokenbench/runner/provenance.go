@@ -6,7 +6,7 @@ import (
 	"strings"
 )
 
-const ConformancePolicySchemaVersion = "tokenbench.runner-conformance-policy/v2"
+const ConformancePolicySchemaVersion = "tokenbench.runner-conformance-policy/v3"
 
 type constructionMode string
 
@@ -14,8 +14,8 @@ const (
 	genericConstruction         constructionMode = "extension"
 	conformantCodexConstruction constructionMode = "builtin-codex-v0.144.0"
 
-	codexLifecyclePackage         = "github.com/dkropachev/repo-view/benchmarks/tokenbench/runner/codex"
-	codexIdentityPrefix           = "tokenbench.codex-runner/codex-cli-v0.144.0/v2/sha256:"
+	codexLifecyclePackage         = "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
+	codexIdentityPrefix           = "tokenbench.codex-runner/codex-cli-v0.144.0/v3/sha256:"
 	productionRoutePolicy         = "openai-api/v1:https://api.openai.com/v1"
 	productionNetworkPolicyPrefix = "go-system-roots/v1;proxy=disabled;ambient-overrides=forbidden/sha256:"
 )
@@ -47,9 +47,6 @@ func (executor *Executor) publishableLocked() bool {
 		exactCodexLifecycle(executor.lifecycle) &&
 		executor.lifecycle.Identity() == executor.lifecycleIdentity
 }
-
-// Conformant is a semantic alias for Publishable.
-func (executor *Executor) Conformant() bool { return executor.Publishable() }
 
 // ConformancePolicy returns a defensive copy of the exact policy enforced by
 // a publishable executor. Callers must compare it to separate immutable input

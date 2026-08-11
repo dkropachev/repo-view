@@ -1,0 +1,128 @@
+package navigator
+
+import "sort"
+
+// These are the Unicode 17 ID_Start and ID_Continue ranges not present in
+// Go's Unicode 15 tables. ECMAScript identifiers track Unicode ID properties,
+// so the backend carries the delta rather than inheriting the Go toolchain's
+// older snapshot.
+type javascriptIdentifierRange struct {
+	first rune
+	last  rune
+}
+
+var javascriptUnicode17IDStartDelta = [...]javascriptIdentifierRange{
+	{first: 0x88F, last: 0x88F},
+	{first: 0xC5C, last: 0xC5C},
+	{first: 0xCDC, last: 0xCDC},
+	{first: 0x1C89, last: 0x1C8A},
+	{first: 0xA7CB, last: 0xA7CF},
+	{first: 0xA7D2, last: 0xA7D2},
+	{first: 0xA7D4, last: 0xA7D4},
+	{first: 0xA7DA, last: 0xA7DC},
+	{first: 0xA7F1, last: 0xA7F1},
+	{first: 0x105C0, last: 0x105F3},
+	{first: 0x10940, last: 0x10959},
+	{first: 0x10D4A, last: 0x10D65},
+	{first: 0x10D6F, last: 0x10D85},
+	{first: 0x10EC2, last: 0x10EC7},
+	{first: 0x11380, last: 0x11389},
+	{first: 0x1138B, last: 0x1138B},
+	{first: 0x1138E, last: 0x1138E},
+	{first: 0x11390, last: 0x113B5},
+	{first: 0x113B7, last: 0x113B7},
+	{first: 0x113D1, last: 0x113D1},
+	{first: 0x113D3, last: 0x113D3},
+	{first: 0x11BC0, last: 0x11BE0},
+	{first: 0x11DB0, last: 0x11DDB},
+	{first: 0x13460, last: 0x143FA},
+	{first: 0x16100, last: 0x1611D},
+	{first: 0x16D40, last: 0x16D6C},
+	{first: 0x16EA0, last: 0x16EB8},
+	{first: 0x16EBB, last: 0x16ED3},
+	{first: 0x16FF2, last: 0x16FF6},
+	{first: 0x187F8, last: 0x187FF},
+	{first: 0x18CFF, last: 0x18CFF},
+	{first: 0x18D09, last: 0x18D1E},
+	{first: 0x18D80, last: 0x18DF2},
+	{first: 0x1E5D0, last: 0x1E5ED},
+	{first: 0x1E5F0, last: 0x1E5F0},
+	{first: 0x1E6C0, last: 0x1E6DE},
+	{first: 0x1E6E0, last: 0x1E6E2},
+	{first: 0x1E6E4, last: 0x1E6E5},
+	{first: 0x1E6E7, last: 0x1E6ED},
+	{first: 0x1E6F0, last: 0x1E6F4},
+	{first: 0x1E6FE, last: 0x1E6FF},
+	{first: 0x2B73A, last: 0x2B73F},
+	{first: 0x2CEA2, last: 0x2CEAD},
+	{first: 0x2EBF0, last: 0x2EE5D},
+	{first: 0x323B0, last: 0x33479},
+}
+
+var javascriptUnicode17IDContinueDelta = [...]javascriptIdentifierRange{
+	{first: 0x88F, last: 0x88F},
+	{first: 0x897, last: 0x897},
+	{first: 0xC5C, last: 0xC5C},
+	{first: 0xCDC, last: 0xCDC},
+	{first: 0x1ACF, last: 0x1ADD},
+	{first: 0x1AE0, last: 0x1AEB},
+	{first: 0x1C89, last: 0x1C8A},
+	{first: 0x30FB, last: 0x30FB},
+	{first: 0xA7CB, last: 0xA7CF},
+	{first: 0xA7D2, last: 0xA7D2},
+	{first: 0xA7D4, last: 0xA7D4},
+	{first: 0xA7DA, last: 0xA7DC},
+	{first: 0xA7F1, last: 0xA7F1},
+	{first: 0xFF65, last: 0xFF65},
+	{first: 0x105C0, last: 0x105F3},
+	{first: 0x10940, last: 0x10959},
+	{first: 0x10D40, last: 0x10D65},
+	{first: 0x10D69, last: 0x10D6D},
+	{first: 0x10D6F, last: 0x10D85},
+	{first: 0x10EC2, last: 0x10EC7},
+	{first: 0x10EFA, last: 0x10EFC},
+	{first: 0x11380, last: 0x11389},
+	{first: 0x1138B, last: 0x1138B},
+	{first: 0x1138E, last: 0x1138E},
+	{first: 0x11390, last: 0x113B5},
+	{first: 0x113B7, last: 0x113C0},
+	{first: 0x113C2, last: 0x113C2},
+	{first: 0x113C5, last: 0x113C5},
+	{first: 0x113C7, last: 0x113CA},
+	{first: 0x113CC, last: 0x113D3},
+	{first: 0x113E1, last: 0x113E2},
+	{first: 0x116D0, last: 0x116E3},
+	{first: 0x11B60, last: 0x11B67},
+	{first: 0x11BC0, last: 0x11BE0},
+	{first: 0x11BF0, last: 0x11BF9},
+	{first: 0x11DB0, last: 0x11DDB},
+	{first: 0x11DE0, last: 0x11DE9},
+	{first: 0x11F5A, last: 0x11F5A},
+	{first: 0x13460, last: 0x143FA},
+	{first: 0x16100, last: 0x16139},
+	{first: 0x16D40, last: 0x16D6C},
+	{first: 0x16D70, last: 0x16D79},
+	{first: 0x16EA0, last: 0x16EB8},
+	{first: 0x16EBB, last: 0x16ED3},
+	{first: 0x16FF2, last: 0x16FF6},
+	{first: 0x187F8, last: 0x187FF},
+	{first: 0x18CFF, last: 0x18CFF},
+	{first: 0x18D09, last: 0x18D1E},
+	{first: 0x18D80, last: 0x18DF2},
+	{first: 0x1CCF0, last: 0x1CCF9},
+	{first: 0x1E5D0, last: 0x1E5FA},
+	{first: 0x1E6C0, last: 0x1E6DE},
+	{first: 0x1E6E0, last: 0x1E6F5},
+	{first: 0x1E6FE, last: 0x1E6FF},
+	{first: 0x2B73A, last: 0x2B73F},
+	{first: 0x2CEA2, last: 0x2CEAD},
+	{first: 0x2EBF0, last: 0x2EE5D},
+	{first: 0x323B0, last: 0x33479},
+}
+
+func javascriptRuneInIdentifierRanges(r rune, ranges []javascriptIdentifierRange) bool {
+	index := sort.Search(len(ranges), func(index int) bool {
+		return ranges[index].last >= r
+	})
+	return index < len(ranges) && ranges[index].first <= r
+}

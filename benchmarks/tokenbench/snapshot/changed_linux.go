@@ -16,7 +16,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/internal/gitdiffcontract"
+	"github.com/scopesifter/scopesifter/internal/gitdiffcontract"
 	"golang.org/x/sys/unix"
 )
 

@@ -15,16 +15,16 @@ import (
 	"unicode/utf8"
 )
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
-var repoViewPattern = regexp.MustCompile(
+var scopeSifterPattern = regexp.MustCompile(
 	`(?:^|[\n\r\t ;|&('"` + "`" + `])(?:[^ \t\n\r;|&=('"` + "`" + `]+/)?` +
-		`repo-view(?:\.bin)?\s+(changed|find|inspect|outline)(?:\s|$)`,
+		`scopesifter(?:\.bin)?\s+(changed|find|inspect|outline)(?:\s|$)`,
 )
 
-var repoViewPrefixPattern = regexp.MustCompile(
+var scopeSifterPrefixPattern = regexp.MustCompile(
 	`(?:^|[\n\r\t ;|&('"` + "`" + `])(?:[^ \t\n\r;|&=('"` + "`" + `]+/)?` +
-		`repo-view(?:\.bin)?\s+$`,
+		`scopesifter(?:\.bin)?\s+$`,
 )
 
 var pathPattern = regexp.MustCompile(
@@ -60,26 +60,26 @@ type Count struct {
 	OutputCharacters int    `json:"output_characters"`
 }
 
-type RepoViewInvocation struct {
+type ScopeSifterInvocation struct {
 	Subcommand string `json:"subcommand"`
 }
 
 type Call struct {
-	ExitCode             *int                 `json:"exit_code,omitempty"`
-	OperationInvocations map[string]int       `json:"operation_invocations"`
-	Status               string               `json:"status,omitempty"`
-	ID                   string               `json:"id"`
-	ToolType             string               `json:"tool_type"`
-	RepoViewShapeError   string               `json:"repo_view_command_shape_error,omitempty"`
-	OutputSHA256         string               `json:"output_sha256,omitempty"`
-	PrimaryOperation     string               `json:"primary_operation"`
-	Command              string               `json:"command,omitempty"`
-	Operations           []string             `json:"operations"`
-	RepoViewInvocations  []RepoViewInvocation `json:"repo_view_invocations,omitempty"`
-	Index                int                  `json:"index"`
-	OutputCharacters     int                  `json:"output_characters"`
-	CompletedEvent       int                  `json:"completed_event"`
-	StartedEvent         int                  `json:"started_event"`
+	ExitCode               *int                    `json:"exit_code,omitempty"`
+	OperationInvocations   map[string]int          `json:"operation_invocations"`
+	Status                 string                  `json:"status,omitempty"`
+	ID                     string                  `json:"id"`
+	ToolType               string                  `json:"tool_type"`
+	ScopeSifterShapeError  string                  `json:"scopesifter_command_shape_error,omitempty"`
+	OutputSHA256           string                  `json:"output_sha256,omitempty"`
+	PrimaryOperation       string                  `json:"primary_operation"`
+	Command                string                  `json:"command,omitempty"`
+	Operations             []string                `json:"operations"`
+	ScopeSifterInvocations []ScopeSifterInvocation `json:"scopesifter_invocations,omitempty"`
+	Index                  int                     `json:"index"`
+	OutputCharacters       int                     `json:"output_characters"`
+	CompletedEvent         int                     `json:"completed_event"`
+	StartedEvent           int                     `json:"started_event"`
 }
 
 type Edge struct {
@@ -98,20 +98,20 @@ type CallGraph struct {
 }
 
 type Stats struct {
-	CallGraph                 CallGraph `json:"call_graph"`
-	RepoViewShapeViolations   []string  `json:"repo_view_command_shape_violations"`
-	Calls                     []Call    `json:"calls"`
-	Operations                []Count   `json:"operations"`
-	ToolTypes                 []Count   `json:"tool_types"`
-	RepoViewToolCalls         int       `json:"repo_view_tool_calls"`
-	RepoViewInvocations       int       `json:"repo_view_invocations"`
-	OtherToolCalls            int       `json:"other_tool_calls"`
-	SchemaVersion             int       `json:"schema_version"`
-	TemporalEdgeCount         int       `json:"temporal_edge_count"`
-	OutputReferenceEdgeCount  int       `json:"output_reference_edge_count"`
-	CommandExecutionToolCalls int       `json:"command_execution_tool_calls"`
-	TotalToolCalls            int       `json:"total_tool_calls"`
-	RepoViewCommandShapeValid bool      `json:"repo_view_command_shape_valid"`
+	CallGraph                    CallGraph `json:"call_graph"`
+	ScopeSifterShapeViolations   []string  `json:"scopesifter_command_shape_violations"`
+	Calls                        []Call    `json:"calls"`
+	Operations                   []Count   `json:"operations"`
+	ToolTypes                    []Count   `json:"tool_types"`
+	ScopeSifterToolCalls         int       `json:"scopesifter_tool_calls"`
+	ScopeSifterInvocations       int       `json:"scopesifter_invocations"`
+	OtherToolCalls               int       `json:"other_tool_calls"`
+	SchemaVersion                int       `json:"schema_version"`
+	TemporalEdgeCount            int       `json:"temporal_edge_count"`
+	OutputReferenceEdgeCount     int       `json:"output_reference_edge_count"`
+	CommandExecutionToolCalls    int       `json:"command_execution_tool_calls"`
+	TotalToolCalls               int       `json:"total_tool_calls"`
+	ScopeSifterCommandShapeValid bool      `json:"scopesifter_command_shape_valid"`
 }
 
 type event struct {
@@ -257,19 +257,19 @@ func Analyze(r io.Reader) (Stats, error) {
 			startedEvent = eventIndex
 		}
 		call := Call{
-			ID:                   id,
-			ToolType:             completed.Type,
-			StartedEvent:         startedEvent,
-			CompletedEvent:       eventIndex,
-			PrimaryOperation:     primary,
-			Operations:           operationNames(operations),
-			OperationInvocations: operationInvocationCounts(operations),
-			Command:              completed.Command,
-			Status:               completed.Status,
-			ExitCode:             completed.ExitCode,
-			OutputCharacters:     utf8.RuneCountInString(output),
-			RepoViewInvocations:  invocations,
-			RepoViewShapeError:   shapeErr,
+			ID:                     id,
+			ToolType:               completed.Type,
+			StartedEvent:           startedEvent,
+			CompletedEvent:         eventIndex,
+			PrimaryOperation:       primary,
+			Operations:             operationNames(operations),
+			OperationInvocations:   operationInvocationCounts(operations),
+			Command:                completed.Command,
+			Status:                 completed.Status,
+			ExitCode:               completed.ExitCode,
+			OutputCharacters:       utf8.RuneCountInString(output),
+			ScopeSifterInvocations: invocations,
+			ScopeSifterShapeError:  shapeErr,
 		}
 		if output != "" {
 			sum := sha256.Sum256([]byte(output))
@@ -331,7 +331,7 @@ func isToolItem(itemType string) bool {
 	}
 }
 
-func classifyOperations(completed item) ([]operationHit, []RepoViewInvocation, string) {
+func classifyOperations(completed item) ([]operationHit, []ScopeSifterInvocation, string) {
 	if completed.Type != "command_execution" {
 		name := completed.Name
 		if name == "" {
@@ -347,14 +347,14 @@ func classifyOperations(completed item) ([]operationHit, []RepoViewInvocation, s
 	}
 
 	var hits []operationHit
-	var invocations []RepoViewInvocation
-	for _, match := range repoViewPattern.FindAllStringSubmatchIndex(completed.Command, -1) {
+	var invocations []ScopeSifterInvocation
+	for _, match := range scopeSifterPattern.FindAllStringSubmatchIndex(completed.Command, -1) {
 		subcommand := completed.Command[match[2]:match[3]]
-		name := "repo-view." + subcommand
+		name := "scopesifter." + subcommand
 		hits = append(hits, operationHit{name: name, start: match[0]})
-		invocations = append(invocations, RepoViewInvocation{Subcommand: subcommand})
+		invocations = append(invocations, ScopeSifterInvocation{Subcommand: subcommand})
 	}
-	_, shapeErr := ValidateRepoViewCommand(completed.Command)
+	_, shapeErr := ValidateScopeSifterCommand(completed.Command)
 
 	for _, operation := range knownShellOperations {
 		pattern := commandPattern(operation)
@@ -362,7 +362,7 @@ func classifyOperations(completed item) ([]operationHit, []RepoViewInvocation, s
 			matched := completed.Command[match[0]:match[1]]
 			nameOffset := strings.LastIndex(matched, operation)
 			operationStart := match[0] + nameOffset
-			if operation == "find" && isRepoViewSubcommand(completed.Command, operationStart) {
+			if operation == "find" && isScopeSifterSubcommand(completed.Command, operationStart) {
 				continue
 			}
 			hits = append(hits, operationHit{name: operation, start: operationStart})
@@ -383,66 +383,66 @@ func classifyOperations(completed item) ([]operationHit, []RepoViewInvocation, s
 	return hits, invocations, ""
 }
 
-// ValidateRepoViewCommand returns the number of lexically visible repo-view
+// ValidateScopeSifterCommand returns the number of lexically visible scopesifter
 // navigation invocations and rejects commands that do not execute exactly one
 // standalone invocation. The Codex transcript records a shell command rather
 // than an execve trace, so accepting compound or dynamically expanded commands
 // would let one visible token stand in for an arbitrary number of executions.
-func ValidateRepoViewCommand(command string) (int, error) {
-	matches := repoViewPattern.FindAllStringSubmatchIndex(command, -1)
+func ValidateScopeSifterCommand(command string) (int, error) {
+	matches := scopeSifterPattern.FindAllStringSubmatchIndex(command, -1)
 	if len(matches) == 0 {
 		return 0, nil
 	}
 	if len(matches) != 1 {
 		return len(matches), fmt.Errorf(
-			"repo-view navigation must be one standalone invocation",
+			"scopesifter navigation must be one standalone invocation",
 		)
 	}
 	body, ok := standaloneShellBody(command)
 	if !ok {
 		return 1, fmt.Errorf(
-			"repo-view navigation is not a standalone shell command",
+			"scopesifter navigation is not a standalone shell command",
 		)
 	}
-	bodyMatches := repoViewPattern.FindAllStringSubmatchIndex(body, -1)
+	bodyMatches := scopeSifterPattern.FindAllStringSubmatchIndex(body, -1)
 	if len(bodyMatches) != 1 || bodyMatches[0][0] != 0 {
 		return 1, fmt.Errorf(
-			"repo-view navigation is not the executed shell command",
+			"scopesifter navigation is not the executed shell command",
 		)
 	}
-	if strings.Count(body, "repo-view") != 1 ||
+	if strings.Count(body, "scopesifter") != 1 ||
 		strings.ContainsAny(body, "\n\r;&|`<>$*?[]{}\\()~#") {
 		return 1, fmt.Errorf(
-			"repo-view navigation contains shell composition or expansion",
+			"scopesifter navigation contains shell composition or expansion",
 		)
 	}
 	jsonPattern := regexp.MustCompile(`(?:^|[ \t])--json(?:[ \t]|$)`)
 	if len(jsonPattern.FindAllStringIndex(body, -1)) != 1 {
 		return 1, fmt.Errorf(
-			"repo-view navigation must request exactly one JSON response",
+			"scopesifter navigation must request exactly one JSON response",
 		)
 	}
 	return 1, nil
 }
 
-// ValidatedRepoViewSubcommand returns the subcommand of a safe standalone
-// repo-view navigation command. An empty result means the command contains no
-// lexically visible repo-view navigation invocation.
-func ValidatedRepoViewSubcommand(command string) (string, error) {
-	count, err := ValidateRepoViewCommand(command)
+// ValidatedScopeSifterSubcommand returns the subcommand of a safe standalone
+// scopesifter navigation command. An empty result means the command contains no
+// lexically visible scopesifter navigation invocation.
+func ValidatedScopeSifterSubcommand(command string) (string, error) {
+	count, err := ValidateScopeSifterCommand(command)
 	if err != nil || count == 0 {
 		return "", err
 	}
-	match := repoViewPattern.FindStringSubmatch(command)
+	match := scopeSifterPattern.FindStringSubmatch(command)
 	if len(match) != 2 {
-		return "", fmt.Errorf("repo-view navigation subcommand is ambiguous")
+		return "", fmt.Errorf("scopesifter navigation subcommand is ambiguous")
 	}
 	return match[1], nil
 }
 
 func standaloneShellBody(command string) (string, bool) {
-	if strings.HasPrefix(command, "repo-view ") ||
-		strings.HasPrefix(command, "repo-view.bin ") {
+	if strings.HasPrefix(command, "scopesifter ") ||
+		strings.HasPrefix(command, "scopesifter.bin ") {
 		return command, strings.TrimSpace(command) == command
 	}
 	for _, prefix := range []string{
@@ -472,9 +472,9 @@ func standaloneShellBody(command string) (string, bool) {
 	return "", false
 }
 
-func isRepoViewSubcommand(command string, operationStart int) bool {
+func isScopeSifterSubcommand(command string, operationStart int) bool {
 	prefix := command[:operationStart]
-	return repoViewPrefixPattern.MatchString(prefix)
+	return scopeSifterPrefixPattern.MatchString(prefix)
 }
 
 func commandPattern(name string) *regexp.Regexp {
@@ -513,29 +513,29 @@ func primaryOperation(toolType string, hits []operationHit) string {
 	if len(names) == 1 {
 		return names[0]
 	}
-	repoViewNames := 0
-	var repoViewName string
+	scopeSifterNames := 0
+	var scopeSifterName string
 	for _, name := range names {
-		if strings.HasPrefix(name, "repo-view.") {
-			repoViewNames++
-			repoViewName = name
+		if strings.HasPrefix(name, "scopesifter.") {
+			scopeSifterNames++
+			scopeSifterName = name
 		}
 	}
-	if repoViewNames == len(names) {
-		if repoViewNames == 1 {
-			return repoViewName
+	if scopeSifterNames == len(names) {
+		if scopeSifterNames == 1 {
+			return scopeSifterName
 		}
-		return "repo-view.multiple"
+		return "scopesifter.multiple"
 	}
 	return "compound-shell"
 }
 
 func buildStats(calls []Call, outputs []string) Stats {
 	stats := Stats{
-		SchemaVersion:             SchemaVersion,
-		RepoViewCommandShapeValid: true,
-		RepoViewShapeViolations:   []string{},
-		Calls:                     calls,
+		SchemaVersion:                SchemaVersion,
+		ScopeSifterCommandShapeValid: true,
+		ScopeSifterShapeViolations:   []string{},
+		Calls:                        calls,
 	}
 	toolTypes := make(map[string]*Count)
 	operations := make(map[string]*Count)
@@ -545,14 +545,14 @@ func buildStats(calls []Call, outputs []string) Stats {
 		if call.ToolType == "command_execution" {
 			stats.CommandExecutionToolCalls++
 		}
-		if len(call.RepoViewInvocations) > 0 {
-			stats.RepoViewToolCalls++
-			stats.RepoViewInvocations += len(call.RepoViewInvocations)
+		if len(call.ScopeSifterInvocations) > 0 {
+			stats.ScopeSifterToolCalls++
+			stats.ScopeSifterInvocations += len(call.ScopeSifterInvocations)
 		}
-		if call.RepoViewShapeError != "" {
-			stats.RepoViewCommandShapeValid = false
-			stats.RepoViewShapeViolations = append(
-				stats.RepoViewShapeViolations,
+		if call.ScopeSifterShapeError != "" {
+			stats.ScopeSifterCommandShapeValid = false
+			stats.ScopeSifterShapeViolations = append(
+				stats.ScopeSifterShapeViolations,
 				call.Command,
 			)
 		}
@@ -569,7 +569,7 @@ func buildStats(calls []Call, outputs []string) Stats {
 			operations[operation].Invocations += invocations
 		}
 	}
-	stats.OtherToolCalls = stats.TotalToolCalls - stats.RepoViewToolCalls
+	stats.OtherToolCalls = stats.TotalToolCalls - stats.ScopeSifterToolCalls
 	stats.ToolTypes = sortedCounts(toolTypes)
 	stats.Operations = sortedCounts(operations)
 

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
 )
 
 func TestAttestationCanonicalGolden(t *testing.T) {
@@ -46,9 +46,9 @@ func TestAttestationCanonicalGolden(t *testing.T) {
 	}
 	digest := sha256.Sum256(envelopeJSON)
 	const wantKeyID = "ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec"
-	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v1","project":"github.com/dkropachev/repo-view/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v4+json"},"parents":[]}`
-	const wantSignature = "JuyUZ7jWPXct08-LMhkjZ4pl1MR5733FIG1mpPaGkCUA5LQEuD7iJEMTQH-7QF6IC_uGLkNa5bOD-dHsVP_hCQ"
-	const wantRootDigest = "16056116845cd4369872be4aba4ea4d51aa65e35fd188522c5e1478a9c011557"
+	const wantStatement = `{"schema_version":"tokenbench.attestation-statement/v2","project":"github.com/scopesifter/scopesifter/benchmarks/tokenbench","key_id":"ed25519-sha256:be0246fd46710425b99307206e9e695c05e04cf833c511f49c6e4841f958baec","bundle_kind":"capture","subject":{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","size":123,"media_type":"application/vnd.tokenbench.capture.v5+json"},"parents":[]}`
+	const wantSignature = "IUp6ziCgqFJzuRGpjjhiv2qrzIZxNwRFCnqE0G0CUYsZjAypsCz81gg1tlvF9HP3BSEI5Wzi7onTFpGocu-9AQ"
+	const wantRootDigest = "73c2bcd56c2dafab683ee0a86af33bb99b592110e45dc17e01789d2f63f63542"
 	if envelope.Statement.KeyID != wantKeyID ||
 		string(statementJSON) != wantStatement ||
 		envelope.Signature != wantSignature ||

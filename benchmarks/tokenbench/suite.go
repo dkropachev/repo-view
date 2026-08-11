@@ -1,5 +1,5 @@
 // Package tokenbench provides the strict paired-run model used by the
-// repo-view token benchmark.
+// scopesifter token benchmark.
 package tokenbench
 
 import (
@@ -13,12 +13,12 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/harness"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
 )
 
 // SuiteSchemaVersion is the only authored suite schema accepted by this
-// implementation. The historical v1 schema remains in schemas/ for audit;
-// publishable preparation requires v2's artifact-manifest commitment.
+// implementation. Publishable preparation requires v2's artifact-manifest
+// commitment.
 const SuiteSchemaVersion = "tokenbench.suite/v2"
 
 const (

@@ -19,7 +19,7 @@ import (
 	"strings"
 	"sync"
 
-	harnesscodex "github.com/dkropachev/repo-view/benchmarks/tokenbench/harness/codex"
+	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 const (
@@ -632,7 +632,6 @@ func providerRequestHeadersTrace(
 		return harnesscodex.ProviderRequestHeadersTrace{}, err
 	}
 	trace.ReviewedSemanticSHA256 = exactDigest
-	trace.ExactApplicationSHA256 = exactDigest
 	exact["body_bytes"] = "committed-by-exact-request-body"
 	if trace.TurnStatePresent {
 		exact["turn_state_sha256"] = "reviewed-sticky-turn-state-nonce"

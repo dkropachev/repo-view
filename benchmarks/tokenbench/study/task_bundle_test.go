@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dkropachev/repo-view/benchmarks/tokenbench/cas"
+	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
 )
 
 func decodedTaskCatalogFixture(t *testing.T) TaskCatalog {
