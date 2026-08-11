@@ -32,12 +32,11 @@ type PairAuthority struct {
 	closeErr       error
 	snapshot       *snapshot.Authority
 	active         *ArmAuthority
-	parent         *os.File
 	underlyingRoot *os.File
 	mountedRoot    *os.File
+	rootMountFile  *os.File
 	paths          ArmPaths
 	rootPath       string
-	rootLeaf       string
 	rootMount      mountRecord
 	parentMount    mountRecord
 	baseManifest   []worktreeEntry
@@ -46,6 +45,7 @@ type PairAuthority struct {
 	mu             sync.Mutex
 	mounted        bool
 	closing        bool
+	tainted        bool
 	released       bool
 }
 
@@ -54,15 +54,18 @@ type PairAuthority struct {
 type ArmAuthority struct {
 	overlayInfo  os.FileInfo
 	closeErr     error
-	capture      *os.File
-	upper        *os.File
+	overlayFile  *os.File
+	target       *os.File
 	work         *os.File
 	cache        *os.File
 	pair         *PairAuthority
 	overlayRoot  *os.File
-	target       *os.File
+	capture      *os.File
+	upper        *os.File
 	lower        *os.File
 	paths        ArmPaths
+	layoutClaims []directoryClaim
+	inodeReserve []*os.File
 	overlayMount mountRecord
 	mounted      bool
 	closing      bool
@@ -121,18 +124,16 @@ func Prepare(
 	if err != nil {
 		return nil, fmt.Errorf("verify workspace parent mount: %w", err)
 	}
-	parent, underlyingRoot, underlyingInfo, leaf, err := claimWorkspaceRoot(request.Root)
+	underlyingRoot, underlyingInfo, err := retainWorkspaceRoot(request.Root)
 	if err != nil {
 		return nil, err
 	}
 
 	pair := &PairAuthority{
 		snapshot:       snapshotAuthority,
-		parent:         parent,
 		underlyingRoot: underlyingRoot,
 		underlyingInfo: underlyingInfo,
 		rootPath:       request.Root,
-		rootLeaf:       leaf,
 		namespace:      namespace,
 		parentMount:    parentMount,
 		baseManifest:   baseManifest,
@@ -295,7 +296,11 @@ func (pair *PairAuthority) BeginArm(ctx context.Context) (_ *ArmAuthority, resul
 		if resultErr == nil {
 			return
 		}
-		resultErr = errors.Join(resultErr, arm.closeLocked())
+		cleanupErr := arm.closeLocked()
+		if pair.tainted && pair.active == nil {
+			cleanupErr = errors.Join(cleanupErr, pair.closeLocked())
+		}
+		resultErr = errors.Join(resultErr, cleanupErr)
 	}()
 	if err := arm.createLocked(ctx); err != nil {
 		return nil, err
@@ -309,18 +314,18 @@ func (arm *ArmAuthority) createLocked(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("open immutable workspace lower root: %w", err)
 	}
-	arm.target, err = createDirectoryAt(arm.pair.mountedRoot, worktreeDirectory)
+	arm.target, err = arm.createDirectoryLocked(worktreeDirectory)
 	if err == nil {
-		arm.upper, err = createDirectoryAt(arm.pair.mountedRoot, upperDirectory)
+		arm.upper, err = arm.createDirectoryLocked(upperDirectory)
 	}
 	if err == nil {
-		arm.work, err = createDirectoryAt(arm.pair.mountedRoot, workDirectory)
+		arm.work, err = arm.createDirectoryLocked(workDirectory)
 	}
 	if err == nil {
-		arm.cache, err = createDirectoryAt(arm.pair.mountedRoot, cacheDirectory)
+		arm.cache, err = arm.createDirectoryLocked(cacheDirectory)
 	}
 	if err == nil {
-		arm.capture, err = createDirectoryAt(arm.pair.mountedRoot, captureDirectory)
+		arm.capture, err = arm.createDirectoryLocked(captureDirectory)
 	}
 	if err != nil {
 		return fmt.Errorf("create fresh workspace layout: %w", err)
@@ -331,7 +336,22 @@ func (arm *ArmAuthority) createLocked(ctx context.Context) error {
 	if err := arm.attachOverlay(); err != nil {
 		return err
 	}
+	if err := arm.retainInodeBudget(); err != nil {
+		return err
+	}
 	return arm.requireFreshLocked(ctx)
+}
+
+func (arm *ArmAuthority) createDirectoryLocked(name string) (*os.File, error) {
+	directory, claim, err := createDirectoryAt(arm.pair.mountedRoot, name)
+	if claim.created() {
+		arm.layoutClaims = append(arm.layoutClaims, claim)
+		if !claim.valid() {
+			arm.pair.tainted = true
+			arm.pair.closing = true
+		}
+	}
+	return directory, err
 }
 
 // Paths returns the sole stable paths intended for the contained model. Upper,
@@ -452,8 +472,8 @@ func (arm *ArmAuthority) verifyPrivateLayoutLocked() error {
 	return nil
 }
 
-// Close normally unmounts and removes this arm. A previous cleanup error stays
-// fail-closed and prevents another arm from starting.
+// Close normally unmounts and removes this arm. A failed attempt keeps the arm
+// active so the same retained authority can retry cleanup.
 func (arm *ArmAuthority) Close() error {
 	if arm == nil || arm.pair == nil {
 		return nil
@@ -465,67 +485,96 @@ func (arm *ArmAuthority) Close() error {
 
 func (arm *ArmAuthority) closeLocked() error {
 	if arm.released {
-		return arm.closeErr
+		return nil
 	}
 	arm.closing = true
 	var attemptErr error
 	if arm.mounted {
-		if err := verifyMountRecord(arm.paths.ModelRoot, arm.overlayInfo, arm.overlayMount); err != nil {
-			attemptErr = errors.Join(attemptErr, fmt.Errorf("refuse to unmount changed workspace overlay: %w", err))
+		record, err := mountpointForUnmount(arm.overlayFile, arm.overlayInfo, arm.overlayMount)
+		if err != nil {
+			attemptErr = errors.Join(attemptErr, fmt.Errorf("resolve retained workspace overlay: %w", err))
 		} else if err := arm.verifyPrivateLayoutLocked(); err != nil {
 			attemptErr = errors.Join(attemptErr, err)
-		} else if err := verifyArmMountTopology(arm.pair.rootPath, arm.overlayMount); err != nil {
+		} else if err := rejectMountDescendants(record.id); err != nil {
 			attemptErr = errors.Join(attemptErr, err)
-		} else if arm.overlayRoot != nil {
-			closeErr := arm.overlayRoot.Close()
-			arm.overlayRoot = nil
-			if closeErr != nil {
-				attemptErr = errors.Join(attemptErr, fmt.Errorf("close workspace overlay descriptor: %w", closeErr))
+		} else {
+			if arm.overlayMount.id == 0 {
+				arm.overlayMount = record
 			}
-		}
-		if attemptErr == nil {
-			if err := unix.Unmount(arm.paths.ModelRoot, unix.UMOUNT_NOFOLLOW); err != nil {
-				attemptErr = fmt.Errorf("unmount workspace overlay: %w", err)
+			attemptErr = errors.Join(
+				attemptErr,
+				closeFile(&arm.overlayRoot, "workspace overlay descriptor"),
+				closeFile(&arm.overlayFile, "workspace overlay mount descriptor"),
+			)
+			if err := unix.Unmount(record.point, unix.UMOUNT_NOFOLLOW); err != nil {
+				attemptErr = errors.Join(attemptErr, fmt.Errorf("unmount retained workspace overlay: %w", err))
 			} else {
 				arm.mounted = false
 			}
 		}
 	}
 	if arm.mounted {
-		arm.closeErr = errors.Join(arm.closeErr, attemptErr)
+		arm.closeErr = attemptErr
 		return arm.closeErr
 	}
-	if err := verifyDirectoryPathAt(
-		arm.pair.mountedRoot,
-		worktreeDirectory,
-		arm.target,
-	); err != nil {
-		arm.closeErr = errors.Join(
-			arm.closeErr,
-			fmt.Errorf("refuse to remove changed workspace target: %w", err),
+	for index := range arm.inodeReserve {
+		attemptErr = errors.Join(
+			attemptErr,
+			closeFile(&arm.inodeReserve[index], "workspace inode reserve descriptor"),
 		)
-		return arm.closeErr
 	}
-	for _, file := range []*os.File{
-		arm.target, arm.upper, arm.work, arm.cache, arm.capture, arm.lower,
-	} {
-		if file != nil {
-			attemptErr = errors.Join(attemptErr, file.Close())
+	arm.inodeReserve = nil
+	attemptErr = errors.Join(
+		attemptErr,
+		closeFile(&arm.target, "workspace target descriptor"),
+		closeFile(&arm.upper, "workspace upper descriptor"),
+		closeFile(&arm.work, "workspace work descriptor"),
+		closeFile(&arm.cache, "workspace cache descriptor"),
+		closeFile(&arm.capture, "workspace capture descriptor"),
+		closeFile(&arm.lower, "workspace lower descriptor"),
+	)
+	switch {
+	case len(arm.layoutClaims) == 0:
+		// Construction can fail before the first owned layout inode exists.
+	case arm.pair.tainted:
+		// If the kernel could not identify a just-created directory, no
+		// pathname is safe to remove. The entire code-owned tmpfs is normally
+		// unmounted by BeginArm's failure cleanup instead.
+	case arm.pair.mountedRoot == nil:
+		attemptErr = errors.Join(attemptErr, errors.New("workspace tmpfs descriptor is absent"))
+	default:
+		var topologyErr error
+		if arm.pair.rootMount.id != 0 {
+			topologyErr = rejectMountDescendants(arm.pair.rootMount.id)
+		}
+		if topologyErr != nil {
+			attemptErr = errors.Join(attemptErr, topologyErr)
+		} else {
+			attemptErr = errors.Join(
+				attemptErr,
+				removeArmLayout(arm.pair.mountedRoot, arm.layoutClaims, arm.pair.inputs.Limits),
+			)
 		}
 	}
-	arm.overlayRoot, arm.target, arm.upper, arm.work = nil, nil, nil, nil
-	arm.cache, arm.capture, arm.lower = nil, nil, nil
-	if err := rejectDescendantMounts(arm.pair.rootPath); err != nil {
-		attemptErr = errors.Join(attemptErr, err)
-	} else {
-		attemptErr = errors.Join(attemptErr, removeArmLayout(arm.pair.mountedRoot, arm.pair.inputs.Limits))
-	}
-	arm.closeErr = errors.Join(arm.closeErr, attemptErr)
-	arm.released = arm.closeErr == nil
+	arm.closeErr = attemptErr
+	arm.released = attemptErr == nil
 	if arm.released {
+		arm.closing = false
 		arm.pair.active = nil
 	}
 	return arm.closeErr
+}
+
+func closeFile(file **os.File, description string) error {
+	if file == nil || *file == nil {
+		return nil
+	}
+	err := (*file).Close()
+	*file = nil
+	if err != nil {
+		return fmt.Errorf("close %s: %w", description, err)
+	}
+	return nil
 }
 
 // Closed reports strong cleanup success, not merely that Close was attempted.
@@ -535,7 +584,10 @@ func (arm *ArmAuthority) Closed() bool {
 	}
 	arm.pair.mu.Lock()
 	defer arm.pair.mu.Unlock()
-	return arm.released && !arm.mounted && arm.pair.active != arm
+	return arm.released && !arm.mounted && arm.pair.active != arm &&
+		arm.overlayRoot == nil && arm.overlayFile == nil && arm.target == nil &&
+		arm.upper == nil && arm.work == nil && arm.cache == nil &&
+		arm.capture == nil && arm.lower == nil && len(arm.inodeReserve) == 0
 }
 
 // Close releases the active arm first and then the exact tmpfs, descriptors,
@@ -551,7 +603,7 @@ func (pair *PairAuthority) Close() error {
 
 func (pair *PairAuthority) closeLocked() error {
 	if pair.released {
-		return pair.closeErr
+		return nil
 	}
 	pair.closing = true
 	var attemptErr error
@@ -559,52 +611,60 @@ func (pair *PairAuthority) closeLocked() error {
 		active := pair.active
 		attemptErr = errors.Join(attemptErr, active.closeLocked())
 		if !active.released {
-			pair.closeErr = errors.Join(pair.closeErr, attemptErr)
+			pair.closeErr = attemptErr
 			return pair.closeErr
 		}
 	}
 	if pair.mounted {
-		if err := verifyMountRecord(pair.rootPath, pair.mountedInfo, pair.rootMount); err != nil {
-			attemptErr = errors.Join(attemptErr, fmt.Errorf("refuse to unmount changed workspace tmpfs: %w", err))
-		} else if err := rejectDescendantMounts(pair.rootPath); err != nil {
+		record, err := mountpointForUnmount(pair.rootMountFile, pair.mountedInfo, pair.rootMount)
+		if err != nil {
+			attemptErr = errors.Join(attemptErr, fmt.Errorf("resolve retained workspace tmpfs: %w", err))
+		} else if err := rejectMountDescendants(record.id); err != nil {
 			attemptErr = errors.Join(attemptErr, err)
-		} else if pair.mountedRoot != nil {
-			closeErr := pair.mountedRoot.Close()
-			pair.mountedRoot = nil
-			if closeErr != nil {
-				attemptErr = errors.Join(attemptErr, fmt.Errorf("close workspace tmpfs descriptor: %w", closeErr))
+		} else {
+			if pair.rootMount.id == 0 {
+				pair.rootMount = record
 			}
-		}
-		if attemptErr == nil {
-			if err := unix.Unmount(pair.rootPath, unix.UMOUNT_NOFOLLOW); err != nil {
-				attemptErr = fmt.Errorf("unmount workspace tmpfs: %w", err)
+			attemptErr = errors.Join(
+				attemptErr,
+				closeFile(&pair.mountedRoot, "workspace tmpfs descriptor"),
+				closeFile(&pair.rootMountFile, "workspace tmpfs mount descriptor"),
+			)
+			if err := unix.Unmount(record.point, unix.UMOUNT_NOFOLLOW); err != nil {
+				attemptErr = errors.Join(attemptErr, fmt.Errorf("unmount retained workspace tmpfs: %w", err))
 			} else {
 				pair.mounted = false
 			}
 		}
 	}
 	if pair.mounted {
-		pair.closeErr = errors.Join(pair.closeErr, attemptErr)
+		pair.closeErr = attemptErr
 		return pair.closeErr
 	}
-	for _, file := range []*os.File{pair.underlyingRoot} {
-		if file != nil {
-			attemptErr = errors.Join(attemptErr, file.Close())
+	if pair.underlyingRoot != nil {
+		if err := verifyRetainedWorkspaceRootDescriptor(
+			pair.underlyingRoot,
+			pair.underlyingInfo,
+		); err != nil {
+			pair.closeErr = errors.Join(attemptErr, err)
+			return pair.closeErr
+		}
+		if err := directoryIsEmpty(pair.underlyingRoot); err != nil {
+			pair.closeErr = errors.Join(
+				attemptErr,
+				fmt.Errorf("borrowed workspace mountpoint is not empty after unmount: %w", err),
+			)
+			return pair.closeErr
 		}
 	}
-	pair.mountedRoot, pair.underlyingRoot = nil, nil
-	if pair.parent != nil && pair.underlyingInfo != nil {
-		attemptErr = errors.Join(
-			attemptErr,
-			removeClaimedRoot(pair.parent, pair.rootLeaf, pair.underlyingInfo),
-		)
+	if pair.underlyingRoot != nil {
+		attemptErr = errors.Join(attemptErr, closeFile(&pair.underlyingRoot, "borrowed workspace mountpoint descriptor"))
 	}
-	if pair.parent != nil {
-		attemptErr = errors.Join(attemptErr, pair.parent.Close())
-		pair.parent = nil
+	pair.closeErr = attemptErr
+	pair.released = attemptErr == nil
+	if pair.released {
+		pair.closing = false
 	}
-	pair.closeErr = errors.Join(pair.closeErr, attemptErr)
-	pair.released = pair.closeErr == nil
 	return pair.closeErr
 }
 
@@ -617,5 +677,5 @@ func (pair *PairAuthority) Closed() bool {
 	pair.mu.Lock()
 	defer pair.mu.Unlock()
 	return pair.released && !pair.mounted && pair.active == nil &&
-		pair.parent == nil && pair.underlyingRoot == nil && pair.mountedRoot == nil
+		pair.underlyingRoot == nil && pair.mountedRoot == nil && pair.rootMountFile == nil
 }

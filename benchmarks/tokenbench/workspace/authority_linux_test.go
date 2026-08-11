@@ -4,6 +4,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -58,6 +59,171 @@ func TestPrepareRejectsMissingAuthorityBeforeFilesystemMutation(t *testing.T) {
 	}
 	if _, err := os.Lstat(root); !os.IsNotExist(err) {
 		t.Fatalf("failed preparation mutated the workspace path: %v", err)
+	}
+}
+
+func TestArmCleanupReleasesPartialConstructionBeforeTargetExists(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mountedRoot, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mountedRoot.Close() })
+	lower, err := os.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := &PairAuthority{
+		mountedRoot: mountedRoot,
+		rootPath:    rootPath,
+		inputs:      Inputs{Limits: validLimits()},
+	}
+	arm := &ArmAuthority{pair: pair, lower: lower}
+	pair.active = arm
+	if err := arm.closeLocked(); err != nil {
+		t.Fatalf("cleanup partial arm: %v", err)
+	}
+	if !arm.released || arm.lower != nil || pair.active != nil {
+		t.Fatalf("partial arm retained authority: %#v", arm)
+	}
+	if err := directoryIsEmpty(mountedRoot); err != nil {
+		t.Fatalf("partial arm left workspace state: %v", err)
+	}
+}
+
+func TestArmCleanupOwnsDirectoryAfterPostMkdirFailure(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	mountedRoot, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = mountedRoot.Close() })
+	if err := unix.Mkdirat(int(mountedRoot.Fd()), worktreeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var created unix.Stat_t
+	if err := unix.Fstatat(
+		int(mountedRoot.Fd()),
+		worktreeDirectory,
+		&created,
+		unix.AT_SYMLINK_NOFOLLOW,
+	); err != nil {
+		t.Fatal(err)
+	}
+	pair := &PairAuthority{
+		mountedRoot: mountedRoot,
+		rootPath:    rootPath,
+		inputs:      Inputs{Limits: validLimits()},
+	}
+	arm := &ArmAuthority{
+		pair: pair,
+		layoutClaims: []directoryClaim{{
+			name: worktreeDirectory, device: created.Dev, inode: created.Ino,
+		}},
+	}
+	pair.active = arm
+	if err := arm.closeLocked(); err != nil {
+		t.Fatalf("cleanup post-mkdir construction failure: %v", err)
+	}
+	if !arm.released || pair.active != nil {
+		t.Fatal("post-mkdir construction authority was retained")
+	}
+	if err := directoryIsEmpty(mountedRoot); err != nil {
+		t.Fatalf("post-mkdir construction left workspace state: %v", err)
+	}
+}
+
+func TestCreateDirectoryAtNormalizesRestrictiveUmask(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	oldMask := unix.Umask(0o777)
+	directory, claim, createErr := createDirectoryAt(root, worktreeDirectory)
+	unix.Umask(oldMask)
+	if createErr != nil {
+		t.Fatalf("create directory with restrictive umask: %v", createErr)
+	}
+	if !claim.valid() {
+		t.Fatal("created directory omitted its cleanup claim")
+	}
+	info, err := directory.Stat()
+	if err != nil || info.Mode().Perm() != 0o700 || !sameFileClaim(info, claim) {
+		t.Fatalf("normalized directory = %#v, %v", info, err)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeArmLayout(root, []directoryClaim{claim}, validLimits()); err != nil {
+		t.Fatalf("cleanup normalized directory: %v", err)
+	}
+}
+
+func TestArmCleanupRetriesExactClaimAfterReplacementIsRestored(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	if err := os.Chmod(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+	directory, claim, err := createDirectoryAt(root, worktreeDirectory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := &PairAuthority{mountedRoot: root, inputs: Inputs{Limits: validLimits()}}
+	arm := &ArmAuthority{
+		pair: pair, target: directory, layoutClaims: []directoryClaim{claim},
+	}
+	pair.active = arm
+	originalPath := filepath.Join(rootPath, worktreeDirectory)
+	retainedPath := filepath.Join(rootPath, "retained-worktree")
+	if err := os.Rename(originalPath, retainedPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(originalPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := arm.closeLocked(); err == nil {
+		t.Fatal("cleanup removed a replacement directory")
+	}
+	if arm.released || pair.active != arm {
+		t.Fatal("failed cleanup released its retry authority")
+	}
+	if current, err := os.Stat(originalPath); err != nil || !current.IsDir() {
+		t.Fatalf("replacement directory was mutated: %v", err)
+	}
+	if err := os.Remove(originalPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(retainedPath, originalPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := arm.closeLocked(); err != nil {
+		t.Fatalf("retry cleanup after restoring exact claim: %v", err)
+	}
+	if !arm.released || pair.active != nil {
+		t.Fatal("successful retry retained arm authority")
+	}
+	if err := directoryIsEmpty(root); err != nil {
+		t.Fatalf("successful retry left workspace state: %v", err)
 	}
 }
 
@@ -117,12 +283,18 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 	}
 
 	parentPath := t.TempDir()
+	if err := os.Chmod(parentPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	rootPath := filepath.Join(parentPath, "workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	parentMount, err := containingPrivateMount(rootPath)
 	if err != nil {
 		t.Fatalf("private workspace parent mount: %v", err)
 	}
-	parent, underlyingRoot, underlyingInfo, leaf, err := claimWorkspaceRoot(rootPath)
+	underlyingRoot, underlyingInfo, err := retainWorkspaceRoot(rootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,8 +310,8 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 		MaximumChangedFiles: 1_024,
 	}
 	pair := &PairAuthority{
-		parent: parent, underlyingRoot: underlyingRoot, underlyingInfo: underlyingInfo,
-		rootPath: rootPath, rootLeaf: leaf, namespace: namespace, parentMount: parentMount,
+		underlyingRoot: underlyingRoot, underlyingInfo: underlyingInfo,
+		rootPath: rootPath, namespace: namespace, parentMount: parentMount,
 		paths: ArmPaths{
 			ModelRoot: filepath.Join(rootPath, worktreeDirectory),
 			CacheRoot: filepath.Join(rootPath, cacheDirectory),
@@ -232,9 +404,417 @@ func TestPrivilegedWorkspaceMountLifecycle(t *testing.T) {
 	if !pair.Closed() {
 		t.Fatal("workspace pair did not report strong cleanup")
 	}
-	if _, err := os.Lstat(rootPath); !os.IsNotExist(err) {
-		t.Fatalf("workspace root remains after cleanup: %v", err)
+	rootInfo, err := os.Stat(rootPath)
+	if err != nil || !rootInfo.IsDir() {
+		t.Fatalf("borrowed workspace mountpoint was removed: %v", err)
 	}
+	rootDirectory, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directoryIsEmpty(rootDirectory); err != nil {
+		_ = rootDirectory.Close()
+		t.Fatalf("borrowed workspace mountpoint was not returned empty: %v", err)
+	}
+	if err := rootDirectory.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout(t *testing.T) {
+	if os.Getenv(requirePrivilegedWorkspaceTestsEnvironment) != "1" {
+		t.Skip("privileged workspace inode reserve is exercised by the required kernel lane")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("required privileged workspace test is not running as root")
+	}
+
+	rootPath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	parentMount, err := containingPrivateMount(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlyingRoot, underlyingInfo, err := retainWorkspaceRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := currentMountNamespaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      1,
+		MaximumFileBytes:    1,
+		MaximumPatchBytes:   1,
+		MaximumChangedFiles: 1,
+	}
+	pair := &PairAuthority{
+		underlyingRoot: underlyingRoot,
+		underlyingInfo: underlyingInfo,
+		rootPath:       rootPath,
+		namespace:      namespace,
+		parentMount:    parentMount,
+		inputs:         Inputs{Limits: limits},
+	}
+	if err := pair.attachBoundedTmpfs(limits); err != nil {
+		t.Fatalf("attach minimum-entry tmpfs: %v", err)
+	}
+	t.Cleanup(func() {
+		if !pair.Closed() {
+			_ = pair.Close()
+		}
+	})
+	for _, name := range []string{
+		worktreeDirectory,
+		upperDirectory,
+		workDirectory,
+		cacheDirectory,
+		captureDirectory,
+	} {
+		directory, _, err := createDirectoryAt(pair.mountedRoot, name)
+		if err != nil {
+			t.Fatalf("create reserved private directory %s: %v", name, err)
+		}
+		if name == upperDirectory {
+			if err := createGitWhiteout(directory); err != nil {
+				_ = directory.Close()
+				t.Fatalf("create reserved Git whiteout: %v", err)
+			}
+		}
+		if err := directory.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pair.Close(); err != nil {
+		t.Fatalf("close minimum-entry pair: %v", err)
+	}
+	if !pair.Closed() {
+		t.Fatal("minimum-entry pair did not release all authority")
+	}
+	if current, err := os.Stat(rootPath); err != nil || !current.IsDir() {
+		t.Fatalf("borrowed minimum-entry mountpoint was removed: %v", err)
+	}
+}
+
+func TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts(t *testing.T) {
+	requirePrivilegedWorkspaceTest(t)
+
+	basePath := t.TempDir()
+	parentPath := filepath.Join(basePath, "borrowed-parent")
+	movedParentPath := filepath.Join(basePath, "moved-parent")
+	rootPath := filepath.Join(parentPath, "workspace")
+	if err := os.MkdirAll(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      32,
+		MaximumFileBytes:    8 << 20,
+		MaximumPatchBytes:   4 << 20,
+		MaximumChangedFiles: 16,
+	}
+	pair := privilegedMountedPair(t, rootPath, limits)
+	lowerPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(lowerPath, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	arm := privilegedTestArm(t, pair, lowerPath)
+	rootMountID := pair.rootMount.id
+	overlayMountID := arm.overlayMount.id
+
+	if err := os.Rename(parentPath, movedParentPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	replacementMarker := filepath.Join(rootPath, "replacement")
+	if err := os.WriteFile(replacementMarker, []byte("caller-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := pair.Close(); err != nil {
+		t.Fatalf("cleanup relocated active mounts: %v", err)
+	}
+	if !pair.Closed() || !arm.Closed() {
+		t.Fatal("relocated workspace authority did not report strong cleanup")
+	}
+	for _, id := range []uint64{overlayMountID, rootMountID} {
+		if _, err := mountRecordByID(id); err == nil {
+			t.Fatalf("retained mount ID %d survived cleanup", id)
+		}
+	}
+	movedRoot, err := os.Open(filepath.Join(movedParentPath, "workspace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directoryIsEmpty(movedRoot); err != nil {
+		_ = movedRoot.Close()
+		t.Fatalf("relocated borrowed mountpoint was not returned empty: %v", err)
+	}
+	if err := movedRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(replacementMarker)
+	if err != nil || string(content) != "caller-owned" {
+		t.Fatalf("replacement caller path was mutated: %q, %v", content, err)
+	}
+}
+
+func TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach(t *testing.T) {
+	requirePrivilegedWorkspaceTest(t)
+
+	parentPath := t.TempDir()
+	rootPath := filepath.Join(parentPath, "workspace")
+	movedRootPath := filepath.Join(parentPath, "moved-workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      8,
+		MaximumFileBytes:    8 << 20,
+		MaximumPatchBytes:   4 << 20,
+		MaximumChangedFiles: 8,
+	}
+	parentMount, err := containingPrivateMount(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlyingRoot, underlyingInfo, err := retainWorkspaceRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := currentMountNamespaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := &PairAuthority{
+		underlyingRoot: underlyingRoot,
+		underlyingInfo: underlyingInfo,
+		rootPath:       rootPath,
+		namespace:      namespace,
+		parentMount:    parentMount,
+		inputs:         Inputs{Limits: limits},
+	}
+	if err := os.Rename(rootPath, movedRootPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := pair.attachBoundedTmpfs(limits); err == nil {
+		t.Fatal("attach accepted a relocated borrowed-root pathname")
+	}
+	rootMountID := pair.rootMount.id
+	if rootMountID == 0 {
+		t.Fatal("failed attachment omitted retained mount identity")
+	}
+	if err := pair.Close(); err != nil {
+		t.Fatalf("cleanup root relocated during attach: %v", err)
+	}
+	if !pair.Closed() {
+		t.Fatal("failed attachment did not release workspace authority")
+	}
+	if _, err := mountRecordByID(rootMountID); err == nil {
+		t.Fatalf("retained tmpfs mount ID %d survived failed attachment", rootMountID)
+	}
+	if current, err := os.Stat(rootPath); err != nil || !current.IsDir() {
+		t.Fatalf("replacement root was mutated: %v", err)
+	}
+	movedRoot, err := os.Open(movedRootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directoryIsEmpty(movedRoot); err != nil {
+		_ = movedRoot.Close()
+		t.Fatalf("relocated root was not returned empty: %v", err)
+	}
+	if err := movedRoot.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup(t *testing.T) {
+	requirePrivilegedWorkspaceTest(t)
+
+	rootPath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      32,
+		MaximumFileBytes:    8 << 20,
+		MaximumPatchBytes:   4 << 20,
+		MaximumChangedFiles: 16,
+	}
+	pair := privilegedMountedPair(t, rootPath, limits)
+	lowerPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(lowerPath, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var arm *ArmAuthority
+	func() {
+		oldMask := unix.Umask(0o777)
+		defer unix.Umask(oldMask)
+		arm = privilegedTestArm(t, pair, lowerPath)
+	}()
+	for _, directory := range []*os.File{arm.target, arm.upper, arm.work, arm.cache, arm.capture} {
+		info, err := directory.Stat()
+		if err != nil || info.Mode().Perm() != 0o700 {
+			t.Fatalf("restrictive-umask directory = %#v, %v", info, err)
+		}
+	}
+	if err := pair.Close(); err != nil {
+		t.Fatalf("cleanup restrictive-umask workspace: %v", err)
+	}
+	if !pair.Closed() || !arm.Closed() {
+		t.Fatal("restrictive-umask workspace retained authority")
+	}
+}
+
+func TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair(t *testing.T) {
+	requirePrivilegedWorkspaceTest(t)
+
+	rootPath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      8,
+		MaximumFileBytes:    8 << 20,
+		MaximumPatchBytes:   4 << 20,
+		MaximumChangedFiles: 8,
+	}
+	pair := privilegedMountedPair(t, rootPath, limits)
+	if err := unix.Mkdirat(int(pair.mountedRoot.Fd()), worktreeDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	arm := &ArmAuthority{
+		pair:         pair,
+		layoutClaims: []directoryClaim{{name: worktreeDirectory}},
+	}
+	pair.active = arm
+	pair.tainted = true
+	pair.closing = true
+	rootMountID := pair.rootMount.id
+	if err := pair.Close(); err != nil {
+		t.Fatalf("close pair after unidentified post-mkdir state: %v", err)
+	}
+	if !pair.Closed() || !arm.Closed() {
+		t.Fatal("unidentified post-mkdir state retained authority")
+	}
+	if _, err := mountRecordByID(rootMountID); err == nil {
+		t.Fatalf("tmpfs mount ID %d survived tainted-pair cleanup", rootMountID)
+	}
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := directoryIsEmpty(root); err != nil {
+		_ = root.Close()
+		t.Fatalf("borrowed root retained unidentified residue: %v", err)
+	}
+	if err := root.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot(t *testing.T) {
+	requirePrivilegedWorkspaceTest(t)
+
+	rootPath := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	limits := Limits{
+		MaximumUpperBytes:   64 << 20,
+		MaximumEntries:      1,
+		MaximumFileBytes:    1,
+		MaximumPatchBytes:   1,
+		MaximumChangedFiles: 1,
+	}
+	pair := privilegedMountedPair(t, rootPath, limits)
+	lowerPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(lowerPath, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	arm := privilegedTestArm(t, pair, lowerPath)
+	var stats unix.Statfs_t
+	if err := unix.Fstatfs(int(pair.mountedRoot.Fd()), &stats); err != nil {
+		t.Fatal(err)
+	}
+	if stats.Ffree != uint64(limits.MaximumEntries) {
+		t.Fatalf("model-consumable inodes = %d, want %d", stats.Ffree, limits.MaximumEntries)
+	}
+	if err := os.WriteFile(filepath.Join(arm.paths.CacheRoot, "one"), nil, 0o600); err != nil {
+		t.Fatalf("consume committed cache inode: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(arm.paths.CacheRoot, "two"), nil, 0o600); !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("cache exceeded maximum_entries: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(arm.paths.ModelRoot, "model"), nil, 0o600); !errors.Is(err, unix.ENOSPC) {
+		t.Fatalf("worktree escaped cache-consumed maximum_entries: %v", err)
+	}
+	if err := pair.Close(); err != nil {
+		t.Fatalf("cleanup minimum-limit overlay and cache: %v", err)
+	}
+	if !pair.Closed() || !arm.Closed() {
+		t.Fatal("minimum-limit overlay and cache retained authority")
+	}
+}
+
+func requirePrivilegedWorkspaceTest(t *testing.T) {
+	t.Helper()
+	if os.Getenv(requirePrivilegedWorkspaceTestsEnvironment) != "1" {
+		t.Skip("privileged workspace behavior is exercised by the required kernel lane")
+	}
+	if os.Geteuid() != 0 {
+		t.Fatal("required privileged workspace test is not running as root")
+	}
+}
+
+func privilegedMountedPair(t *testing.T, rootPath string, limits Limits) *PairAuthority {
+	t.Helper()
+	parentMount, err := containingPrivateMount(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	underlyingRoot, underlyingInfo, err := retainWorkspaceRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	namespace, err := currentMountNamespaceIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair := &PairAuthority{
+		underlyingRoot: underlyingRoot,
+		underlyingInfo: underlyingInfo,
+		rootPath:       rootPath,
+		namespace:      namespace,
+		parentMount:    parentMount,
+		paths: ArmPaths{
+			ModelRoot: filepath.Join(rootPath, worktreeDirectory),
+			CacheRoot: filepath.Join(rootPath, cacheDirectory),
+		},
+		inputs: Inputs{Limits: limits},
+	}
+	if err := pair.attachBoundedTmpfs(limits); err != nil {
+		_ = pair.Close()
+		t.Fatalf("attach bounded test tmpfs: %v", err)
+	}
+	t.Cleanup(func() {
+		if !pair.Closed() {
+			_ = pair.Close()
+		}
+	})
+	return pair
 }
 
 func assertPrivilegedPrivateMountRejected(
@@ -345,25 +925,28 @@ func privilegedTestArm(t *testing.T, pair *PairAuthority, lowerPath string) *Arm
 	var err error
 	arm.lower, err = openDirectoryNoSymlinks(lowerPath)
 	if err == nil {
-		arm.target, err = createDirectoryAt(pair.mountedRoot, worktreeDirectory)
+		arm.target, err = arm.createDirectoryLocked(worktreeDirectory)
 	}
 	if err == nil {
-		arm.upper, err = createDirectoryAt(pair.mountedRoot, upperDirectory)
+		arm.upper, err = arm.createDirectoryLocked(upperDirectory)
 	}
 	if err == nil {
-		arm.work, err = createDirectoryAt(pair.mountedRoot, workDirectory)
+		arm.work, err = arm.createDirectoryLocked(workDirectory)
 	}
 	if err == nil {
-		arm.cache, err = createDirectoryAt(pair.mountedRoot, cacheDirectory)
+		arm.cache, err = arm.createDirectoryLocked(cacheDirectory)
 	}
 	if err == nil {
-		arm.capture, err = createDirectoryAt(pair.mountedRoot, captureDirectory)
+		arm.capture, err = arm.createDirectoryLocked(captureDirectory)
 	}
 	if err == nil {
 		err = createGitWhiteout(arm.upper)
 	}
 	if err == nil {
 		err = arm.attachOverlay()
+	}
+	if err == nil {
+		err = arm.retainInodeBudget()
 	}
 	if err != nil {
 		cleanupErr := arm.closeLocked()

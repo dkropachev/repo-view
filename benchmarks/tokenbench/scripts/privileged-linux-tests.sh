@@ -177,7 +177,7 @@ run_source_tests() {
 }
 
 run_workspace_tests() {
-  local expression='^TestPrivilegedWorkspaceMountLifecycle$'
+	local expression='^(TestPrivilegedWorkspaceMountLifecycle|TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout|TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts|TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach|TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup|TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair|TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot)$'
   local output
   if ! output="$(
     env \
@@ -192,9 +192,15 @@ run_workspace_tests() {
     fail "workspace privileged test binary failed"
   fi
   printf '%s\n' "${output}"
-  assert_passed_tests \
-    "${output}" \
-    TestPrivilegedWorkspaceMountLifecycle
+	assert_passed_tests \
+		"${output}" \
+		TestPrivilegedWorkspaceMountLifecycle \
+		TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout \
+		TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts \
+		TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach \
+		TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup \
+		TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair \
+		TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot
 }
 
 run_command_tests() {

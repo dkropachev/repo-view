@@ -26,23 +26,30 @@ const (
 	maximumPatchBytes   = 256 << 20
 	maximumChangedFiles = 100_000
 	maximumPathBytes    = 4_096
+	// This temporary capacity constructs the tmpfs root, fixed private layout,
+	// OverlayFS work metadata, and the code-owned .git whiteout. Before an arm
+	// becomes visible, code pins every unused infrastructure inode so exactly
+	// MaximumEntries remain shared by worktree changes and CacheRoot.
+	workspaceInfrastructureInodes = 64
 
 	mountPolicyDocument = "tokenbench.workspace-mount-policy/v1\n" +
-		"root=detached-tmpfs,nosuid,nodev,noexec,noatime,bounded-bytes,bounded-inodes\n" +
+		"root=borrowed-empty-mountpoint,detached-tmpfs,nosuid,nodev,noexec,noatime,bounded-bytes,exact-shared-worktree-cache-inode-budget,code-pinned-infrastructure\n" +
 		"arm=detached-overlay,nosuid,nodev,noatime,index-off,nfs-export-off,redirect-off,metacopy-off,xino-off\n" +
 		"mount-inputs=retained-descriptors-via-proc-self-fd\n" +
 		"layout=worktree,upper,work,cache,capture\n" +
 		"model-root-mode=0700\n" +
 		"git=opaque-whiteout\n" +
-		"cleanup=normal-unmount-only"
+		"cleanup=retained-mount-id,normal-unmount-only,descriptor-relative-owned-layout"
 )
 
 var violationCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
 var requiredMountPolicySHA256 = digest([]byte(mountPolicyDocument))
 
-// Limits bounds one fresh arm workspace. These values are committed before
-// execution and must be the same for both arms.
+// Limits bounds one fresh arm workspace. MaximumEntries is both the merged-tree
+// scan bound and the exact shared writable-inode budget for OverlayFS changes
+// plus CacheRoot. These values are committed before execution and must be the
+// same for both arms.
 type Limits struct {
 	MaximumUpperBytes   int64 `json:"maximum_upper_bytes"`
 	MaximumEntries      int   `json:"maximum_entries"`

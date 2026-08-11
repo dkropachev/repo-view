@@ -122,74 +122,91 @@ func TestPathWithinRequiresComponentBoundary(t *testing.T) {
 	}
 }
 
-func TestClaimWorkspaceRootCreatesAndRemovesExactAbsentDirectory(t *testing.T) {
+func TestRetainWorkspaceRootBorrowsExactExistingDirectory(t *testing.T) {
 	t.Parallel()
 	parentPath := t.TempDir()
-	rootPath := filepath.Join(parentPath, "claimed")
-	parent, root, info, leaf, err := claimWorkspaceRoot(rootPath)
+	rootPath := filepath.Join(parentPath, "mountpoint")
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, info, err := retainWorkspaceRoot(rootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leaf != "claimed" || info == nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
-		t.Fatalf("claim = %q, %#v", leaf, info)
+	if info == nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Fatalf("retained mountpoint = %#v", info)
 	}
 	if err := root.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeClaimedRoot(parent, leaf, info); err != nil {
-		t.Fatal(err)
-	}
-	if err := parent.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Lstat(rootPath); !os.IsNotExist(err) {
-		t.Fatalf("claimed root remains: %v", err)
+	if current, err := os.Stat(rootPath); err != nil || !current.IsDir() {
+		t.Fatalf("borrowed mountpoint was removed: %v", err)
 	}
 }
 
-func TestClaimWorkspaceRootRejectsExistingPathAndSymlink(t *testing.T) {
+func TestRetainWorkspaceRootRejectsAbsentNonemptyAndSymlinkPaths(t *testing.T) {
 	t.Parallel()
 	parent := t.TempDir()
+	if _, _, err := retainWorkspaceRoot(filepath.Join(parent, "absent")); err == nil {
+		t.Fatal("absent borrowed mountpoint was accepted")
+	}
 	existing := filepath.Join(parent, "existing")
 	if err := os.Mkdir(existing, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := claimWorkspaceRoot(existing); err == nil {
-		t.Fatal("existing workspace root was accepted")
+	if err := os.WriteFile(filepath.Join(existing, "entry"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := retainWorkspaceRoot(existing); err == nil {
+		t.Fatal("nonempty borrowed mountpoint was accepted")
 	}
 	link := filepath.Join(parent, "link")
 	if err := os.Symlink(existing, link); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, _, _, err := claimWorkspaceRoot(link); err == nil {
-		t.Fatal("symlink workspace root was accepted")
+	if _, _, err := retainWorkspaceRoot(link); err == nil {
+		t.Fatal("symlink borrowed mountpoint was accepted")
 	}
 }
 
-func TestRemoveClaimedRootRefusesReplacementPath(t *testing.T) {
+func TestVerifyRetainedWorkspaceRootRefusesReplacementWithoutMutatingIt(t *testing.T) {
 	t.Parallel()
 	parentPath := t.TempDir()
-	rootPath := filepath.Join(parentPath, "claimed")
+	rootPath := filepath.Join(parentPath, "mountpoint")
 	retainedPath := filepath.Join(parentPath, "retained")
-	parent, root, info, leaf, err := claimWorkspaceRoot(rootPath)
+	if err := os.Mkdir(rootPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, info, err := retainWorkspaceRoot(rootPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_ = root.Close()
-		_ = parent.Close()
-	})
+	t.Cleanup(func() { _ = root.Close() })
 	if err := os.Rename(rootPath, retainedPath); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(rootPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeClaimedRoot(parent, leaf, info); err == nil {
-		t.Fatal("replacement workspace root was removed")
+	if err := verifyRetainedWorkspaceRoot(rootPath, root, info); err == nil {
+		t.Fatal("replacement borrowed mountpoint was accepted")
 	}
 	if current, err := os.Stat(rootPath); err != nil || !current.IsDir() {
-		t.Fatalf("replacement workspace root was not retained: %v", err)
+		t.Fatalf("replacement borrowed mountpoint was mutated: %v", err)
+	}
+	if current, err := os.Stat(retainedPath); err != nil || !os.SameFile(info, current) {
+		t.Fatalf("retained borrowed mountpoint identity changed: %v", err)
+	}
+}
+
+func TestRetainWorkspaceRootRequiresOwnedPrivateMountpoint(t *testing.T) {
+	t.Parallel()
+	rootPath := filepath.Join(t.TempDir(), "mountpoint")
+	if err := os.Mkdir(rootPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := retainWorkspaceRoot(rootPath); err == nil {
+		t.Fatal("nonprivate borrowed mountpoint was accepted")
 	}
 }
 

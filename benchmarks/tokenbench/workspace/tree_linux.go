@@ -286,7 +286,7 @@ func directoryNames(directory *os.File) ([]string, error) {
 	return names, nil
 }
 
-func removeArmLayout(root *os.File, limits Limits) error {
+func removeArmLayout(root *os.File, claims []directoryClaim, limits Limits) error {
 	if root == nil {
 		return errors.New("workspace tmpfs descriptor is absent")
 	}
@@ -294,19 +294,18 @@ func removeArmLayout(root *os.File, limits Limits) error {
 	if err := unix.Fstat(int(root.Fd()), &rootStat); err != nil {
 		return err
 	}
-	budget := int64(limits.MaximumEntries) + 64
+	budget := int64(workspaceTmpfsInodeLimit(limits))
 	var resultErr error
-	for _, name := range []string{
-		worktreeDirectory,
-		upperDirectory,
-		workDirectory,
-		cacheDirectory,
-		captureDirectory,
-	} {
-		resultErr = errors.Join(
-			resultErr,
-			removeDirectoryTreeAt(root, name, rootStat.Dev, &budget),
-		)
+	for index := range claims {
+		claim := &claims[index]
+		if claim.removed {
+			continue
+		}
+		err := removeDirectoryTreeAt(root, *claim, rootStat.Dev, &budget)
+		if err == nil {
+			claim.removed = true
+		}
+		resultErr = errors.Join(resultErr, err)
 	}
 	resultErr = errors.Join(resultErr, root.Sync())
 	return resultErr
@@ -314,14 +313,14 @@ func removeArmLayout(root *os.File, limits Limits) error {
 
 func removeDirectoryTreeAt(
 	parent *os.File,
-	name string,
+	claim directoryClaim,
 	rootDevice uint64,
 	budget *int64,
 ) (resultErr error) {
-	if parent == nil || budget == nil {
+	if parent == nil || budget == nil || !claim.valid() {
 		return errors.New("workspace cleanup authority is absent")
 	}
-	directory, err := openDirectoryAt(parent, name)
+	directory, err := openDirectoryAt(parent, claim.name)
 	if errors.Is(err, unix.ENOENT) {
 		return nil
 	}
@@ -333,6 +332,10 @@ func removeDirectoryTreeAt(
 			resultErr = errors.Join(resultErr, directory.Close())
 		}
 	}()
+	info, err := directory.Stat()
+	if err != nil || !sameFileClaim(info, claim) {
+		return errors.Join(errors.New("workspace cleanup claim identity changed"), err)
+	}
 	var parentStat unix.Stat_t
 	if err := unix.Fstat(int(parent.Fd()), &parentStat); err != nil {
 		return err
@@ -343,7 +346,7 @@ func removeDirectoryTreeAt(
 		parentIno uint64
 	}
 	stack := []cleanupFrame{{
-		name: name, parentDev: parentStat.Dev, parentIno: parentStat.Ino,
+		name: claim.name, parentDev: parentStat.Dev, parentIno: parentStat.Ino,
 	}}
 	for {
 		childName, found, err := firstDirectoryName(directory)

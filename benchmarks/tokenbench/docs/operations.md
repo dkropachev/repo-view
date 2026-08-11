@@ -54,8 +54,12 @@ live immutable snapshot authority plus one absent private root; it must never
 derive either from decoded suite or workspace JSON. Before each child launch it
 must call `RequireFresh`, supply only the returned stable worktree and cache
 paths to containment, and close each arm before beginning the next. Successful
-closure means a normal unmount and bounded descriptor-relative cleanup; any
-identity, topology, or cleanup error invalidates the pair. Patch capture and
+closure means a retained-mount-ID normal unmount and bounded,
+descriptor-relative cleanup of exact code-owned directory claims. A failed
+cleanup attempt keeps the authority active for an explicit retry; no later arm
+can begin until cleanup succeeds. If the kernel cannot identify a directory
+after creating it, failure cleanup normally unmounts the entire code-owned
+tmpfs and closes the pair instead of guessing at a pathname. Patch capture and
 code-result publication remain unimplemented, so v3 suites still cannot be run
 or published.
 

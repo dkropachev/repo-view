@@ -174,7 +174,7 @@ func TestRemoveArmLayoutHandlesSymlinksAndSpecialEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = directory.Close() })
-	if err := removeArmLayout(directory, validLimits()); err != nil {
+	if err := removeArmLayout(directory, testLayoutClaims(t, directory), validLimits()); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(root)
@@ -243,7 +243,7 @@ func TestRemoveArmLayoutHandlesInvalidUTF8AndDeepTrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := removeArmLayout(rootDirectory, validLimits()); err != nil {
+	if err := removeArmLayout(rootDirectory, testLayoutClaims(t, rootDirectory), validLimits()); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(root)
@@ -253,6 +253,21 @@ func TestRemoveArmLayoutHandlesInvalidUTF8AndDeepTrees(t *testing.T) {
 	if len(entries) != 0 {
 		t.Fatalf("workspace cleanup left %d entries", len(entries))
 	}
+}
+
+func testLayoutClaims(t *testing.T, root *os.File) []directoryClaim {
+	t.Helper()
+	claims := make([]directoryClaim, 0, 5)
+	for _, name := range []string{
+		worktreeDirectory, upperDirectory, workDirectory, cacheDirectory, captureDirectory,
+	} {
+		var stat unix.Stat_t
+		if err := unix.Fstatat(int(root.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+			t.Fatal(err)
+		}
+		claims = append(claims, directoryClaim{name: name, device: stat.Dev, inode: stat.Ino})
+	}
+	return claims
 }
 
 func TestValidWorktreeRelativePathRejectsAliasesAndInvalidBytes(t *testing.T) {

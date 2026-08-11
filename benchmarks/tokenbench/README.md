@@ -157,6 +157,9 @@ Publishable runs currently require Linux on a native architecture supported by
 the bundled static ELF images, plus all of the following:
 
 - a private mount namespace whose mount tree can be made recursively private;
+- an existing, empty, runner-owned mode-`0700` workspace mountpoint on a private
+  mount tree; the workspace authority borrows its exact descriptor and never
+  creates, renames, or removes the mountpoint;
 - `CAP_SYS_ADMIN`, `CAP_MKNOD`, tmpfs, OverlayFS, `/proc/self/fd`, and the Linux `fsopen`,
   `fsconfig`, `fsmount`, and `move_mount` APIs for bounded writable code arms;
 - an absent snapshot path on an fs-verity-capable filesystem and permission to
