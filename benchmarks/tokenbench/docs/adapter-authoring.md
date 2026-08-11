@@ -10,6 +10,11 @@ The fake adapter, shared conformance helpers, external-process bridge, and
 generic runner make a new harness easy to prototype without weakening the
 publishable Codex path. New adapters are non-publishable by default.
 
+Study `task-bundle/v1` references are authoring and loader inputs, not adapter
+inputs. An adapter receives the same resolved prompt and common toolchain in
+both arms; it must never receive a hidden evaluator bundle descriptor, gold patch,
+bundle role, CAS pathname, or catalog-only answer material.
+
 ## Interface
 
 ```go

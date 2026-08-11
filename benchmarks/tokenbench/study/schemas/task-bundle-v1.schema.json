@@ -1,0 +1,166 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-bundle-v1.schema.json",
+  "title": "Tokenbench task artifact bundle v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "catalog_sha256", "tasks"],
+  "properties": {
+    "schema_version": {"const": "tokenbench.task-bundle/v1"},
+    "catalog_sha256": {"$ref": "#/$defs/sha256"},
+    "tasks": {
+      "type": "array",
+      "minItems": 144,
+      "maxItems": 144,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/task"}
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "objectRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["digest", "size", "media_type"],
+      "properties": {
+        "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+        "size": {"type": "integer", "minimum": 1, "maximum": 67108864},
+        "media_type": {
+          "enum": [
+            "application/vnd.tokenbench.gold-patch.v1+diff",
+            "application/vnd.tokenbench.hidden-evaluator-bundle.v1+json",
+            "application/vnd.tokenbench.pinned-toolchain.v1+json",
+            "application/vnd.tokenbench.task-prompt.v1+text"
+          ]
+        }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "object"],
+      "properties": {
+        "role": {
+          "enum": [
+            "gold_patch",
+            "hidden_evaluator_bundle",
+            "prompt",
+            "toolchain_manifest"
+          ]
+        },
+        "object": {"$ref": "#/$defs/objectRef"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"role": {"const": "gold_patch"}}},
+          "then": {
+            "properties": {
+              "object": {
+                "properties": {
+                  "size": {"maximum": 16777216},
+                  "media_type": {"const": "application/vnd.tokenbench.gold-patch.v1+diff"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"role": {"const": "hidden_evaluator_bundle"}}},
+          "then": {
+            "properties": {
+              "object": {
+                "properties": {
+                  "size": {"maximum": 67108864},
+                  "media_type": {"const": "application/vnd.tokenbench.hidden-evaluator-bundle.v1+json"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"role": {"const": "prompt"}}},
+          "then": {
+            "properties": {
+              "object": {
+                "properties": {
+                  "size": {"maximum": 1048576},
+                  "media_type": {"const": "application/vnd.tokenbench.task-prompt.v1+text"}
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {"properties": {"role": {"const": "toolchain_manifest"}}},
+          "then": {
+            "properties": {
+              "object": {
+                "properties": {
+                  "size": {"maximum": 4194304},
+                  "media_type": {"const": "application/vnd.tokenbench.pinned-toolchain.v1+json"}
+                }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "$comment": "Go validation additionally requires exact equality with the supplied decoded catalog, strict task and role order, 480 total references, digest/metadata consistency, and aggregate byte bounds.",
+      "required": ["task_id", "artifacts"],
+      "properties": {
+        "task_id": {"$ref": "#/$defs/id"},
+        "artifacts": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/artifact"},
+          "allOf": [
+            {
+              "contains": {"properties": {"role": {"const": "hidden_evaluator_bundle"}}},
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {"properties": {"role": {"const": "prompt"}}},
+              "minContains": 1,
+              "maxContains": 1
+            },
+            {
+              "contains": {"properties": {"role": {"const": "toolchain_manifest"}}},
+              "minContains": 1,
+              "maxContains": 1
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"task_id": {"pattern": "\\.code\\."}}},
+          "then": {
+            "properties": {
+              "artifacts": {
+                "minItems": 4,
+                "contains": {"properties": {"role": {"const": "gold_patch"}}},
+                "minContains": 1,
+                "maxContains": 1
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "artifacts": {
+                "maxItems": 3,
+                "not": {"contains": {"properties": {"role": {"const": "gold_patch"}}}}
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
