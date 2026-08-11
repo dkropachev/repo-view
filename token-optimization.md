@@ -74,16 +74,9 @@ shallow-clones `testdata/validation-repos.tsv` into the ignored
 `validation-repos/` directory. Existing matching clones are reused without a
 fetch or checkout; conflicting directories fail validation.
 
-Run the model-navigation regression suite:
-
-```bash
-experiments/lsp-replacement/suite.sh replay
-experiments/lsp-replacement/suite.sh resolve
-```
-
-Acceptance requires positive effective-token savings, complete deterministic
-quality criteria, source-grounded not-worse judgments, valid call accounting,
-and no bound or budget violation.
+The former model-navigation shell suite is archived and its driver has been
+removed. Treat the figures below as historical; run new comparisons through
+[`tokenbench`](benchmarks/tokenbench/README.md).
 
 Current measured reductions:
 

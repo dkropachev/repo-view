@@ -97,24 +97,12 @@ Tracked reports:
 - [`lsp-replacement/suite/latest-resolution.md`](lsp-replacement/suite/latest-resolution.md)
 - [`lsp-replacement/suite/latest-replay.md`](lsp-replacement/suite/latest-replay.md)
 
-## Reproduce
+## Archived workflow
 
-```bash
-experiments/lsp-replacement/suite.sh replay
-experiments/lsp-replacement/suite.sh resolve
-```
-
-Run fresh model sessions:
-
-```bash
-experiments/lsp-replacement/suite.sh live \
-  --case 01-simple-explain-accepted,02-simple-review-accepted \
-  --judge-repeats 2
-
-experiments/lsp-replacement/suite.sh live \
-  --case 16-deep-verified-accepted \
-  --judge-repeats 2
-```
+The shell suite driver has been removed. These reports remain historical
+artifacts and must not be presented as a current reproducible benchmark. Use
+[`tokenbench`](../benchmarks/tokenbench/README.md) for new paired runs and
+signed evidence.
 
 Harness details and evidence layout are in
 [`lsp-replacement/README.md`](lsp-replacement/README.md).

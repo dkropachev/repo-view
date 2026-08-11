@@ -4,68 +4,12 @@
 orders cases from a one-call explanation through the accepted multi-stage
 navigation workload and includes every rejected deep fixture.
 
-## Commands
+## Archived command surface
 
-List the manifest:
-
-```bash
-experiments/lsp-replacement/suite.sh list
-```
-
-Replay all local evidence:
-
-```bash
-experiments/lsp-replacement/suite.sh replay
-```
-
-Verify all retained failed cases against the current implementation:
-
-```bash
-experiments/lsp-replacement/suite.sh resolve
-```
-
-Run fresh failed-case repairs one at a time:
-
-```bash
-experiments/lsp-replacement/suite.sh repair \
-  --case 05-rejected-bounded-cost-regression \
-  --judge-repeats 2
-```
-
-Re-audit a retained attempt without rerunning model generation:
-
-```bash
-experiments/lsp-replacement/suite.sh repair \
-  --case 05-rejected-bounded-cost-regression \
-  --attempt experiments/lsp-replacement/evidence/repairs/05-rejected-bounded-cost-regression/ATTEMPT_ID \
-  --judge-repeats 2
-```
-
-Run a bounded subset:
-
-```bash
-experiments/lsp-replacement/suite.sh replay --max-level 6
-experiments/lsp-replacement/suite.sh replay \
-  --case 10-rejected-wrong-dependency-semantics,16-deep-verified-accepted
-```
-
-Rerun an accepted case with Codex and two source-grounded judges:
-
-```bash
-experiments/lsp-replacement/suite.sh live \
-  --case 16-deep-verified-accepted \
-  --judge-repeats 2
-```
-
-With no `--case`, `live` selects the three live-enabled accepted cases and does
-not rerun rejected fixtures.
-
-Live and repair definitions must pin a safe repository-relative `source`, a
-full target commit, prompt-commit prefix, distinct full base commit, and
-`model_mode`. The suite passes every identity input explicitly and rejects a
-completed run whose manifest does not match. Router mode is the default and
-configures no model or reasoning effort; pinned mode is accepted only when the
-definition explicitly requests it.
+The shell command surface for these manifests has been removed. This directory
+is retained only to describe historical cases and report semantics. It is not
+a supported compatibility interface; new studies use
+[`tokenbench`](../../../benchmarks/tokenbench/README.md).
 
 ## Semantics
 

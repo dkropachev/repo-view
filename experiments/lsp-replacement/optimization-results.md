@@ -62,22 +62,11 @@ Judge cost is verification overhead and is not part of candidate inference:
 | Review | 2 | 144,089 | 1,690,880 | 16,474 | 9,179 | 1,851,443 | 329,651.0 |
 | Total | 4 | 297,321 | 2,771,456 | 28,245 | 15,084 | 3,097,022 | 602,711.6 |
 
-## Reproduce
+## Archived workflow
 
-Rerun both accepted short cases with fresh model and judge sessions:
-
-```bash
-experiments/lsp-replacement/suite.sh live \
-  --case 01-simple-explain-accepted,02-simple-review-accepted \
-  --judge-repeats 2
-```
-
-Recheck stored evidence without new model calls:
-
-```bash
-experiments/lsp-replacement/suite.sh replay \
-  --case 01-simple-explain-accepted,02-simple-review-accepted
-```
+The shell suite driver used for these historical measurements has been
+removed. Do not treat this report as a currently reproducible benchmark; use
+[`tokenbench`](../../benchmarks/tokenbench/README.md) for new measurements.
 
 The tracked resolution report contains call graphs and per-tool operation
 counts: [`suite/latest-resolution.md`](suite/latest-resolution.md).
