@@ -39,6 +39,15 @@ Unknown, duplicate, null, and trailing fields are rejected. The suite's exact
 bytes and prompt bytes are committed to evidence, even though suite JSON does
 not have the manifest's compact-encoding requirement.
 
+Code-task authors may separately validate a
+[`tokenbench.suite/v3`](../schemas/suite-v3.schema.json) document with the Go
+`LoadCodeSuite` API. V3 requires `workspace-write`, an identical visible source
+and base revision, and a closed `code_task` binding containing the exact catalog
+digest, locked code-family task ID, and toolchain digest. It deliberately has no
+writable path, environment, arm, evaluator, or gold-patch field. This is a
+load-only authoring boundary: the current CLI and runner do not accept it for
+execution, and decoded workspace records cannot grant mount or write authority.
+
 ## 2. Build the trusted artifact bundle
 
 The artifact build is a separate reproducible supply-chain step. Build all

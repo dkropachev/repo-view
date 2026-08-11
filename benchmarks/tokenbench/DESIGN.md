@@ -95,6 +95,20 @@ options. A future integration must separately open and verify those objects,
 keep hidden roles outside both model sandboxes, and convert verified inputs into
 the same common authored suite for both arms before it can authorize execution.
 
+`tokenbench.suite/v3` is a separate, load-only code-task authoring contract. It
+retains the common suite fields, requires `workspace-write`, requires the source
+base to equal the visible revision, and binds one locked code-family task ID to
+the exact task-catalog and toolchain digests. It contains no workspace root,
+writable path list, environment, arm field, evaluator identity, or gold object.
+The v2 loader still accepts only v2 read-only suites, and the v3 loader does not
+produce execution authority.
+
+The `workspace` package currently defines bounded input and outcome audit
+records for the planned runner-owned overlay. Their path strings and
+self-commitments are evidence values only. No constructor yet proves a mount,
+creates an overlay, grants write access, captures a patch, or returns the private
+`PairAuthority` required by the future code runner.
+
 ## Trusted artifacts and immutable execution image
 
 The fixed artifact-manifest v2 contains a closed set of exact executable roles:

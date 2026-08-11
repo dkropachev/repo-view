@@ -418,7 +418,7 @@ func resolveRelative(base, path string) string {
 
 func readStableRegularFileLimited(
 	path string,
-	maximumBytes int64,
+	maximumBytes int64, //nolint:unparam // The caller must state each role's byte limit explicitly.
 ) (content []byte, resultErr error) {
 	if maximumBytes < 0 {
 		return nil, errors.New("regular file byte limit must be nonnegative")
