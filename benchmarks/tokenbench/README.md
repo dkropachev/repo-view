@@ -23,7 +23,8 @@ value, or repository preparation is a parity failure, not a benchmark result.
 
 The checked-in implementation provides:
 
-- strict `tokenbench.suite/v2`, artifact-manifest v2, plan v4, run v3,
+- strict read-only `tokenbench.suite/v2`, load-only code-task
+  `tokenbench.suite/v3`, bounded workspace audit types, artifact-manifest v2, plan v4, run v3,
   observation v2, capture v5, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
@@ -52,7 +53,8 @@ The live path intentionally refuses to run when a required kernel, artifact,
 identity, cleanup, or capture proof is unavailable. It has no best-effort
 publication mode. Study-level blinded quality evaluation and statistical
 reporting are kept separate from raw capture and replay. Code-task quality has
-a sealed objective-outcome boundary, but no code runner is implemented yet.
+a sealed objective-outcome boundary and a separate v3 authoring loader, but no
+writable workspace authority or code runner is implemented yet.
 
 ## Commands
 
