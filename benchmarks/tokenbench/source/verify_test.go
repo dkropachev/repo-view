@@ -582,6 +582,24 @@ func TestStableGitMetadataDigestRejectsChangeBetweenPasses(t *testing.T) {
 	}
 }
 
+func TestStableGitMetadataDigestRejectsSubmoduleStorageBetweenPasses(t *testing.T) {
+	t.Parallel()
+	repository := newRepository(t)
+	_, err := stableGitMetadataDigestWithHook(repository.root, func() error {
+		path := filepath.Join(
+			repository.root,
+			".git", "modules", "dependency", "objects", "aa", strings.Repeat("b", 38),
+		)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("nested object bytes"), 0o600)
+	})
+	if err == nil || !strings.Contains(err.Error(), "submodule metadata") {
+		t.Fatalf("expected submodule-metadata error, got %v", err)
+	}
+}
+
 func TestGitMetadataDigestRejectsTransientState(t *testing.T) {
 	t.Parallel()
 	repository := newRepository(t)
@@ -603,6 +621,131 @@ func TestTreeDigestRejectsTrackedSymlink(t *testing.T) {
 	if _, err := TreeDigest(context.Background(), repository.root); err == nil ||
 		!strings.Contains(err.Error(), "symlink") {
 		t.Fatalf("expected symlink error, got %v", err)
+	}
+}
+
+func TestTreeDigestCommitsOpaqueUninitializedGitlink(t *testing.T) {
+	t.Parallel()
+	repository, gitlinkPath := newGitlinkRepository(t, "vendor/dependency", "base")
+	absentDigest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatalf("digest absent gitlink: %v", err)
+	}
+	if err := os.MkdirAll(gitlinkPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	emptyDigest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatalf("digest empty gitlink: %v", err)
+	}
+	if absentDigest != emptyDigest {
+		t.Fatalf(
+			"empty gitlink changed opaque digest: absent %s, empty %s",
+			absentDigest,
+			emptyDigest,
+		)
+	}
+	if _, err := Verify(context.Background(), expectedSource(
+		t,
+		repository.root,
+		repository.head,
+		repository.base,
+		emptyDigest,
+	)); err != nil {
+		t.Fatalf("verify empty opaque gitlink: %v", err)
+	}
+}
+
+func TestVerifyRejectsResidualGitlinkMetadata(t *testing.T) {
+	t.Parallel()
+	repository, _ := newGitlinkRepository(t, "dependency", "base")
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(
+		t,
+		filepath.Join(
+			repository.root,
+			".git", "modules", "dependency", "objects", "aa", strings.Repeat("b", 38),
+		),
+		"nested object bytes",
+	)
+	if _, err := Verify(context.Background(), expectedSource(
+		t,
+		repository.root,
+		repository.head,
+		repository.base,
+		digest,
+	)); err == nil || !strings.Contains(err.Error(), "submodule metadata") {
+		t.Fatalf("residual submodule object storage was accepted: %v", err)
+	}
+}
+
+func TestTreeDigestBindsGitlinkCommitID(t *testing.T) {
+	t.Parallel()
+	baseRepository, _ := newGitlinkRepository(t, "dependency", "base")
+	headRepository, _ := newGitlinkRepository(t, "dependency", "head")
+	baseDigest, err := TreeDigest(context.Background(), baseRepository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	headDigest, err := TreeDigest(context.Background(), headRepository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if baseDigest == headDigest {
+		t.Fatal("source digest did not bind the opaque gitlink commit ID")
+	}
+}
+
+func TestTreeDigestDoesNotReadOpaqueGitlinkObject(t *testing.T) {
+	t.Parallel()
+	repository, _ := newGitlinkRepository(t, "dependency", "missing")
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatalf("opaque missing gitlink object was read: %v", err)
+	}
+	if _, err := Verify(context.Background(), expectedSource(
+		t,
+		repository.root,
+		repository.head,
+		repository.base,
+		digest,
+	)); err != nil {
+		t.Fatalf("full verification read opaque missing gitlink object: %v", err)
+	}
+}
+
+func TestTreeDigestRejectsMaterializedGitlinkContent(t *testing.T) {
+	t.Parallel()
+	tests := map[string]func(*testing.T, string){
+		"initialized directory": func(t *testing.T, path string) {
+			t.Helper()
+			writeFile(t, filepath.Join(path, ".git", "config"), "external metadata")
+		},
+		"regular file": func(t *testing.T, path string) {
+			t.Helper()
+			writeFile(t, path, "not a directory")
+		},
+		"symlink": func(t *testing.T, path string) {
+			t.Helper()
+			target := t.TempDir()
+			if err := os.Symlink(target, path); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, materialize := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			repository, gitlinkPath := newGitlinkRepository(t, "dependency", "base")
+			materialize(t, gitlinkPath)
+			if _, err := TreeDigest(context.Background(), repository.root); err == nil ||
+				!strings.Contains(err.Error(), "gitlink") {
+				t.Fatalf("unsafe gitlink materialization was accepted: %v", err)
+			}
+		})
 	}
 }
 
@@ -750,6 +893,33 @@ func newRepository(t *testing.T) testRepository {
 	commit(t, root, "head")
 	head := strings.TrimSpace(git(t, root, "rev-parse", "HEAD"))
 	return testRepository{root: root, head: head, base: base}
+}
+
+func newGitlinkRepository(
+	t *testing.T,
+	path string,
+	target string,
+) (testRepository, string) {
+	t.Helper()
+	repository := newRepository(t)
+	targetCommit := repository.base
+	switch target {
+	case "head":
+		targetCommit = repository.head
+	case "missing":
+		targetCommit = strings.Repeat("a", 40)
+	}
+	runGit(
+		t,
+		repository.root,
+		"update-index",
+		"--add",
+		"--cacheinfo",
+		gitlinkMode+","+targetCommit+","+path,
+	)
+	commit(t, repository.root, "add opaque gitlink")
+	repository.head = strings.TrimSpace(git(t, repository.root, "rev-parse", "HEAD"))
+	return repository, filepath.Join(repository.root, filepath.FromSlash(path))
 }
 
 func commit(t *testing.T, root, message string) {

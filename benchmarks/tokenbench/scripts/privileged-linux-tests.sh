@@ -34,6 +34,7 @@ host_main() {
   cleanup_host() {
     rm -f -- \
       "${host_binary_directory}/runner.test" \
+      "${host_binary_directory}/source.test" \
       "${host_binary_directory}/snapshot.test" \
       "${host_binary_directory}/tokenbench-command.test"
     rmdir -- "${host_binary_directory}" 2>/dev/null || true
@@ -48,6 +49,9 @@ host_main() {
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
       -o "${host_binary_directory}/snapshot.test" \
       ./benchmarks/tokenbench/snapshot
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
+      -o "${host_binary_directory}/source.test" \
+      ./benchmarks/tokenbench/source
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
       -o "${host_binary_directory}/tokenbench-command.test" \
       ./benchmarks/tokenbench/cmd/tokenbench
@@ -145,6 +149,27 @@ run_snapshot_tests() {
     TestFSVerityMerkleBlockSizeIsPageCompatible \
     TestReadOnlySelfBindFailsClosedWithoutAuthority \
     TestPrivilegedMountedAuthorityCloseReleasesKernelBoundary
+}
+
+run_source_tests() {
+  local expression='^TestPrivilegedTreeDigestRejectsMountedGitlink$'
+  local output
+  if ! output="$(
+    env \
+      "${required_environment}=1" \
+      /tokenbench-tests/source.test \
+      -test.run="${expression}" \
+      -test.v \
+      -test.count=1 \
+      -test.timeout=2m 2>&1
+  )"; then
+    printf '%s\n' "${output}" >&2
+    fail "source privileged test binary failed"
+  fi
+  printf '%s\n' "${output}"
+  assert_passed_tests \
+    "${output}" \
+    TestPrivilegedTreeDigestRejectsMountedGitlink
 }
 
 run_command_tests() {
@@ -245,6 +270,7 @@ container_main() {
   rmdir "${driver}"
 
   run_command_tests
+  run_source_tests
   run_snapshot_tests "${fsverity_root}"
 }
 
