@@ -56,6 +56,8 @@ func TestBuildPairRecordsDerivesAuthenticatedObservationsDefensively(t *testing.
 	records[0].Baseline.Tokens.InputTokens = 999
 	*records[0].Baseline.Tokens.ProviderTotalTokens = 999
 	records[0].Quality.CandidateScorePPM = 1
+	records[0].Quality.Judgments[0].Items[0].CandidateScore = 0
+	records[0].Quality.Judgments[0].Output.Answers[0].Items[0].Rationale = "Mutated returned rationale."
 	rebuilt, err := BuildPairRecords(policy, corpus, qualityInputs)
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +65,8 @@ func TestBuildPairRecordsDerivesAuthenticatedObservationsDefensively(t *testing.
 	if rebuilt[0].Baseline.Tokens.InputTokens != baselineUsage.InputTokens ||
 		*rebuilt[0].Baseline.Tokens.ProviderTotalTokens != 100 ||
 		rebuilt[0].Quality.CandidateScorePPM != qualityInputs[0].Quality.CandidateScorePPM ||
+		rebuilt[0].Quality.Judgments[0].Items[0].CandidateScore != qualityInputs[0].Quality.Judgments[0].Items[0].CandidateScore ||
+		rebuilt[0].Quality.Judgments[0].Output.Answers[0].Items[0].Rationale == "Mutated returned rationale." ||
 		*corpus.slots[0].baseline.observation.Usage.ProviderTotalTokens != 100 ||
 		qualityInputs[0].Quality.CandidateScorePPM == 1 {
 		t.Fatal("returned pointer mutation altered authenticated or verified source state")
@@ -95,7 +99,7 @@ func TestBuildPairRecordsRejectsAnswerAndQualitySubstitution(t *testing.T) {
 		changed := clonePairQualityInputs(valid)
 		changed[0].Quality.CandidateScorePPM--
 		if _, err := BuildPairRecords(policy, corpus, changed); err == nil ||
-			!strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluation") {
+			!strings.Contains(err.Error(), "differs from the output produced by VerifyEvaluations") {
 			t.Fatalf("mutated verified quality was accepted: %v", err)
 		}
 	})
@@ -188,6 +192,88 @@ func TestBuildPairRecordsRejectsQualityMatrixCorruption(t *testing.T) {
 	if records[0].Quality != nil || records[0].QualityMissingReason == "" ||
 		records[1].Quality != nil || records[1].QualityMissingReason == "" {
 		t.Fatalf("explicit quality missingness was not retained: %+v", records)
+	}
+}
+
+func TestBuildPairRecordsUsesFamilySpecificQualityBoundary(t *testing.T) {
+	policy, seeds := analysisPolicyFixture(t, 2)
+	policy.Tasks[0].TaskFamily = CodeTaskFamily
+	policy.Tasks[0].Facts = []FactItem{}
+	policy.Tasks[0].Rubric = []RubricItem{}
+	if err := policy.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	corpus := recordsCorpusFixture(t, policy)
+	inputs := []PairQualityInput{
+		{
+			TaskID: "task-01", Repetition: 0,
+			QualityMissingReason: "The objective code outcome runner is not implemented.",
+		},
+		recordsQualityInput(
+			t, policy, seeds, "task-02", 0,
+			corpus.slots[1].baseline.observation.FinalAnswer,
+			corpus.slots[1].candidate.observation.FinalAnswer,
+		),
+	}
+	records, err := BuildPairRecords(policy, corpus, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records[0].Quality != nil || records[0].CodeQuality != nil || records[0].QualityMissingReason == "" ||
+		records[1].Quality == nil || records[1].CodeQuality != nil {
+		t.Fatalf("family-specific quality matrix was not preserved: %+v", records)
+	}
+
+	wrong := clonePairQualityInputs(inputs)
+	wrong[0] = wrong[1]
+	wrong[0].TaskID = "task-01"
+	if _, err := BuildPairRecords(policy, corpus, wrong); err == nil || !strings.Contains(err.Error(), "objective code outcome") {
+		t.Fatalf("code task accepted prose judges: %v", err)
+	}
+
+	policySHA, err := policy.SHA256()
+	if err != nil {
+		t.Fatal(err)
+	}
+	codeQuality := ObjectiveCodeQuality{
+		SchemaVersion:          ObjectiveCodeQualitySchemaVersion,
+		PolicySHA256:           policySHA,
+		TaskID:                 "task-01",
+		TaskFamily:             CodeTaskFamily,
+		Repetition:             0,
+		BaselineOutcomeSHA256:  strings.Repeat("c", 64),
+		CandidateOutcomeSHA256: strings.Repeat("d", 64),
+		BaselineScorePPM:       PPM,
+		CandidateScorePPM:      PPM,
+		BaselinePass:           true,
+		CandidatePass:          true,
+	}
+	codeQuality.seal, err = canonicalPrivateSeal("objective-code-quality/v1", codeQuality)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputs[0] = PairQualityInput{TaskID: "task-01", Repetition: 0, CodeQuality: &codeQuality}
+	records, err = BuildPairRecords(policy, corpus, inputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records[0].CodeQuality == nil || records[0].Quality != nil {
+		t.Fatal("sealed objective code outcome did not enter the code-family boundary")
+	}
+	mutated := clonePairQualityInputs(inputs)
+	mutated[0].CodeQuality.CandidateOutcomeSHA256 = strings.Repeat("e", 64)
+	if _, err := BuildPairRecords(policy, corpus, mutated); err == nil ||
+		!strings.Contains(err.Error(), "authenticated code outcome verifier") {
+		t.Fatalf("mutated objective outcome lineage accepted: %v", err)
+	}
+	report, err := Analyze(policy, records, AnalysisSeeds{
+		Randomization: seeds.randomization, Bootstrap: seeds.bootstrap,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Counts.ObjectiveCodeQualityPairs != 1 || report.Counts.JudgedQualityPairs != 1 {
+		t.Fatalf("family-specific analysis counts differ: %+v", report.Counts)
 	}
 }
 
@@ -468,7 +554,10 @@ func recordsQualityInput(
 	if err != nil {
 		t.Fatal(err)
 	}
-	quality, err := VerifyEvaluation(policy, packet, key, recordsMaximumOutput(packet))
+	quality, err := VerifyEvaluations(policy, packet, key, []EvaluationOutput{
+		recordsMaximumOutput(packet, "judge-alpha"),
+		recordsMaximumOutput(packet, "judge-beta"),
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,9 +569,10 @@ func recordsQualityInput(
 	}
 }
 
-func recordsMaximumOutput(packet EvaluationPacket) EvaluationOutput {
+func recordsMaximumOutput(packet EvaluationPacket, evaluatorID string) EvaluationOutput {
 	output := EvaluationOutput{
 		SchemaVersion: EvaluationOutputSchemaVersion,
+		EvaluatorID:   evaluatorID,
 		Nonce:         packet.Nonce,
 		Commitment:    packet.Commitment,
 		Answers:       make([]AnswerEvaluation, len(packet.Answers)),

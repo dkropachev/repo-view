@@ -1,12 +1,12 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/blind-evaluation-v1.schema.json",
-  "title": "Tokenbench blind evaluation packet v1",
+  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/blind-evaluation-v2.schema.json",
+  "title": "Tokenbench blind evaluation packet v2",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "policy_sha256", "nonce", "commitment", "task_id", "criteria", "answers"],
   "properties": {
-    "schema_version": {"const": "tokenbench.blind-evaluation/v1"},
+    "schema_version": {"const": "tokenbench.blind-evaluation/v2"},
     "policy_sha256": {"$ref": "#/$defs/sha256"},
     "nonce": {"$ref": "#/$defs/sha256"},
     "commitment": {"$ref": "#/$defs/sha256"},

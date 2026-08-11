@@ -16,12 +16,13 @@ const recordsAttestationKeyPrefix = "ed25519-sha256:"
 // an authenticated corpus into analysis records. Entries exist, in corpus
 // order, only for nonexcluded attempted pairs with two authenticated answers.
 //
-// Packet is required with Quality because PairedQuality commits to a packet,
-// not directly to answer text. Rechecking the packet here prevents a verified
-// score for different answers from being substituted into the corpus.
+// Packet is required with Quality because judged PairedQuality commits to a
+// packet, not directly to answer text. CodeQuality is the disjoint objective
+// code-family capability; this package intentionally cannot construct one yet.
 type PairQualityInput struct {
 	Packet               *EvaluationPacket
 	Quality              *PairedQuality
+	CodeQuality          *ObjectiveCodeQuality
 	TaskID               string
 	QualityMissingReason string
 	Repetition           int
@@ -379,21 +380,41 @@ func applyPairQualityInput(
 		)
 	}
 	if input.Quality == nil {
-		if input.Packet != nil {
-			return fmt.Errorf("quality input %s/%d has a packet without verified quality", slot.taskID, slot.repetition)
+		if input.CodeQuality == nil {
+			if input.Packet != nil {
+				return fmt.Errorf("quality input %s/%d has a packet without verified judged quality", slot.taskID, slot.repetition)
+			}
+			if !validBoundedText(input.QualityMissingReason, 2_000) {
+				return fmt.Errorf(
+					"quality input %s/%d requires family-appropriate verified quality or a bounded explicit missing reason",
+					slot.taskID,
+					slot.repetition,
+				)
+			}
+			record.QualityMissingReason = input.QualityMissingReason
+			return nil
 		}
-		if !validBoundedText(input.QualityMissingReason, 2_000) {
-			return fmt.Errorf(
-				"quality input %s/%d requires verified quality or a bounded explicit missing reason",
-				slot.taskID,
-				slot.repetition,
-			)
-		}
-		record.QualityMissingReason = input.QualityMissingReason
-		return nil
+	}
+	task, ok := includedTask(policy, slot.taskID)
+	if !ok {
+		return fmt.Errorf("quality input %s/%d task is not included", slot.taskID, slot.repetition)
 	}
 	if input.QualityMissingReason != "" {
 		return fmt.Errorf("quality input %s/%d has both quality and a missing reason", slot.taskID, slot.repetition)
+	}
+	if task.TaskFamily == CodeTaskFamily {
+		if input.Quality != nil || input.Packet != nil || input.CodeQuality == nil {
+			return fmt.Errorf("quality input %s/%d code task must use only an objective code outcome", slot.taskID, slot.repetition)
+		}
+		quality := *input.CodeQuality
+		if err := validateObjectiveCodeQuality(policy, policySHA256, slot.taskID, slot.repetition, quality); err != nil {
+			return fmt.Errorf("quality input %s/%d: %w", slot.taskID, slot.repetition, err)
+		}
+		record.CodeQuality = &quality
+		return nil
+	}
+	if input.CodeQuality != nil {
+		return fmt.Errorf("quality input %s/%d review/explain task cannot use an objective code outcome", slot.taskID, slot.repetition)
 	}
 	if input.Packet == nil {
 		return fmt.Errorf("quality input %s/%d is missing its committed packet", slot.taskID, slot.repetition)
@@ -404,6 +425,11 @@ func applyPairQualityInput(
 	quality := *input.Quality
 	if err := validatePairedQuality(policy, policySHA256, slot.taskID, slot.repetition, quality); err != nil {
 		return fmt.Errorf("quality input %s/%d: %w", slot.taskID, slot.repetition, err)
+	}
+	for index, judgment := range quality.Judgments {
+		if err := validateEvaluationOutput(*input.Packet, judgment.Output, policy.Quality.ProseEvaluatorIDs[index]); err != nil {
+			return fmt.Errorf("quality input %s/%d preserved evaluator output: %w", slot.taskID, slot.repetition, err)
+		}
 	}
 	if quality.PacketCommitment != input.Packet.Commitment {
 		return fmt.Errorf("quality input %s/%d differs from its committed packet", slot.taskID, slot.repetition)
@@ -433,8 +459,12 @@ func clonePairQualityInputs(source []PairQualityInput) []PairQualityInput {
 			clone[index].Packet = &packet
 		}
 		if input.Quality != nil {
-			quality := *input.Quality
+			quality := clonePairedQuality(*input.Quality)
 			clone[index].Quality = &quality
+		}
+		if input.CodeQuality != nil {
+			quality := *input.CodeQuality
+			clone[index].CodeQuality = &quality
 		}
 	}
 	return clone

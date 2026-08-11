@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	PolicySchemaVersion = "tokenbench.study-policy/v1"
+	PolicySchemaVersion = "tokenbench.study-policy/v2"
 	PPM                 = int64(1_000_000)
 
 	BlindingSeedPurpose      = "blinding"
@@ -36,12 +36,27 @@ var canonicalID = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,127}$`)
 
 type TaskStatus string
 
+type TaskFamily string
+
+const (
+	CodeTaskFamily    TaskFamily = "code"
+	ReviewTaskFamily  TaskFamily = "review"
+	ExplainTaskFamily TaskFamily = "explain"
+)
+
+type ProseAggregationMethod string
+
+const (
+	NoProseAggregation        ProseAggregationMethod = "not_applicable"
+	ArithmeticMeanAggregation ProseAggregationMethod = "arithmetic_mean"
+)
+
 const (
 	TaskIncluded TaskStatus = "included"
 	TaskExcluded TaskStatus = "excluded"
 )
 
-// Policy is the complete v1 preregistration. Tasks and every nested item list
+// Policy is the complete v2 preregistration. Tasks and every nested item list
 // are strictly sorted so equivalent corpora have one canonical encoding.
 //
 //nolint:govet,nolintlint // Field order is the byte-level canonical policy wire order.
@@ -61,7 +76,7 @@ type TaskPolicy struct {
 	SuiteSHA256         string       `json:"suite_sha256"`
 	PromptSHA256        string       `json:"prompt_sha256"`
 	RepositoryClusterID string       `json:"repository_cluster_id"`
-	TaskFamily          string       `json:"task_family"`
+	TaskFamily          TaskFamily   `json:"task_family"`
 	Status              TaskStatus   `json:"status"`
 	ExclusionReason     string       `json:"exclusion_reason"`
 	Repetitions         int          `json:"repetitions"`
@@ -90,10 +105,13 @@ type AllowedExclusionReason struct {
 	Description string `json:"description"`
 }
 
+//nolint:govet,nolintlint // Field order is the byte-level canonical quality-policy wire order.
 type QualityPolicy struct {
-	MinimumAnswerScorePPM       int64 `json:"minimum_answer_score_ppm"`
-	MinimumCandidatePassRatePPM int64 `json:"minimum_candidate_pass_rate_ppm"`
-	NoninferiorityMarginPPM     int64 `json:"noninferiority_margin_ppm"`
+	MinimumAnswerScorePPM       int64                  `json:"minimum_answer_score_ppm"`
+	MinimumCandidatePassRatePPM int64                  `json:"minimum_candidate_pass_rate_ppm"`
+	NoninferiorityMarginPPM     int64                  `json:"noninferiority_margin_ppm"`
+	ProseEvaluatorIDs           []string               `json:"prose_evaluator_ids"`
+	ProseAggregation            ProseAggregationMethod `json:"prose_aggregation"`
 }
 
 type AnalysisPolicy struct {
@@ -130,7 +148,7 @@ func DecodePolicy(raw []byte) (Policy, error) {
 	return policy, nil
 }
 
-// EncodePolicy returns the sole canonical JSON representation of a valid v1
+// EncodePolicy returns the sole canonical JSON representation of a valid v2
 // policy. It never sorts or repairs caller input.
 func EncodePolicy(policy Policy) ([]byte, error) {
 	if err := policy.Validate(); err != nil {
@@ -162,6 +180,7 @@ func (policy Policy) Validate() error {
 	}
 	plannedPairs := 0
 	includedTasks := 0
+	hasProseTasks := false
 	for index, task := range policy.Tasks {
 		if index > 0 && policy.Tasks[index-1].TaskID >= task.TaskID {
 			return errors.New("tasks are not strictly sorted by task_id")
@@ -170,6 +189,9 @@ func (policy Policy) Validate() error {
 			return fmt.Errorf("task %q: %w", task.TaskID, err)
 		}
 		if task.Status == TaskIncluded {
+			if task.TaskFamily == ReviewTaskFamily || task.TaskFamily == ExplainTaskFamily {
+				hasProseTasks = true
+			}
 			includedTasks++
 			if task.Repetitions > maxPlannedPairs-plannedPairs {
 				return fmt.Errorf("included task repetitions exceed %d planned pairs", maxPlannedPairs)
@@ -191,7 +213,7 @@ func (policy Policy) Validate() error {
 			return fmt.Errorf("exclusion reason %d is invalid", index)
 		}
 	}
-	if err := validateQualityPolicy(policy.Quality); err != nil {
+	if err := validateQualityPolicy(policy.Quality, hasProseTasks); err != nil {
 		return err
 	}
 	if err := validateAnalysisPolicy(policy.Analysis, plannedPairs, includedTasks); err != nil {
@@ -216,8 +238,10 @@ func validateTask(task TaskPolicy) error {
 	if !validID(task.RepositoryClusterID) {
 		return errors.New("repository_cluster_id is not a canonical identifier")
 	}
-	if !validID(task.TaskFamily) {
-		return errors.New("task_family is not a canonical identifier")
+	switch task.TaskFamily {
+	case CodeTaskFamily, ReviewTaskFamily, ExplainTaskFamily:
+	default:
+		return fmt.Errorf("unsupported task_family %q", task.TaskFamily)
 	}
 	if task.Repetitions <= 0 || task.Repetitions > maxRepetitions {
 		return fmt.Errorf("repetitions must be in 1..%d", maxRepetitions)
@@ -240,9 +264,15 @@ func validateTask(task TaskPolicy) error {
 	default:
 		return fmt.Errorf("invalid task status %q", task.Status)
 	}
-	if len(task.Facts)+len(task.Rubric) == 0 ||
-		len(task.Facts)+len(task.Rubric) > maxQualityItems {
-		return fmt.Errorf("task must contain 1..%d quality items", maxQualityItems)
+	qualityItems := len(task.Facts) + len(task.Rubric)
+	if task.TaskFamily == CodeTaskFamily {
+		if qualityItems != 0 {
+			return errors.New("code tasks must use objective code outcomes, not prose quality items")
+		}
+		return nil
+	}
+	if qualityItems == 0 || qualityItems > maxQualityItems {
+		return fmt.Errorf("review and explain tasks must contain 1..%d quality items", maxQualityItems)
 	}
 	seen := make(map[string]struct{}, len(task.Facts)+len(task.Rubric))
 	points := int64(0)
@@ -258,7 +288,7 @@ func validateTask(task TaskPolicy) error {
 		}
 		seen[item.ItemID] = struct{}{}
 		if item.MaximumPoints > maxQualityPoints-points {
-			return errors.New("quality points exceed the v1 limit")
+			return errors.New("quality points exceed the v2 limit")
 		}
 		points += item.MaximumPoints
 	}
@@ -275,14 +305,14 @@ func validateTask(task TaskPolicy) error {
 		}
 		seen[item.ItemID] = struct{}{}
 		if item.MaximumPoints > maxQualityPoints-points {
-			return errors.New("quality points exceed the v1 limit")
+			return errors.New("quality points exceed the v2 limit")
 		}
 		points += item.MaximumPoints
 	}
 	return nil
 }
 
-func validateQualityPolicy(policy QualityPolicy) error {
+func validateQualityPolicy(policy QualityPolicy, hasProseTasks bool) error {
 	switch {
 	case policy.MinimumAnswerScorePPM < 0 || policy.MinimumAnswerScorePPM > PPM:
 		return errors.New("minimum answer score must be in 0..1000000 ppm")
@@ -290,9 +320,31 @@ func validateQualityPolicy(policy QualityPolicy) error {
 		return errors.New("minimum candidate pass rate must be in 0..1000000 ppm")
 	case policy.NoninferiorityMarginPPM < 0 || policy.NoninferiorityMarginPPM > PPM:
 		return errors.New("quality noninferiority margin must be in 0..1000000 ppm")
-	default:
+	}
+	if policy.ProseEvaluatorIDs == nil {
+		return errors.New("prose evaluator IDs must be a canonical array")
+	}
+	if !hasProseTasks {
+		if len(policy.ProseEvaluatorIDs) != 0 || policy.ProseAggregation != NoProseAggregation {
+			return errors.New("a code-only policy must not configure prose evaluators")
+		}
 		return nil
 	}
+	if len(policy.ProseEvaluatorIDs) != 2 {
+		return errors.New("review and explain tasks require exactly two prose evaluator IDs")
+	}
+	for index, evaluatorID := range policy.ProseEvaluatorIDs {
+		if !validID(evaluatorID) {
+			return fmt.Errorf("prose evaluator ID %d is not canonical", index)
+		}
+		if index > 0 && policy.ProseEvaluatorIDs[index-1] >= evaluatorID {
+			return errors.New("prose evaluator IDs must be distinct and strictly sorted")
+		}
+	}
+	if policy.ProseAggregation != ArithmeticMeanAggregation {
+		return fmt.Errorf("unsupported prose aggregation %q", policy.ProseAggregation)
+	}
+	return nil
 }
 
 func validateAnalysisPolicy(policy AnalysisPolicy, plannedPairs, taskCount int) error {
@@ -326,9 +378,9 @@ func validateAnalysisPolicy(policy AnalysisPolicy, plannedPairs, taskCount int) 
 	case policy.BootstrapSamples < 1_000 || policy.BootstrapSamples > 1_000_000:
 		return errors.New("bootstrap samples must be in 1000..1000000")
 	case policy.MonteCarloSamples > maxStatisticalWork/taskCount:
-		return errors.New("configured Monte Carlo task-sample product exceeds the v1 work limit")
+		return errors.New("configured Monte Carlo task-sample product exceeds the study work limit")
 	case policy.BootstrapSamples > maxStatisticalWork/taskCount:
-		return errors.New("bootstrap task-sample product exceeds the v1 work limit")
+		return errors.New("bootstrap task-sample product exceeds the study work limit")
 	default:
 		return nil
 	}
@@ -348,7 +400,7 @@ func validateSeedCommitments(seeds SeedCommitments) error {
 }
 
 // CommitSeed creates a domain-separated commitment. The purpose must be one
-// of the three exported v1 purpose constants.
+// of the three exported purpose constants.
 func CommitSeed(purpose string, seed []byte) (string, error) {
 	if !validSeedPurpose(purpose) {
 		return "", fmt.Errorf("invalid seed purpose %q", purpose)

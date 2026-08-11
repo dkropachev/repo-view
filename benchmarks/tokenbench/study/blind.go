@@ -13,9 +13,10 @@ import (
 )
 
 const (
-	EvaluationPacketSchemaVersion = "tokenbench.blind-evaluation/v1"
-	EvaluationOutputSchemaVersion = "tokenbench.evaluator-output/v1"
-	VerifiedQualitySchemaVersion  = "tokenbench.verified-quality/v1"
+	EvaluationPacketSchemaVersion     = "tokenbench.blind-evaluation/v2"
+	EvaluationOutputSchemaVersion     = "tokenbench.evaluator-output/v2"
+	VerifiedQualitySchemaVersion      = "tokenbench.verified-quality/v2"
+	ObjectiveCodeQualitySchemaVersion = "tokenbench.objective-code-quality/v1"
 
 	maxAnswerBytes    = 16 << 20
 	maxRationaleBytes = 16_000
@@ -69,6 +70,7 @@ type BlindAnswer struct {
 // transposition undetectable at this boundary.
 type EvaluationOutput struct {
 	SchemaVersion string             `json:"schema_version"`
+	EvaluatorID   string             `json:"evaluator_id"`
 	Nonce         string             `json:"nonce"`
 	Commitment    string             `json:"commitment"`
 	Answers       []AnswerEvaluation `json:"answers"`
@@ -88,6 +90,7 @@ type ItemEvaluation struct {
 // Evaluator is intentionally narrow. An implementation receives no run or
 // observation object from which it could inspect treatment or usage metadata.
 type Evaluator interface {
+	EvaluatorID() string
 	Evaluate(context.Context, EvaluationPacket) (EvaluationOutput, error)
 }
 
@@ -104,21 +107,68 @@ type EvaluationKey struct {
 	valid          bool
 }
 
-// PairedQuality is produced only by VerifyEvaluation. The private seal binds
+// PairedQuality is produced only by VerifyEvaluations. The private seal binds
 // every exported field so mutation or reuse for another repetition is rejected.
 //
 //nolint:govet,nolintlint // Field order is the byte-level canonical verified-quality wire order.
 type PairedQuality struct {
-	SchemaVersion     string `json:"schema_version"`
-	PolicySHA256      string `json:"policy_sha256"`
-	TaskID            string `json:"task_id"`
-	Repetition        int    `json:"repetition"`
-	PacketCommitment  string `json:"packet_commitment"`
-	BaselineScorePPM  int64  `json:"baseline_score_ppm"`
-	CandidateScorePPM int64  `json:"candidate_score_ppm"`
-	BaselinePass      bool   `json:"baseline_pass"`
-	CandidatePass     bool   `json:"candidate_pass"`
+	SchemaVersion     string                 `json:"schema_version"`
+	PolicySHA256      string                 `json:"policy_sha256"`
+	TaskID            string                 `json:"task_id"`
+	TaskFamily        TaskFamily             `json:"task_family"`
+	Repetition        int                    `json:"repetition"`
+	PacketCommitment  string                 `json:"packet_commitment"`
+	Aggregation       ProseAggregationMethod `json:"aggregation"`
+	Judgments         []IndividualJudgment   `json:"judgments"`
+	BaselineScorePPM  int64                  `json:"baseline_score_ppm"`
+	CandidateScorePPM int64                  `json:"candidate_score_ppm"`
+	BaselinePass      bool                   `json:"baseline_pass"`
+	CandidatePass     bool                   `json:"candidate_pass"`
 	seal              [sha256.Size]byte
+}
+
+// IndividualJudgment preserves each evaluator's complete canonical output,
+// its digest, and treatment-mapped scores. The two entries remain in
+// preregistered evaluator-ID order.
+type IndividualJudgment struct {
+	EvaluatorID       string           `json:"evaluator_id"`
+	OutputSHA256      string           `json:"output_sha256"`
+	Output            EvaluationOutput `json:"output"`
+	Items             []JudgedItem     `json:"items"`
+	BaselineScorePPM  int64            `json:"baseline_score_ppm"`
+	CandidateScorePPM int64            `json:"candidate_score_ppm"`
+	BaselinePass      bool             `json:"baseline_pass"`
+	CandidatePass     bool             `json:"candidate_pass"`
+}
+
+// JudgedItem discloses exact inter-rater agreement after unblinding without
+// discarding the full evaluator output committed by OutputSHA256.
+type JudgedItem struct {
+	ItemID         string `json:"item_id"`
+	BaselineScore  int64  `json:"baseline_score"`
+	CandidateScore int64  `json:"candidate_score"`
+}
+
+// ObjectiveCodeQuality reserves the authenticated family-specific boundary for
+// code-task patches and hidden-test outcomes. This milestone intentionally has
+// no exported constructor: prose evaluators cannot create this capability, and
+// a later objective code runner must bind both outcome digests before sealing
+// it.
+//
+//nolint:govet,nolintlint // Field order is the canonical future code-quality wire order.
+type ObjectiveCodeQuality struct {
+	SchemaVersion          string     `json:"schema_version"`
+	PolicySHA256           string     `json:"policy_sha256"`
+	TaskID                 string     `json:"task_id"`
+	TaskFamily             TaskFamily `json:"task_family"`
+	Repetition             int        `json:"repetition"`
+	BaselineOutcomeSHA256  string     `json:"baseline_outcome_sha256"`
+	CandidateOutcomeSHA256 string     `json:"candidate_outcome_sha256"`
+	BaselineScorePPM       int64      `json:"baseline_score_ppm"`
+	CandidateScorePPM      int64      `json:"candidate_score_ppm"`
+	BaselinePass           bool       `json:"baseline_pass"`
+	CandidatePass          bool       `json:"candidate_pass"`
+	seal                   [sha256.Size]byte
 }
 
 // BlindPair checks the committed secret seed, derives a deterministic nonce
@@ -139,6 +189,9 @@ func BlindPair(policy Policy, request BlindPairRequest, seed []byte) (Evaluation
 	task, ok := includedTask(policy, request.TaskID)
 	if !ok {
 		return EvaluationPacket{}, EvaluationKey{}, fmt.Errorf("task %q is not an included preregistered task", request.TaskID)
+	}
+	if task.TaskFamily == CodeTaskFamily {
+		return EvaluationPacket{}, EvaluationKey{}, errors.New("code tasks require objective code outcomes, not blind prose evaluation")
 	}
 	if request.Repetition < 0 || request.Repetition >= task.Repetitions {
 		return EvaluationPacket{}, EvaluationKey{}, fmt.Errorf(
@@ -193,24 +246,38 @@ func BlindPair(policy Policy, request BlindPairRequest, seed []byte) (Evaluation
 	return packet, key, nil
 }
 
-// EvaluateAndVerify defensively copies the packet before invoking the narrow
-// evaluator and verifies its result against the untouched packet and key.
+// EvaluateAndVerify invokes exactly the two preregistered evaluators with
+// separate defensive packet copies, then verifies and aggregates both outputs.
 func EvaluateAndVerify(
 	ctx context.Context,
 	policy Policy,
 	packet EvaluationPacket,
 	key EvaluationKey,
-	evaluator Evaluator,
+	evaluators []Evaluator,
 ) (PairedQuality, error) {
-	if evaluator == nil {
-		return PairedQuality{}, errors.New("evaluator is required")
-	}
 	original := clonePacket(packet)
-	output, err := evaluator.Evaluate(ctx, clonePacket(packet))
-	if err != nil {
-		return PairedQuality{}, fmt.Errorf("blind evaluator: %w", err)
+	if err := ValidateEvaluationPacket(policy, original); err != nil {
+		return PairedQuality{}, err
 	}
-	return VerifyEvaluation(policy, original, key, output)
+	if len(evaluators) != 2 {
+		return PairedQuality{}, errors.New("exactly two evaluators are required")
+	}
+	outputs := make([]EvaluationOutput, len(evaluators))
+	for index, evaluator := range evaluators {
+		if evaluator == nil {
+			return PairedQuality{}, fmt.Errorf("blind evaluator %d is required", index)
+		}
+		expectedID := policy.Quality.ProseEvaluatorIDs[index]
+		if evaluator.EvaluatorID() != expectedID {
+			return PairedQuality{}, fmt.Errorf("blind evaluator %d identity differs from preregistration", index)
+		}
+		output, err := evaluator.Evaluate(ctx, clonePacket(packet))
+		if err != nil {
+			return PairedQuality{}, fmt.Errorf("blind evaluator %q: %w", expectedID, err)
+		}
+		outputs[index] = output
+	}
+	return VerifyEvaluations(policy, original, key, outputs)
 }
 
 func EncodeEvaluationPacket(policy Policy, packet EvaluationPacket) ([]byte, error) {
@@ -232,7 +299,7 @@ func DecodeEvaluationPacket(policy Policy, raw []byte) (EvaluationPacket, error)
 }
 
 func EncodeEvaluationOutput(packet EvaluationPacket, output EvaluationOutput) ([]byte, error) {
-	if err := validateEvaluationOutput(packet, output); err != nil {
+	if err := validateEvaluationOutput(packet, output, ""); err != nil {
 		return nil, err
 	}
 	return canonicalJSON(output)
@@ -243,7 +310,7 @@ func DecodeEvaluationOutput(packet EvaluationPacket, raw []byte) (EvaluationOutp
 	if err := decodeCanonical(raw, &output); err != nil {
 		return EvaluationOutput{}, fmt.Errorf("decode evaluator output: %w", err)
 	}
-	if err := validateEvaluationOutput(packet, output); err != nil {
+	if err := validateEvaluationOutput(packet, output, ""); err != nil {
 		return EvaluationOutput{}, err
 	}
 	return output, nil
@@ -270,6 +337,9 @@ func ValidateEvaluationPacket(policy Policy, packet EvaluationPacket) error {
 	if !ok {
 		return fmt.Errorf("blind packet task %q is not included", packet.TaskID)
 	}
+	if task.TaskFamily == CodeTaskFamily {
+		return errors.New("code tasks cannot produce blind prose evaluation packets")
+	}
 	if !reflect.DeepEqual(packet.Criteria, criteriaForTask(task)) {
 		return errors.New("blind packet criteria differ from the preregistration")
 	}
@@ -292,13 +362,15 @@ func ValidateEvaluationPacket(policy Policy, packet EvaluationPacket) error {
 	return nil
 }
 
-// VerifyEvaluation binds scores to the exact randomized labels before mapping
-// them back to baseline and candidate. Swapped result/item order is rejected.
-func VerifyEvaluation(
+// VerifyEvaluations binds exactly two distinct preregistered evaluator outputs
+// to the randomized labels, preserves both, then applies the preregistered
+// deterministic arithmetic-mean aggregation. Missing, duplicate, reordered,
+// or identity-substituted judgments fail closed.
+func VerifyEvaluations(
 	policy Policy,
 	packet EvaluationPacket,
 	key EvaluationKey,
-	output EvaluationOutput,
+	outputs []EvaluationOutput,
 ) (PairedQuality, error) {
 	if err := ValidateEvaluationPacket(policy, packet); err != nil {
 		return PairedQuality{}, err
@@ -317,36 +389,50 @@ func VerifyEvaluation(
 		(key.candidateLabel != "answer_1" && key.candidateLabel != "answer_2") {
 		return PairedQuality{}, errors.New("evaluation key has an invalid label assignment")
 	}
-	if err := validateEvaluationOutput(packet, output); err != nil {
-		return PairedQuality{}, err
+	if len(outputs) != 2 || len(policy.Quality.ProseEvaluatorIDs) != 2 {
+		return PairedQuality{}, errors.New("exactly two preregistered evaluator outputs are required")
 	}
-	scores := make(map[string]int64, 2)
-	for _, answer := range output.Answers {
-		total, maximum := int64(0), int64(0)
-		for index, item := range answer.Items {
-			criterion := packet.Criteria[index]
-			if item.Score > maxQualityPoints-total || criterion.MaximumPoints > maxQualityPoints-maximum {
-				return PairedQuality{}, errors.New("quality score total exceeds the v1 limit")
-			}
-			total += item.Score
-			maximum += criterion.MaximumPoints
+	if policy.Quality.ProseAggregation != ArithmeticMeanAggregation {
+		return PairedQuality{}, errors.New("prose aggregation differs from the supported preregistration")
+	}
+	judgments := make([]IndividualJudgment, len(outputs))
+	baselineTotal, candidateTotal, maximum := int64(0), int64(0), int64(0)
+	for index, output := range outputs {
+		expectedID := policy.Quality.ProseEvaluatorIDs[index]
+		if err := validateEvaluationOutput(packet, output, expectedID); err != nil {
+			return PairedQuality{}, fmt.Errorf("evaluator %q: %w", expectedID, err)
 		}
-		scores[answer.Label] = total * PPM / maximum
+		judgment, judgeBaseline, judgeCandidate, judgeMaximum, err := verifiedJudgment(packet, key, output, policy.Quality.MinimumAnswerScorePPM)
+		if err != nil {
+			return PairedQuality{}, err
+		}
+		if index == 0 {
+			maximum = judgeMaximum
+		} else if maximum != judgeMaximum {
+			return PairedQuality{}, errors.New("evaluator score maxima differ")
+		}
+		baselineTotal += judgeBaseline
+		candidateTotal += judgeCandidate
+		judgments[index] = judgment
 	}
-	baselineScore := scores[key.baselineLabel]
-	candidateScore := scores[key.candidateLabel]
+	denominator := int64(len(judgments)) * maximum
+	baselineScore := baselineTotal * PPM / denominator
+	candidateScore := candidateTotal * PPM / denominator
 	quality := PairedQuality{
 		SchemaVersion:     VerifiedQualitySchemaVersion,
 		PolicySHA256:      packet.PolicySHA256,
 		TaskID:            packet.TaskID,
+		TaskFamily:        task.TaskFamily,
 		Repetition:        key.repetition,
 		PacketCommitment:  packet.Commitment,
+		Aggregation:       policy.Quality.ProseAggregation,
+		Judgments:         judgments,
 		BaselineScorePPM:  baselineScore,
 		CandidateScorePPM: candidateScore,
 		BaselinePass:      baselineScore >= policy.Quality.MinimumAnswerScorePPM,
 		CandidatePass:     candidateScore >= policy.Quality.MinimumAnswerScorePPM,
 	}
-	seal, err := canonicalPrivateSeal("paired-quality/v1", quality)
+	seal, err := canonicalPrivateSeal("paired-quality/v2", quality)
 	if err != nil {
 		return PairedQuality{}, fmt.Errorf("seal verified quality: %w", err)
 	}
@@ -354,9 +440,15 @@ func VerifyEvaluation(
 	return quality, nil
 }
 
-func validateEvaluationOutput(packet EvaluationPacket, output EvaluationOutput) error {
+func validateEvaluationOutput(packet EvaluationPacket, output EvaluationOutput, expectedEvaluatorID string) error {
 	if output.SchemaVersion != EvaluationOutputSchemaVersion {
 		return fmt.Errorf("unexpected evaluator output schema %q", output.SchemaVersion)
+	}
+	if !validID(output.EvaluatorID) {
+		return errors.New("evaluator output identity is not canonical")
+	}
+	if expectedEvaluatorID != "" && output.EvaluatorID != expectedEvaluatorID {
+		return errors.New("evaluator output identity differs from preregistration")
 	}
 	if !sameSecretText(output.Nonce, packet.Nonce) ||
 		!sameSecretText(output.Commitment, packet.Commitment) {
@@ -390,6 +482,64 @@ func validateEvaluationOutput(packet EvaluationPacket, output EvaluationOutput) 
 		}
 	}
 	return nil
+}
+
+func verifiedJudgment(
+	packet EvaluationPacket,
+	key EvaluationKey,
+	output EvaluationOutput,
+	minimumScorePPM int64,
+) (IndividualJudgment, int64, int64, int64, error) {
+	outputSHA256, err := canonicalDigest(output)
+	if err != nil {
+		return IndividualJudgment{}, 0, 0, 0, fmt.Errorf("digest evaluator output: %w", err)
+	}
+	byLabel := make(map[string]AnswerEvaluation, len(output.Answers))
+	totals := make(map[string]int64, len(output.Answers))
+	maximum := int64(0)
+	for answerIndex, answer := range output.Answers {
+		total := int64(0)
+		answerMaximum := int64(0)
+		for itemIndex, item := range answer.Items {
+			criterion := packet.Criteria[itemIndex]
+			if item.Score > maxQualityPoints-total || criterion.MaximumPoints > maxQualityPoints-answerMaximum {
+				return IndividualJudgment{}, 0, 0, 0, errors.New("quality score total exceeds the v2 limit")
+			}
+			total += item.Score
+			answerMaximum += criterion.MaximumPoints
+		}
+		if answerIndex == 0 {
+			maximum = answerMaximum
+		} else if maximum != answerMaximum {
+			return IndividualJudgment{}, 0, 0, 0, errors.New("answer score maxima differ")
+		}
+		byLabel[answer.Label] = answer
+		totals[answer.Label] = total
+	}
+	baselineTotal := totals[key.baselineLabel]
+	candidateTotal := totals[key.candidateLabel]
+	baselineScore := baselineTotal * PPM / maximum
+	candidateScore := candidateTotal * PPM / maximum
+	baselineItems := byLabel[key.baselineLabel].Items
+	candidateItems := byLabel[key.candidateLabel].Items
+	items := make([]JudgedItem, len(packet.Criteria))
+	for index, criterion := range packet.Criteria {
+		items[index] = JudgedItem{
+			ItemID:         criterion.ItemID,
+			BaselineScore:  baselineItems[index].Score,
+			CandidateScore: candidateItems[index].Score,
+		}
+	}
+	return IndividualJudgment{
+		EvaluatorID:       output.EvaluatorID,
+		OutputSHA256:      outputSHA256,
+		Output:            cloneEvaluationOutput(output),
+		Items:             items,
+		BaselineScorePPM:  baselineScore,
+		CandidateScorePPM: candidateScore,
+		BaselinePass:      baselineScore >= minimumScorePPM,
+		CandidatePass:     candidateScore >= minimumScorePPM,
+	}, baselineTotal, candidateTotal, maximum, nil
 }
 
 func criteriaForTask(task TaskPolicy) []EvaluationCriterion {
@@ -447,7 +597,7 @@ func evaluationPacketCommitment(packet EvaluationPacket) (string, error) {
 		return "", fmt.Errorf("encode blind packet commitment payload: %w", err)
 	}
 	hasher := sha256.New()
-	hasher.Write([]byte("repo-view/tokenbench/blind-evaluation/v1\x00"))
+	hasher.Write([]byte("repo-view/tokenbench/blind-evaluation/v2\x00"))
 	writeCommitmentField(hasher, raw)
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
@@ -489,5 +639,26 @@ func clonePacket(source EvaluationPacket) EvaluationPacket {
 	clone := source
 	clone.Criteria = append([]EvaluationCriterion(nil), source.Criteria...)
 	clone.Answers = append([]BlindAnswer(nil), source.Answers...)
+	return clone
+}
+
+func cloneEvaluationOutput(source EvaluationOutput) EvaluationOutput {
+	clone := source
+	clone.Answers = make([]AnswerEvaluation, len(source.Answers))
+	for index, answer := range source.Answers {
+		clone.Answers[index] = answer
+		clone.Answers[index].Items = append([]ItemEvaluation(nil), answer.Items...)
+	}
+	return clone
+}
+
+func clonePairedQuality(source PairedQuality) PairedQuality {
+	clone := source
+	clone.Judgments = make([]IndividualJudgment, len(source.Judgments))
+	for index, judgment := range source.Judgments {
+		clone.Judgments[index] = judgment
+		clone.Judgments[index].Output = cloneEvaluationOutput(judgment.Output)
+		clone.Judgments[index].Items = append([]JudgedItem(nil), judgment.Items...)
+	}
 	return clone
 }

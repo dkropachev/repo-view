@@ -61,7 +61,7 @@ After the staged runner exists, an optional compatibility entry point may transl
 | Baseline/candidate prompt | Separate prompt objects | Compare exact bytes; never merge away differences |
 | Raw JSONL/events | CAS raw stream object | Preserve original bytes and ordering |
 | Usage summary | Namespaced legacy derived object | Link to raw source; record formula |
-| Quality/judge output | Legacy quality object | Preserve rubric, judge identity, and failure state if known |
+| Quality/judge output | Legacy quality object | Preserve rubric, every judge identity, individual output, disagreement, and failure state if known; one judgment cannot satisfy the v2 review/explain contract |
 | Shell script/config | Provenance object | Hash exact bytes and source revision |
 | Serialized plan | Current audit artifact | Validate internally; never treat as execution authority or capture proof |
 | Suite summary/report | Legacy report object | Do not treat as raw authority |

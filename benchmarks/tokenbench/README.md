@@ -43,13 +43,16 @@ The checked-in implementation provides:
   sets, and fail-closed process-tree cleanup;
 - append-only content-addressed evidence, atomic publication, Ed25519
   attestations, out-of-band trust policy, graph verification, and offline replay;
+- family-aware study policy, exactly two blinded judgments for review/explain
+  tasks, deterministic preregistered aggregation, and inter-rater disclosure;
 - a harness-neutral adapter interface, fake/conformance fixtures, and a generic
   non-publishable executor for extension work.
 
 The live path intentionally refuses to run when a required kernel, artifact,
 identity, cleanup, or capture proof is unavailable. It has no best-effort
 publication mode. Study-level blinded quality evaluation and statistical
-reporting are kept separate from raw capture and replay.
+reporting are kept separate from raw capture and replay. Code-task quality has
+a sealed objective-outcome boundary, but no code runner is implemented yet.
 
 ## Commands
 

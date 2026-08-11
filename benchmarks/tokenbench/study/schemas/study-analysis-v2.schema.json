@@ -1,18 +1,19 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/study-analysis-v1.schema.json",
-  "title": "Tokenbench study analysis v1",
+  "$id": "https://github.com/dkropachev/repo-view/benchmarks/tokenbench/study/schemas/study-analysis-v2.schema.json",
+  "title": "Tokenbench study analysis v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "policy_sha256", "counts", "tokens", "randomization", "bootstrap", "quality", "decision"],
+  "required": ["schema_version", "policy_sha256", "counts", "tokens", "randomization", "bootstrap", "quality", "inter_rater", "decision"],
   "properties": {
-    "schema_version": {"const": "tokenbench.study-analysis/v1"},
+    "schema_version": {"const": "tokenbench.study-analysis/v2"},
     "policy_sha256": {"$ref": "#/$defs/sha256"},
     "counts": {"$ref": "#/$defs/counts"},
     "tokens": {"$ref": "#/$defs/tokens"},
     "randomization": {"$ref": "#/$defs/randomization"},
     "bootstrap": {"$ref": "#/$defs/bootstrap"},
     "quality": {"$ref": "#/$defs/quality"},
+    "inter_rater": {"$ref": "#/$defs/interRater"},
     "decision": {"$ref": "#/$defs/decision"}
   },
   "$defs": {
@@ -97,7 +98,7 @@
     "counts": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["declared_tasks", "included_tasks", "predeclared_excluded_tasks", "planned_pairs", "predeclared_excluded_pairs", "attempted_pairs", "not_attempted_pairs", "failed_pairs", "failed_arms", "excluded_pairs", "missing_answer_pairs", "quality_missing_pairs", "complete_token_pairs", "complete_token_tasks", "quality_evaluated_pairs", "quality_evaluated_tasks", "analyzed_pairs"],
+      "required": ["declared_tasks", "included_tasks", "predeclared_excluded_tasks", "planned_pairs", "predeclared_excluded_pairs", "attempted_pairs", "not_attempted_pairs", "failed_pairs", "failed_arms", "excluded_pairs", "missing_answer_pairs", "quality_missing_pairs", "complete_token_pairs", "complete_token_tasks", "quality_evaluated_pairs", "quality_evaluated_tasks", "judged_quality_pairs", "objective_code_quality_pairs", "analyzed_pairs"],
       "properties": {
         "declared_tasks": {"$ref": "#/$defs/nonnegative"}, "included_tasks": {"$ref": "#/$defs/nonnegative"},
         "predeclared_excluded_tasks": {"$ref": "#/$defs/nonnegative"}, "planned_pairs": {"$ref": "#/$defs/nonnegative"},
@@ -107,6 +108,7 @@
         "missing_answer_pairs": {"$ref": "#/$defs/nonnegative"}, "quality_missing_pairs": {"$ref": "#/$defs/nonnegative"},
         "complete_token_pairs": {"$ref": "#/$defs/nonnegative"}, "complete_token_tasks": {"$ref": "#/$defs/nonnegative"},
         "quality_evaluated_pairs": {"$ref": "#/$defs/nonnegative"}, "quality_evaluated_tasks": {"$ref": "#/$defs/nonnegative"},
+        "judged_quality_pairs": {"$ref": "#/$defs/nonnegative"}, "objective_code_quality_pairs": {"$ref": "#/$defs/nonnegative"},
         "analyzed_pairs": {"$ref": "#/$defs/nonnegative"}
       }
     },
@@ -144,6 +146,21 @@
         "candidate_scores_ppm": {"$ref": "#/$defs/distribution"}, "paired_delta_ppm": {"$ref": "#/$defs/distribution"},
         "repository_cluster_mean_delta_ppm_confidence": {"$ref": "#/$defs/interval"}, "noninferiority_margin_ppm": {"type": "integer", "minimum": 0, "maximum": 1000000},
         "noninferior": {"type": "boolean"}
+      }
+    },
+    "interRater": {
+      "type": "object", "additionalProperties": false,
+      "required": ["evaluator_ids", "evaluated_pairs", "item_comparisons", "exact_agreement_items", "disagreement_items", "exact_agreement_pairs", "disagreement_pairs", "exact_agreement_rate", "absolute_score_delta_ppm"],
+      "properties": {
+        "evaluator_ids": {"type": "array", "minItems": 0, "maxItems": 2, "uniqueItems": true, "items": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$"}},
+        "evaluated_pairs": {"$ref": "#/$defs/nonnegative"},
+        "item_comparisons": {"$ref": "#/$defs/nonnegative"},
+        "exact_agreement_items": {"$ref": "#/$defs/nonnegative"},
+        "disagreement_items": {"$ref": "#/$defs/nonnegative"},
+        "exact_agreement_pairs": {"$ref": "#/$defs/nonnegative"},
+        "disagreement_pairs": {"$ref": "#/$defs/nonnegative"},
+        "exact_agreement_rate": {"$ref": "#/$defs/number"},
+        "absolute_score_delta_ppm": {"$ref": "#/$defs/distribution"}
       }
     },
     "gate": {

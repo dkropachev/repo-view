@@ -9,7 +9,7 @@ import (
 	"sort"
 )
 
-const AnalysisSchemaVersion = "tokenbench.study-analysis/v1"
+const AnalysisSchemaVersion = "tokenbench.study-analysis/v2"
 
 // TokenCounts contains native counters only. Cached input is a subset of
 // input, and reasoning is a subset of output in the strict v1 accounting
@@ -42,15 +42,16 @@ type Exclusion struct {
 // A run that never occurred is represented with Attempted=false and an
 // explicit reason; removing its record is rejected as corpus cherry-picking.
 type PairRecord struct {
-	Exclusion            *Exclusion     `json:"exclusion"`
-	Quality              *PairedQuality `json:"quality"`
-	TaskID               string         `json:"task_id"`
-	NotAttemptedReason   string         `json:"not_attempted_reason"`
-	QualityMissingReason string         `json:"quality_missing_reason"`
-	Baseline             ArmObservation `json:"baseline"`
-	Candidate            ArmObservation `json:"candidate"`
-	Repetition           int            `json:"repetition"`
-	Attempted            bool           `json:"attempted"`
+	Exclusion            *Exclusion            `json:"exclusion"`
+	Quality              *PairedQuality        `json:"quality"`
+	CodeQuality          *ObjectiveCodeQuality `json:"code_quality"`
+	TaskID               string                `json:"task_id"`
+	NotAttemptedReason   string                `json:"not_attempted_reason"`
+	QualityMissingReason string                `json:"quality_missing_reason"`
+	Baseline             ArmObservation        `json:"baseline"`
+	Candidate            ArmObservation        `json:"candidate"`
+	Repetition           int                   `json:"repetition"`
+	Attempted            bool                  `json:"attempted"`
 }
 
 type AnalysisSeeds struct {
@@ -70,28 +71,31 @@ type AnalysisReport struct {
 	Randomization RandomizationReport `json:"randomization"`
 	Bootstrap     BootstrapReport     `json:"bootstrap"`
 	Quality       QualityReport       `json:"quality"`
+	InterRater    InterRaterReport    `json:"inter_rater"`
 	Decision      DecisionReport      `json:"decision"`
 	seal          [sha256.Size]byte
 }
 
 type StudyCounts struct {
-	DeclaredTasks            int `json:"declared_tasks"`
-	IncludedTasks            int `json:"included_tasks"`
-	PredeclaredExcludedTasks int `json:"predeclared_excluded_tasks"`
-	PlannedPairs             int `json:"planned_pairs"`
-	PredeclaredExcludedPairs int `json:"predeclared_excluded_pairs"`
-	AttemptedPairs           int `json:"attempted_pairs"`
-	NotAttemptedPairs        int `json:"not_attempted_pairs"`
-	FailedPairs              int `json:"failed_pairs"`
-	FailedArms               int `json:"failed_arms"`
-	ExcludedPairs            int `json:"excluded_pairs"`
-	MissingAnswerPairs       int `json:"missing_answer_pairs"`
-	QualityMissingPairs      int `json:"quality_missing_pairs"`
-	CompleteTokenPairs       int `json:"complete_token_pairs"`
-	CompleteTokenTasks       int `json:"complete_token_tasks"`
-	QualityEvaluatedPairs    int `json:"quality_evaluated_pairs"`
-	QualityEvaluatedTasks    int `json:"quality_evaluated_tasks"`
-	AnalyzedPairs            int `json:"analyzed_pairs"`
+	DeclaredTasks             int `json:"declared_tasks"`
+	IncludedTasks             int `json:"included_tasks"`
+	PredeclaredExcludedTasks  int `json:"predeclared_excluded_tasks"`
+	PlannedPairs              int `json:"planned_pairs"`
+	PredeclaredExcludedPairs  int `json:"predeclared_excluded_pairs"`
+	AttemptedPairs            int `json:"attempted_pairs"`
+	NotAttemptedPairs         int `json:"not_attempted_pairs"`
+	FailedPairs               int `json:"failed_pairs"`
+	FailedArms                int `json:"failed_arms"`
+	ExcludedPairs             int `json:"excluded_pairs"`
+	MissingAnswerPairs        int `json:"missing_answer_pairs"`
+	QualityMissingPairs       int `json:"quality_missing_pairs"`
+	CompleteTokenPairs        int `json:"complete_token_pairs"`
+	CompleteTokenTasks        int `json:"complete_token_tasks"`
+	QualityEvaluatedPairs     int `json:"quality_evaluated_pairs"`
+	QualityEvaluatedTasks     int `json:"quality_evaluated_tasks"`
+	JudgedQualityPairs        int `json:"judged_quality_pairs"`
+	ObjectiveCodeQualityPairs int `json:"objective_code_quality_pairs"`
+	AnalyzedPairs             int `json:"analyzed_pairs"`
 }
 
 type TokenReport struct {
@@ -191,6 +195,21 @@ type QualityReport struct {
 	Noninferior                             bool         `json:"noninferior"`
 }
 
+// InterRaterReport discloses exact score agreement for the two independent
+// blinded judgments. One item comparison is one answer/criterion combination;
+// a pair disagrees if any such score differs.
+type InterRaterReport struct {
+	EvaluatorIDs          []string     `json:"evaluator_ids"`
+	EvaluatedPairs        int          `json:"evaluated_pairs"`
+	ItemComparisons       int          `json:"item_comparisons"`
+	ExactAgreementItems   int          `json:"exact_agreement_items"`
+	DisagreementItems     int          `json:"disagreement_items"`
+	ExactAgreementPairs   int          `json:"exact_agreement_pairs"`
+	DisagreementPairs     int          `json:"disagreement_pairs"`
+	ExactAgreementRate    Number       `json:"exact_agreement_rate"`
+	AbsoluteScoreDeltaPPM Distribution `json:"absolute_score_delta_ppm"`
+}
+
 type DecisionReport struct {
 	Status         string       `json:"status"`
 	Gates          []GateResult `json:"gates"`
@@ -236,6 +255,7 @@ func Analyze(policy Policy, records []PairRecord, seeds AnalysisSeeds) (Analysis
 	}
 	values := make([]pairedValues, 0, len(records))
 	qualityValues := make([]qualityValue, 0, len(records))
+	judgedQualities := make([]PairedQuality, 0, len(records))
 	completeTasks := make(map[string]struct{})
 	qualityTasks := make(map[string]struct{})
 	for index, record := range records {
@@ -303,6 +323,20 @@ func Analyze(policy Policy, records []PairRecord, seeds AnalysisSeeds) (Analysis
 				candidatePass:       record.Quality.CandidatePass,
 			})
 			counts.QualityEvaluatedPairs++
+			counts.JudgedQualityPairs++
+			judgedQualities = append(judgedQualities, *record.Quality)
+			qualityTasks[record.TaskID] = struct{}{}
+		} else if record.CodeQuality != nil {
+			qualityValues = append(qualityValues, qualityValue{
+				taskID:              record.TaskID,
+				repositoryClusterID: expected[index].repositoryClusterID,
+				baseline:            record.CodeQuality.BaselineScorePPM,
+				candidate:           record.CodeQuality.CandidateScorePPM,
+				baselinePass:        record.CodeQuality.BaselinePass,
+				candidatePass:       record.CodeQuality.CandidatePass,
+			})
+			counts.QualityEvaluatedPairs++
+			counts.ObjectiveCodeQualityPairs++
 			qualityTasks[record.TaskID] = struct{}{}
 		}
 	}
@@ -322,6 +356,10 @@ func Analyze(policy Policy, records []PairRecord, seeds AnalysisSeeds) (Analysis
 	if err != nil {
 		return AnalysisReport{}, err
 	}
+	interRater, err := buildInterRaterReport(policy, judgedQualities)
+	if err != nil {
+		return AnalysisReport{}, err
+	}
 	decision := buildDecision(policy, counts, tokens.PrimaryTotal, randomization, quality)
 	report := AnalysisReport{
 		SchemaVersion: AnalysisSchemaVersion,
@@ -331,9 +369,10 @@ func Analyze(policy Policy, records []PairRecord, seeds AnalysisSeeds) (Analysis
 		Randomization: randomization,
 		Bootstrap:     bootstrap,
 		Quality:       quality,
+		InterRater:    interRater,
 		Decision:      decision,
 	}
-	reportSeal, err := canonicalPrivateSeal("analysis-report/v1", report)
+	reportSeal, err := canonicalPrivateSeal("analysis-report/v2", report)
 	if err != nil {
 		return AnalysisReport{}, fmt.Errorf("seal analysis report: %w", err)
 	}
@@ -345,7 +384,7 @@ func EncodeAnalysisReport(report AnalysisReport) ([]byte, error) {
 	if report.SchemaVersion != AnalysisSchemaVersion || !validSHA256(report.PolicySHA256) {
 		return nil, errors.New("analysis report was not produced by Analyze")
 	}
-	expectedSeal, err := canonicalPrivateSeal("analysis-report/v1", report)
+	expectedSeal, err := canonicalPrivateSeal("analysis-report/v2", report)
 	if err != nil {
 		return nil, fmt.Errorf("verify analysis report seal: %w", err)
 	}
@@ -391,11 +430,15 @@ func initialCounts(policy Policy) StudyCounts {
 }
 
 func validateRecord(policy Policy, policySHA string, record PairRecord) error {
+	task, included := includedTask(policy, record.TaskID)
+	if !included {
+		return errors.New("record task is not included in the policy")
+	}
 	if !record.Attempted {
 		if !validBoundedText(record.NotAttemptedReason, 2_000) {
 			return errors.New("not-attempted record requires an explicit reason")
 		}
-		if record.Exclusion != nil || record.Quality != nil || record.QualityMissingReason != "" ||
+		if record.Exclusion != nil || record.Quality != nil || record.CodeQuality != nil || record.QualityMissingReason != "" ||
 			record.Baseline != (ArmObservation{}) || record.Candidate != (ArmObservation{}) {
 			return errors.New("not-attempted record contains attempt outcomes")
 		}
@@ -414,7 +457,7 @@ func validateRecord(policy Policy, policySHA string, record PairRecord) error {
 		if err := validateExclusion(policy, *record.Exclusion); err != nil {
 			return err
 		}
-		if record.Quality != nil || record.QualityMissingReason != "" {
+		if record.Quality != nil || record.CodeQuality != nil || record.QualityMissingReason != "" {
 			return errors.New("excluded record must not contain a quality result or quality-missing reason")
 		}
 		return nil
@@ -422,12 +465,12 @@ func validateRecord(policy Policy, policySHA string, record PairRecord) error {
 	bothAnswers := record.Baseline.Completed && record.Baseline.AnswerPresent &&
 		record.Candidate.Completed && record.Candidate.AnswerPresent
 	if !bothAnswers {
-		if record.Quality != nil || record.QualityMissingReason != "" {
+		if record.Quality != nil || record.CodeQuality != nil || record.QualityMissingReason != "" {
 			return errors.New("record without two answers must not contain a quality result or separate quality reason")
 		}
 		return nil
 	}
-	if record.Quality == nil {
+	if record.Quality == nil && record.CodeQuality == nil {
 		if !validBoundedText(record.QualityMissingReason, 2_000) {
 			return errors.New("two-answer record without verified quality requires an explicit reason")
 		}
@@ -435,6 +478,15 @@ func validateRecord(policy Policy, policySHA string, record PairRecord) error {
 	}
 	if record.QualityMissingReason != "" {
 		return errors.New("verified quality record also has a quality-missing reason")
+	}
+	if task.TaskFamily == CodeTaskFamily {
+		if record.Quality != nil || record.CodeQuality == nil {
+			return errors.New("code task must use only objective code quality")
+		}
+		return validateObjectiveCodeQuality(policy, policySHA, record.TaskID, record.Repetition, *record.CodeQuality)
+	}
+	if record.CodeQuality != nil || record.Quality == nil {
+		return errors.New("review/explain task must use only two-judge quality")
 	}
 	return validatePairedQuality(policy, policySHA, record.TaskID, record.Repetition, *record.Quality)
 }
@@ -484,25 +536,105 @@ func validateExclusion(policy Policy, exclusion Exclusion) error {
 }
 
 func validatePairedQuality(policy Policy, policySHA, taskID string, repetition int, quality PairedQuality) error {
-	expectedSeal, err := canonicalPrivateSeal("paired-quality/v1", quality)
+	expectedSeal, err := canonicalPrivateSeal("paired-quality/v2", quality)
 	if err != nil {
 		return fmt.Errorf("verify quality seal: %w", err)
 	}
 	if quality.seal != expectedSeal {
-		return errors.New("verified quality differs from the output produced by VerifyEvaluation")
+		return errors.New("verified quality differs from the output produced by VerifyEvaluations")
 	}
 	if quality.SchemaVersion != VerifiedQualitySchemaVersion ||
 		quality.PolicySHA256 != policySHA || quality.TaskID != taskID || quality.Repetition != repetition ||
 		!validSHA256(quality.PacketCommitment) {
 		return errors.New("verified quality identity differs from the record and policy")
 	}
-	if quality.BaselineScorePPM < 0 || quality.BaselineScorePPM > PPM ||
-		quality.CandidateScorePPM < 0 || quality.CandidateScorePPM > PPM {
-		return errors.New("verified quality score is outside 0..1000000 ppm")
+	task, ok := includedTask(policy, taskID)
+	if !ok || task.TaskFamily == CodeTaskFamily || quality.TaskFamily != task.TaskFamily {
+		return errors.New("verified judged quality family differs from the task")
+	}
+	if quality.Aggregation != policy.Quality.ProseAggregation || len(quality.Judgments) != 2 {
+		return errors.New("verified judged quality aggregation or judgment count differs from the policy")
+	}
+	criteria := criteriaForTask(task)
+	maximum := int64(0)
+	for _, criterion := range criteria {
+		maximum += criterion.MaximumPoints
+	}
+	aggregateBaseline, aggregateCandidate := int64(0), int64(0)
+	for index, judgment := range quality.Judgments {
+		if judgment.EvaluatorID != policy.Quality.ProseEvaluatorIDs[index] || !validSHA256(judgment.OutputSHA256) {
+			return errors.New("verified judgment identity or output lineage differs from the policy")
+		}
+		outputSHA256, err := canonicalDigest(judgment.Output)
+		if err != nil || outputSHA256 != judgment.OutputSHA256 ||
+			judgment.Output.EvaluatorID != judgment.EvaluatorID ||
+			judgment.Output.Commitment != quality.PacketCommitment {
+			return errors.New("verified judgment complete output differs from its lineage")
+		}
+		if len(judgment.Items) != len(criteria) {
+			return errors.New("verified judgment item matrix is incomplete")
+		}
+		baselineTotal, candidateTotal := int64(0), int64(0)
+		for itemIndex, item := range judgment.Items {
+			criterion := criteria[itemIndex]
+			if item.ItemID != criterion.ItemID || item.BaselineScore < 0 || item.BaselineScore > criterion.MaximumPoints ||
+				item.CandidateScore < 0 || item.CandidateScore > criterion.MaximumPoints {
+				return errors.New("verified judgment item matrix differs from the policy")
+			}
+			if criterion.Kind == FactCriterion &&
+				((item.BaselineScore != 0 && item.BaselineScore != criterion.MaximumPoints) ||
+					(item.CandidateScore != 0 && item.CandidateScore != criterion.MaximumPoints)) {
+				return errors.New("verified objective fact judgment is not binary")
+			}
+			baselineTotal += item.BaselineScore
+			candidateTotal += item.CandidateScore
+		}
+		if judgment.BaselineScorePPM != baselineTotal*PPM/maximum ||
+			judgment.CandidateScorePPM != candidateTotal*PPM/maximum ||
+			judgment.BaselinePass != (judgment.BaselineScorePPM >= policy.Quality.MinimumAnswerScorePPM) ||
+			judgment.CandidatePass != (judgment.CandidateScorePPM >= policy.Quality.MinimumAnswerScorePPM) {
+			return errors.New("verified individual judgment score or pass flag is invalid")
+		}
+		aggregateBaseline += baselineTotal
+		aggregateCandidate += candidateTotal
+	}
+	denominator := int64(len(quality.Judgments)) * maximum
+	if quality.BaselineScorePPM != aggregateBaseline*PPM/denominator ||
+		quality.CandidateScorePPM != aggregateCandidate*PPM/denominator {
+		return errors.New("verified aggregate quality differs from the preregistered arithmetic mean")
 	}
 	if quality.BaselinePass != (quality.BaselineScorePPM >= policy.Quality.MinimumAnswerScorePPM) ||
 		quality.CandidatePass != (quality.CandidateScorePPM >= policy.Quality.MinimumAnswerScorePPM) {
 		return errors.New("verified quality pass flags differ from the preregistered threshold")
+	}
+	return nil
+}
+
+func validateObjectiveCodeQuality(
+	policy Policy,
+	policySHA, taskID string,
+	repetition int,
+	quality ObjectiveCodeQuality,
+) error {
+	expectedSeal, err := canonicalPrivateSeal("objective-code-quality/v1", quality)
+	if err != nil {
+		return fmt.Errorf("verify objective code quality seal: %w", err)
+	}
+	if quality.seal != expectedSeal {
+		return errors.New("objective code quality was not produced by an authenticated code outcome verifier")
+	}
+	task, ok := includedTask(policy, taskID)
+	if !ok || task.TaskFamily != CodeTaskFamily || quality.TaskFamily != CodeTaskFamily ||
+		quality.SchemaVersion != ObjectiveCodeQualitySchemaVersion || quality.PolicySHA256 != policySHA ||
+		quality.TaskID != taskID || quality.Repetition != repetition ||
+		!validSHA256(quality.BaselineOutcomeSHA256) || !validSHA256(quality.CandidateOutcomeSHA256) {
+		return errors.New("objective code quality identity or outcome lineage differs from the record and policy")
+	}
+	if quality.BaselineScorePPM < 0 || quality.BaselineScorePPM > PPM ||
+		quality.CandidateScorePPM < 0 || quality.CandidateScorePPM > PPM ||
+		quality.BaselinePass != (quality.BaselineScorePPM >= policy.Quality.MinimumAnswerScorePPM) ||
+		quality.CandidatePass != (quality.CandidateScorePPM >= policy.Quality.MinimumAnswerScorePPM) {
+		return errors.New("objective code quality score or pass flag is invalid")
 	}
 	return nil
 }
@@ -954,6 +1086,58 @@ func buildQualityReport(policy Policy, values []qualityValue, seed []byte) (Qual
 		len(tasks) >= policy.Analysis.MinimumCompleteTasks &&
 		len(effects) >= 2 && report.RepositoryClusterMeanDeltaPPMConfidence.Defined &&
 		report.RepositoryClusterMeanDeltaPPMConfidence.Lower >= -float64(policy.Quality.NoninferiorityMarginPPM)
+	return report, nil
+}
+
+func buildInterRaterReport(policy Policy, qualities []PairedQuality) (InterRaterReport, error) {
+	evaluatorIDs := make([]string, len(policy.Quality.ProseEvaluatorIDs))
+	copy(evaluatorIDs, policy.Quality.ProseEvaluatorIDs)
+	report := InterRaterReport{
+		EvaluatorIDs:   evaluatorIDs,
+		EvaluatedPairs: len(qualities),
+	}
+	deltas := make([]int64, 0)
+	for _, quality := range qualities {
+		task, ok := includedTask(policy, quality.TaskID)
+		if !ok || len(quality.Judgments) != 2 {
+			return InterRaterReport{}, errors.New("inter-rater input is incomplete")
+		}
+		criteria := criteriaForTask(task)
+		pairDisagreed := false
+		for itemIndex, criterion := range criteria {
+			left := quality.Judgments[0].Items[itemIndex]
+			right := quality.Judgments[1].Items[itemIndex]
+			for _, scores := range [][2]int64{
+				{left.BaselineScore, right.BaselineScore},
+				{left.CandidateScore, right.CandidateScore},
+			} {
+				difference := scores[0] - scores[1]
+				if difference < 0 {
+					difference = -difference
+				}
+				deltaPPM := difference * PPM / criterion.MaximumPoints
+				deltas = append(deltas, deltaPPM)
+				report.ItemComparisons++
+				if difference == 0 {
+					report.ExactAgreementItems++
+				} else {
+					report.DisagreementItems++
+					pairDisagreed = true
+				}
+			}
+		}
+		if pairDisagreed {
+			report.DisagreementPairs++
+		} else {
+			report.ExactAgreementPairs++
+		}
+	}
+	if report.ItemComparisons > 0 {
+		report.ExactAgreementRate = definedNumber(
+			float64(report.ExactAgreementItems) / float64(report.ItemComparisons),
+		)
+	}
+	report.AbsoluteScoreDeltaPPM = distributionInt(deltas)
 	return report, nil
 }
 
