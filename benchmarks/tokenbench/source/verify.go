@@ -223,6 +223,9 @@ func Verify(ctx context.Context, expected Expected) (
 	if err != nil {
 		return Snapshot{}, err
 	}
+	if err := rejectGitModulesStorage(root); err != nil {
+		return Snapshot{}, err
+	}
 	if err := git.verify(); err != nil {
 		return Snapshot{}, fmt.Errorf("reverify Git executable: %w", err)
 	}
@@ -411,6 +414,7 @@ func verifiedWorktreeDirectories(
 	gitlinks map[string]gitlinkMaterialization,
 ) ([]worktreeDirectory, error) {
 	tracked := make(map[string]struct{}, len(entries)-len(gitlinks))
+	requiredDirectories := map[string]struct{}{".": {}}
 	allowedDirectories := map[string]struct{}{".": {}}
 	for _, entry := range entries {
 		if entry.mode == gitlinkMode {
@@ -422,6 +426,9 @@ func verifiedWorktreeDirectories(
 		}
 		for directory := pathpkg.Dir(entry.path); directory != "."; directory = pathpkg.Dir(directory) {
 			allowedDirectories[directory] = struct{}{}
+			if entry.mode != gitlinkMode {
+				requiredDirectories[directory] = struct{}{}
+			}
 			if len(allowedDirectories) > maximumWorktreeEntries {
 				return nil, fmt.Errorf(
 					"tracked directory structure exceeds %d entries",
@@ -430,7 +437,8 @@ func verifiedWorktreeDirectories(
 			}
 		}
 	}
-	directories := make([]worktreeDirectory, 0, len(allowedDirectories))
+	directories := make([]worktreeDirectory, 0, len(requiredDirectories))
+	seenDirectories := make(map[string]struct{}, len(allowedDirectories))
 	seenGitlinks := make(map[string]struct{}, len(gitlinks))
 	walked := 0
 	err := filepath.WalkDir(root, func(
@@ -484,6 +492,10 @@ func verifiedWorktreeDirectories(
 			if _, allowed := allowedDirectories[relative]; !allowed {
 				return fmt.Errorf("worktree contains untracked directory %q", relative)
 			}
+			seenDirectories[relative] = struct{}{}
+			if _, required := requiredDirectories[relative]; !required {
+				return nil
+			}
 			info, err := entry.Info()
 			if err != nil {
 				return err
@@ -505,7 +517,8 @@ func verifiedWorktreeDirectories(
 	if err != nil {
 		return nil, err
 	}
-	if len(directories) != len(allowedDirectories) {
+	if len(seenDirectories) != len(allowedDirectories) ||
+		len(directories) != len(requiredDirectories) {
 		return nil, errors.New("worktree directory structure does not match tracked paths")
 	}
 	for path, gitlink := range gitlinks {
@@ -890,6 +903,9 @@ func requireStandaloneGitDir(ctx context.Context, git gitRunner, root string) er
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("inspect source .git/commondir: %w", err)
 	}
+	if err := rejectGitModulesStorage(root); err != nil {
+		return err
+	}
 	objectsDirectory := filepath.Join(gitDirectory, "objects")
 	if err := requireResolvedGitPath(
 		ctx,
@@ -950,6 +966,11 @@ func requireStandaloneGitDir(ctx context.Context, git gitRunner, root string) er
 						return fmt.Errorf("unsafe Git metadata path %q: %w", relative, err)
 					}
 				}
+				if isGitModulesPath(relative) {
+					return errors.New(
+						"source .git/modules is not allowed; opaque gitlinks must not retain submodule metadata",
+					)
+				}
 				if entry.Type()&os.ModeSymlink != 0 {
 					return fmt.Errorf("git metadata contains symlink %s", path)
 				}
@@ -986,6 +1007,23 @@ func requireStandaloneGitDir(ctx context.Context, git gitRunner, root string) er
 		return fmt.Errorf("verify local Git metadata: %w", err)
 	}
 	return nil
+}
+
+func rejectGitModulesStorage(root string) error {
+	modulesPath := filepath.Join(root, ".git", "modules")
+	if _, err := os.Lstat(modulesPath); err == nil {
+		return errors.New(
+			"source .git/modules is not allowed; opaque gitlinks must not retain submodule metadata",
+		)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect source .git/modules: %w", err)
+	}
+	return nil
+}
+
+func isGitModulesPath(relative string) bool {
+	component, _, _ := strings.Cut(relative, "/")
+	return strings.EqualFold(component, "modules")
 }
 
 func rejectGitAlternates(ctx context.Context, git gitRunner, root string) error {
@@ -1164,6 +1202,11 @@ func gitMetadataDigestContext(ctx context.Context, root string) (string, error) 
 				if err := validateSourceRelativePath(relative); err != nil {
 					return fmt.Errorf("unsafe Git metadata path %q: %w", relative, err)
 				}
+			}
+			if isGitModulesPath(relative) {
+				return errors.New(
+					"source .git/modules is not allowed; opaque gitlinks must not retain submodule metadata",
+				)
 			}
 			if relative != "." && isTransientGitMetadata(relative) {
 				return fmt.Errorf(

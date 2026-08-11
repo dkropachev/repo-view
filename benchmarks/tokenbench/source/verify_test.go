@@ -582,6 +582,24 @@ func TestStableGitMetadataDigestRejectsChangeBetweenPasses(t *testing.T) {
 	}
 }
 
+func TestStableGitMetadataDigestRejectsSubmoduleStorageBetweenPasses(t *testing.T) {
+	t.Parallel()
+	repository := newRepository(t)
+	_, err := stableGitMetadataDigestWithHook(repository.root, func() error {
+		path := filepath.Join(
+			repository.root,
+			".git", "modules", "dependency", "objects", "aa", strings.Repeat("b", 38),
+		)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			return err
+		}
+		return os.WriteFile(path, []byte("nested object bytes"), 0o600)
+	})
+	if err == nil || !strings.Contains(err.Error(), "submodule metadata") {
+		t.Fatalf("expected submodule-metadata error, got %v", err)
+	}
+}
+
 func TestGitMetadataDigestRejectsTransientState(t *testing.T) {
 	t.Parallel()
 	repository := newRepository(t)
@@ -608,12 +626,12 @@ func TestTreeDigestRejectsTrackedSymlink(t *testing.T) {
 
 func TestTreeDigestCommitsOpaqueUninitializedGitlink(t *testing.T) {
 	t.Parallel()
-	repository, gitlinkPath := newGitlinkRepository(t, "dependency", "base")
+	repository, gitlinkPath := newGitlinkRepository(t, "vendor/dependency", "base")
 	absentDigest, err := TreeDigest(context.Background(), repository.root)
 	if err != nil {
 		t.Fatalf("digest absent gitlink: %v", err)
 	}
-	if err := os.Mkdir(gitlinkPath, 0o700); err != nil {
+	if err := os.MkdirAll(gitlinkPath, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	emptyDigest, err := TreeDigest(context.Background(), repository.root)
@@ -638,6 +656,32 @@ func TestTreeDigestCommitsOpaqueUninitializedGitlink(t *testing.T) {
 	}
 }
 
+func TestVerifyRejectsResidualGitlinkMetadata(t *testing.T) {
+	t.Parallel()
+	repository, _ := newGitlinkRepository(t, "dependency", "base")
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(
+		t,
+		filepath.Join(
+			repository.root,
+			".git", "modules", "dependency", "objects", "aa", strings.Repeat("b", 38),
+		),
+		"nested object bytes",
+	)
+	if _, err := Verify(context.Background(), expectedSource(
+		t,
+		repository.root,
+		repository.head,
+		repository.base,
+		digest,
+	)); err == nil || !strings.Contains(err.Error(), "submodule metadata") {
+		t.Fatalf("residual submodule object storage was accepted: %v", err)
+	}
+}
+
 func TestTreeDigestBindsGitlinkCommitID(t *testing.T) {
 	t.Parallel()
 	baseRepository, _ := newGitlinkRepository(t, "dependency", "base")
@@ -658,8 +702,18 @@ func TestTreeDigestBindsGitlinkCommitID(t *testing.T) {
 func TestTreeDigestDoesNotReadOpaqueGitlinkObject(t *testing.T) {
 	t.Parallel()
 	repository, _ := newGitlinkRepository(t, "dependency", "missing")
-	if _, err := TreeDigest(context.Background(), repository.root); err != nil {
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
 		t.Fatalf("opaque missing gitlink object was read: %v", err)
+	}
+	if _, err := Verify(context.Background(), expectedSource(
+		t,
+		repository.root,
+		repository.head,
+		repository.base,
+		digest,
+	)); err != nil {
+		t.Fatalf("full verification read opaque missing gitlink object: %v", err)
 	}
 }
 

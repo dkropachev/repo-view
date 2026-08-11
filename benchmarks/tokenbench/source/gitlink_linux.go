@@ -88,7 +88,7 @@ func linuxGitlinkMaterialization(stat unix.Stat_t) gitlinkMaterialization {
 	return gitlinkMaterialization{
 		device:    stat.Dev,
 		inode:     stat.Ino,
-		linkCount: stat.Nlink,
+		linkCount: uint64(stat.Nlink), //nolint:unconvert // Nlink is uint32 on linux/arm64.
 		size:      stat.Size,
 		mtimeSec:  stat.Mtim.Sec,
 		mtimeNsec: stat.Mtim.Nsec,
