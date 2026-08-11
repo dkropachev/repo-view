@@ -83,6 +83,62 @@ func TestCPPIdentifierOccurrenceWalkerUsesSignedLogicalTokenCorrections(t *testi
 	}
 }
 
+func TestCPPIdentifierOccurrenceWalkerReportsExactCorrectionColumns(t *testing.T) {
+	t.Parallel()
+
+	lines := []string{
+		"int target\\",
+		"_suffix;",
+		"int tar\\",
+		"get;",
+		"double number = 1e\\",
+		"+target;",
+		"#define CALL() tar\\",
+		"get()",
+	}
+	backend := prepareLanguageBackend(newCPPLanguage(), lines).(cppLanguage)
+	type correction struct {
+		adjustment int
+		added      []int
+		removed    []int
+	}
+	corrections := make(map[int]correction)
+	handled := backend.walkAdditionalSymbolOccurrencesAt(
+		lines, "target",
+		func(
+			lineNo, adjustment int,
+			addedColumns, removedColumns []int,
+		) bool {
+			if adjustment != 0 || len(addedColumns) > 0 || len(removedColumns) > 0 {
+				corrections[lineNo] = correction{
+					adjustment: adjustment,
+					added:      append([]int(nil), addedColumns...),
+					removed:    append([]int(nil), removedColumns...),
+				}
+			}
+			return true
+		},
+	)
+	want := map[int]correction{
+		1: {adjustment: -1, removed: []int{strings.Index(lines[0], "target") + 1}},
+		3: {adjustment: 1, added: []int{strings.Index(lines[2], "tar") + 1}},
+		6: {adjustment: -1, removed: []int{strings.Index(lines[5], "target") + 1}},
+		7: {adjustment: 1, added: []int{strings.Index(lines[6], "tar") + 1}},
+	}
+	if !handled || len(corrections) != len(want) {
+		t.Fatalf("positional identifier corrections = %#v, handled=%v; want %#v",
+			corrections, handled, want)
+	}
+	for lineNo, expected := range want {
+		got := corrections[lineNo]
+		if got.adjustment != expected.adjustment ||
+			!slices.Equal(got.added, expected.added) ||
+			!slices.Equal(got.removed, expected.removed) {
+			t.Errorf("line %d correction = %#v, want %#v", lineNo, got, expected)
+		}
+	}
+}
+
 func TestCPPCompositeOccurrenceReconciliationRemainsTokenBased(t *testing.T) {
 	t.Parallel()
 
@@ -115,6 +171,208 @@ func TestCPPCompositeOccurrenceReconciliationRemainsTokenBased(t *testing.T) {
 			t.Errorf("%s composite corrections = %#v, handled=%v; want line %d => 1",
 				test.symbol, nonzero, handled, test.line)
 		}
+	}
+}
+
+func TestCPPCompositeOccurrencesIncludePreprocessorDirectiveBodies(t *testing.T) {
+	t.Parallel()
+
+	const source = `#define CALL() api :: target()
+#define COMMENT_CALL() api /* bridge */ :: target()
+#define PREFIX api
+::target();
+void f() { CALL(); COMMENT_CALL(); }
+`
+	root := t.TempDir()
+	writeFile(t, root, "directive.cpp", source)
+	found, err := mustView(t, root).Find("api::target", Options{
+		Include: IncludeRefs, Return: ReturnLocations,
+		NoComments: true, NoStrings: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cppResultLines(found.Results), []int{1, 2}; !slices.Equal(got, want) {
+		t.Fatalf("directive composite Find lines = %#v, want %#v; results=%#v",
+			got, want, found.Results)
+	}
+}
+
+func TestCPPCompositeReconciliationIgnoresOpaquePhysicalSpellings(t *testing.T) {
+	t.Parallel()
+
+	const source = `void f() { /* api::target */ api/**/::target(); }
+`
+	root := t.TempDir()
+	writeFile(t, root, "opaque-spelling.cpp", source)
+	found, err := mustView(t, root).Find("api::target", Options{
+		Include: IncludeRefs, Return: ReturnLocations,
+		NoComments: true, NoStrings: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := cppResultLines(found.Results), []int{1}; !slices.Equal(got, want) {
+		t.Fatalf("composite Find lines = %#v, want %#v; results=%#v",
+			got, want, found.Results)
+	}
+}
+
+func TestCPPCompositeOccurrenceWalkerReportsExactCodeCorrections(t *testing.T) {
+	t.Parallel()
+
+	line := "void f() { /* api::target */ 0x1.api::target; api::target(); api /*x*/ :: target(); }"
+	lines := []string{line}
+	backend := prepareLanguageBackend(newCPPLanguage(), lines).(cppLanguage)
+	adjustment := 99
+	var added, removed []int
+	handled := backend.walkAdditionalSymbolOccurrencesAt(
+		lines, "api::target",
+		func(
+			lineNo, additional int,
+			addedColumns, removedColumns []int,
+		) bool {
+			if lineNo != 1 {
+				t.Fatalf("composite walker visited line %d, want 1", lineNo)
+			}
+			adjustment = additional
+			added = append([]int(nil), addedColumns...)
+			removed = append([]int(nil), removedColumns...)
+			return true
+		},
+	)
+	falseStart := strings.Index(line, "0x1.api::target") + len("0x1.") + 1
+	hiddenStart := strings.Index(line, "api /*x*/ :: target") + 1
+	if !handled || adjustment != 0 ||
+		!slices.Equal(added, []int{hiddenStart}) ||
+		!slices.Equal(removed, []int{falseStart}) {
+		t.Fatalf("composite corrections = adjustment %d, added %#v, removed %#v, handled %v",
+			adjustment, added, removed, handled)
+	}
+}
+
+func TestCPPCompositeOccurrenceWalkerRemovesUnmatchedCodeSpelling(t *testing.T) {
+	t.Parallel()
+
+	line := "void f() { /* api::target */ 0x1.api::target; }"
+	lines := []string{line}
+	backend := prepareLanguageBackend(newCPPLanguage(), lines).(cppLanguage)
+	adjustment := 0
+	var added, removed []int
+	handled := backend.walkAdditionalSymbolOccurrencesAt(
+		lines, "api::target",
+		func(
+			_ int, additional int,
+			addedColumns, removedColumns []int,
+		) bool {
+			adjustment = additional
+			added = append([]int(nil), addedColumns...)
+			removed = append([]int(nil), removedColumns...)
+			return true
+		},
+	)
+	falseStart := strings.Index(line, "0x1.api::target") + len("0x1.") + 1
+	if !handled || adjustment != -1 || len(added) != 0 ||
+		!slices.Equal(removed, []int{falseStart}) {
+		t.Fatalf("unmatched code correction = adjustment %d, added %#v, removed %#v, handled %v",
+			adjustment, added, removed, handled)
+	}
+
+	legacyAdjustment := 0
+	if !backend.walkAdditionalSymbolOccurrences(
+		lines, "api::target",
+		func(_ int, additional int) bool {
+			legacyAdjustment = additional
+			return true
+		},
+	) || legacyAdjustment != -1 {
+		t.Fatalf("legacy unmatched code adjustment = %d, want -1", legacyAdjustment)
+	}
+}
+
+func TestCPPFindUsesExactOccurrencePositionsOnDenseLines(t *testing.T) {
+	for _, test := range []struct {
+		name, source, symbol, want string
+	}{
+		{
+			name:   "trivia-spanning composite",
+			source: "class C { void first() {} void second() { api /*x*/ :: target(); } };\n",
+			symbol: "api::target", want: "second",
+		},
+		{
+			name:   "earlier physical composite",
+			source: "class C { void first() { api::target(); } void second() { api /*x*/ :: target(); } };\n",
+			symbol: "api::target", want: "first",
+		},
+		{
+			name:   "numeric false spelling before hidden composite",
+			source: "class C { void first() { double n = 0x1.api::target; } void second() { api /*x*/ :: target(); } };\n",
+			symbol: "api::target", want: "second",
+		},
+		{
+			name:   "opaque spelling before hidden composite",
+			source: "class C { void first() { /* api::target */ } void second() { api /*x*/ :: target(); } };\n",
+			symbol: "api::target", want: "second",
+		},
+		{
+			name:   "spliced composite",
+			source: "class C { void first() {} void second() { api\\\n::target(); } };\n",
+			symbol: "api::target", want: "second",
+		},
+		{
+			name:   "definition before spliced identifier reference",
+			source: "void target() {} void second() { tar\\\nget(); }\n",
+			symbol: "target", want: "second",
+		},
+		{
+			name: "rejected numeric identifier before reference",
+			source: "void first() { double n = 1e\\\n" +
+				"+target; } void second() { target(); }\n",
+			symbol: "target", want: "second",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "dense.cpp", test.source)
+			found, err := mustView(t, root).Find(test.symbol, Options{
+				Include: IncludeRefs, Return: ReturnScope,
+				NoComments: true, NoStrings: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(found.Results) != 1 || found.Results[0].Scope != test.want {
+				t.Fatalf("dense positional Find = %#v, want scope %q",
+					found.Results, test.want)
+			}
+		})
+	}
+}
+
+func TestCPPCompositeReconciliationStreamsPastTokenRetention(t *testing.T) {
+	paddingLines := cppMaximumRetainedTokens + 32
+	source := strings.Repeat(";\n", paddingLines) +
+		"void f() { api :: target(); }\n" +
+		"void g() { api\\\n::target(); }\n"
+	lines := cppTestLines(source)
+	backend := prepareLanguageBackend(newCPPLanguage(), lines).(cppLanguage)
+	if backend.analysis == nil || !backend.analysis.lexed.truncated {
+		t.Fatal("fixture did not cross the retained-token frontier")
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "truncated.cpp", source)
+	found, err := mustView(t, root).Find("api::target", Options{
+		Include: IncludeRefs, Return: ReturnLocations,
+		NoComments: true, NoStrings: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []int{paddingLines + 1, paddingLines + 2}
+	if got := cppResultLines(found.Results); !slices.Equal(got, want) {
+		t.Fatalf("truncated composite Find lines = %#v, want %#v; results=%#v",
+			got, want, found.Results)
 	}
 }
 

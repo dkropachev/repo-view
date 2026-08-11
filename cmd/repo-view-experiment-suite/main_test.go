@@ -909,6 +909,85 @@ func TestRepairAttemptRejectsIdentityMismatchBeforeQualityCommands(t *testing.T)
 	}
 }
 
+func TestRepairAttemptRechecksResolvedBaselineIdentity(t *testing.T) {
+	repoRoot := t.TempDir()
+	scriptDir := filepath.Join(repoRoot, "experiments", "lsp-replacement")
+	if err := os.MkdirAll(scriptDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(scriptDir, "quality-check.sh"),
+		[]byte("#!/bin/sh\nexit 0\n"),
+		0o755,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	runDir := t.TempDir()
+	evidenceRoot := filepath.Join(repoRoot, "evidence")
+	config := experimentsuite.LiveConfig{
+		Task:         "review",
+		Profile:      "default",
+		Source:       "fixtures/source.git",
+		Commit:       strings.Repeat("a", 40),
+		PromptCommit: strings.Repeat("a", 9),
+		Base:         strings.Repeat("c", 40),
+		ModelMode:    "router",
+		BaselineFrom: "baselines/accepted",
+	}
+	resolvedSource := filepath.Join(repoRoot, "fixtures", "source.git")
+	resolvedBaseline := filepath.Join(evidenceRoot, "baselines", "accepted")
+	manifest, err := json.Marshal(map[string]any{
+		"source_repo":         resolvedSource,
+		"target_commit":       config.Commit,
+		"prompt_commit":       config.PromptCommit,
+		"base_commit":         config.Base,
+		"task_selection":      config.Task,
+		"variant_selection":   "optimized",
+		"profiles":            []string{config.Profile},
+		"baseline_from":       resolvedBaseline,
+		"model":               "router-selected",
+		"model_mode":          "router",
+		"model_configuration": "none",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runDir, "manifest.json"), manifest, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	results := repairCases(
+		context.Background(),
+		options{
+			repoRoot:      repoRoot,
+			evidenceRoot:  evidenceRoot,
+			repairAttempt: runDir,
+			judgeRepeats:  1,
+		},
+		[]experimentsuite.Case{{ID: "repair-baseline-identity"}},
+		[]experimentsuite.ResolutionCase{{
+			ID: "repair-baseline-identity", Repair: &config,
+		}},
+	)
+	if len(results) != 1 {
+		t.Fatalf("repair results = %+v", results)
+	}
+	identityChecks := 0
+	for _, check := range results[0].Checks {
+		if check.Description != "live run matches manifest repository, workload, and routing identity" {
+			continue
+		}
+		identityChecks++
+		if !check.Passed {
+			t.Errorf("resolved baseline identity recheck failed: %+v", check)
+		}
+	}
+	if identityChecks != 2 {
+		t.Fatalf("identity checks = %d, want 2; result=%+v", identityChecks, results[0])
+	}
+}
+
 func writeStrictReplayMetadata(
 	t *testing.T,
 	runDir string,

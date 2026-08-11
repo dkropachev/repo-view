@@ -344,6 +344,84 @@ func SameLine() { SameLine() }
 	}
 }
 
+func TestGoFindUsesColumnsToSeparateAdjacentTopLevelScopes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		source    string
+		symbol    string
+		wantLine  int
+		wantScope string
+	}{
+		{
+			name: "same-line sibling function",
+			source: `package demo
+func first() { inside() }; func second() { target() }
+`,
+			symbol:    "target",
+			wantLine:  2,
+			wantScope: "second",
+		},
+		{
+			name: "same-line top-level declaration after function",
+			source: `package demo
+func first() { inside() }; var later = outside()
+`,
+			symbol:   "outside",
+			wantLine: 2,
+		},
+		{
+			name: "top-level declaration after multiline function",
+			source: `package demo
+func first() {
+	inside()
+}; var later = beyond()
+`,
+			symbol:   "beyond",
+			wantLine: 4,
+		},
+		{
+			name: "top-level declaration after multiline function literal",
+			source: `package demo
+var holder = func() {
+	inside()
+}; var later = afterLiteral()
+`,
+			symbol:   "afterLiteral",
+			wantLine: 4,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			assertParsesAsGo(t, testCase.source)
+			root := t.TempDir()
+			writeFile(t, root, "fixture.go", testCase.source)
+
+			response, err := mustView(t, root).Find(testCase.symbol, Options{
+				Include: IncludeRefs,
+				Return:  ReturnScope,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Results) != 1 {
+				t.Fatalf("results = %#v", response.Results)
+			}
+			result := response.Results[0]
+			if result.Line != testCase.wantLine ||
+				result.StartLine != testCase.wantLine ||
+				result.EndLine != testCase.wantLine ||
+				result.Scope != testCase.wantScope {
+				t.Fatalf(
+					"result = %#v, want line/range %d and scope %q",
+					result, testCase.wantLine, testCase.wantScope,
+				)
+			}
+		})
+	}
+}
+
 func TestGoInspectPrefersCodeOverLiteralsAndGenericReceivers(t *testing.T) {
 	t.Parallel()
 	const source = `package fixture

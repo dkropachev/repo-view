@@ -792,6 +792,47 @@ func TestSwiftUnicodeEmojiAndEscapedIdentifiersUseExactByteCoordinates(t *testin
 	}
 }
 
+func TestSwiftNumericLiteralsStopBeforeRangeAndMemberNames(t *testing.T) {
+	t.Parallel()
+
+	const source = `let end = 3
+func use() {
+    for _ in 1...end {}
+    for _ in 0x1..<end {}
+    _ = 0xFF.description
+    _ = 1.25e-2.description
+    _ = 0x1.921F_B600p1.description
+}
+`
+	lines := swiftTestLines(source)
+	analysis := analyzeSwiftSource(strings.TrimSuffix(source, "\n"), len(lines))
+	if analysis.tree == nil || len(analysis.recoverySpans) != 0 {
+		t.Fatalf("numeric-boundary fixture is not concrete-valid: tree=%v recovery=%#v",
+			analysis.tree != nil, analysis.recoverySpans)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "Numbers.swift", source)
+	view := mustView(t, root)
+	for _, test := range []struct {
+		symbol    string
+		wantLines []int
+		wantKinds []string
+	}{
+		{symbol: "end", wantLines: []int{1, 3, 4}, wantKinds: []string{"def", "ref", "ref"}},
+		{symbol: "description", wantLines: []int{5, 6, 7}, wantKinds: []string{"ref", "ref", "ref"}},
+	} {
+		response, err := view.Find(test.symbol, Options{
+			Include: IncludeBoth,
+			Return:  ReturnLocations,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		swiftTestAssertResultShape(t, response.Results, test.wantLines, test.wantKinds)
+	}
+}
+
 func swiftTestNthLineContaining(t *testing.T, lines []string, marker string, occurrence int) int {
 	t.Helper()
 	found := 0

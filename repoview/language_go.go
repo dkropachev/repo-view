@@ -37,6 +37,12 @@ func (g goLanguage) sourceDefinitions(lines []string) []sourceDefinition {
 	return definitions
 }
 
+func (g goLanguage) prepareFindScopeResolver(
+	lines []string,
+) preparedFindScopeResolver {
+	return newCPreparedFindScopeResolver(g.sourceDefinitions(lines), nil, len(lines))
+}
+
 func parsedGoDefinitions(lines []string) ([]sourceDefinition, bool) {
 	fileSet, file, parseErr := parseGoSource(lines, parser.SkipObjectResolution)
 	if file == nil {
@@ -123,9 +129,12 @@ func goGeneralDefinitions(fileSet *token.FileSet, declaration *ast.GenDecl) []so
 					scopeEnd:   position.Line,
 					ownsScope:  false,
 				}
-				if start, end, ok := goValueScope(fileSet, valueSpecification, nameIndex); ok {
-					definition.scopeStart = min(position.Line, start)
-					definition.scopeEnd = end
+				if start, end, ok := goValueScope(valueSpecification, nameIndex); ok {
+					startPosition := goPhysicalPosition(fileSet, start)
+					endPosition := goPhysicalPosition(fileSet, end)
+					definition.scopeStart = min(position.Line, startPosition.Line)
+					definition.scopeEnd = endPosition.Line
+					definition.ownedEndColumn = endPosition.Column
 					definition.ownsScope = true
 				}
 				definitions = append(definitions, definition)
@@ -161,10 +170,9 @@ func goInterfaceDefinitions(
 }
 
 func goValueScope(
-	fileSet *token.FileSet,
 	specification *ast.ValueSpec,
 	nameIndex int,
-) (int, int, bool) {
+) (token.Pos, token.Pos, bool) {
 	expressions := make([]ast.Expr, 0, 2)
 	switch {
 	case len(specification.Values) == len(specification.Names):
@@ -175,16 +183,16 @@ func goValueScope(
 	for _, expression := range expressions {
 		start, end, ok := goScopedExpression(expression)
 		if ok {
-			return goPhysicalLine(fileSet, start), goPhysicalLine(fileSet, end), true
+			return start, end, true
 		}
 	}
 	if specification.Type != nil {
 		start, end, ok := goScopedTypeExpression(specification.Type)
 		if ok {
-			return goPhysicalLine(fileSet, start), goPhysicalLine(fileSet, end), true
+			return start, end, true
 		}
 	}
-	return 0, 0, false
+	return token.NoPos, token.NoPos, false
 }
 
 func goScopedTypeExpression(expression ast.Expr) (token.Pos, token.Pos, bool) {
@@ -226,13 +234,17 @@ func goDefinition(
 	symbol string,
 	position, start, end token.Pos,
 ) sourceDefinition {
+	definitionPosition := goPhysicalPosition(fileSet, position)
+	startPosition := goPhysicalPosition(fileSet, start)
+	endPosition := goPhysicalPosition(fileSet, end)
 	return sourceDefinition{
-		symbol:     symbol,
-		line:       goPhysicalPosition(fileSet, position).Line,
-		column:     goPhysicalPosition(fileSet, position).Column,
-		scopeStart: goPhysicalLine(fileSet, start),
-		scopeEnd:   goPhysicalLine(fileSet, end),
-		ownsScope:  true,
+		symbol:         symbol,
+		line:           definitionPosition.Line,
+		column:         definitionPosition.Column,
+		scopeStart:     startPosition.Line,
+		scopeEnd:       endPosition.Line,
+		ownedEndColumn: endPosition.Column,
+		ownsScope:      true,
 	}
 }
 
@@ -255,7 +267,12 @@ func goScope(lines []string, lineNo int) (int, int) {
 			return bestStart, bestEnd
 		}
 	}
-	return braceScopeResolver(goSearchLines(lines, true, true), lineNo)
+	if start, end, ok := braceScopeFromStructural(
+		lines, goSearchLines(lines, true, true), lineNo,
+	); ok {
+		return start, end
+	}
+	return lineNo, lineNo
 }
 
 func goImports(lines []string) (int, int, bool) {

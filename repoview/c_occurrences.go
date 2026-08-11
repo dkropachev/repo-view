@@ -9,30 +9,68 @@ func (c cLanguage) walkAdditionalSymbolOccurrences(
 	symbol string,
 	visit func(lineNo, additionalCount int) bool,
 ) bool {
-	if visit == nil || !cSourceIdentifier(symbol) {
+	return c.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, visit, nil)
+}
+
+func (c cLanguage) walkAdditionalSymbolOccurrencesAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	return c.walkAdditionalSymbolOccurrencesWithVisitor(lines, symbol, nil, visit)
+}
+
+func (c cLanguage) walkAdditionalSymbolOccurrencesWithVisitor(
+	lines []string,
+	symbol string,
+	visit func(lineNo, additionalCount int) bool,
+	visitAt func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	if visit == nil && visitAt == nil || !cSourceIdentifier(symbol) {
 		return false
 	}
 	analysis := c.sourceAnalysis(lines)
 	if analysis == nil || len(lines) == 0 {
 		return true
 	}
-
 	nextLine := 1
 	pendingAdjustment := 0
+	var pendingAddedColumns []int
+	var pendingRemovedColumns []int
 	stopped := false
 	emitThrough := func(lastLine int) bool {
 		lastLine = min(lastLine, len(lines))
 		for nextLine <= lastLine {
-			if !visit(nextLine, pendingAdjustment) {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(
+					nextLine, pendingAdjustment,
+					pendingAddedColumns, pendingRemovedColumns,
+				)
+			} else {
+				keepGoing = visit(nextLine, pendingAdjustment)
+			}
+			if !keepGoing {
 				stopped = true
 				return false
 			}
 			nextLine++
 			pendingAdjustment = 0
+			pendingAddedColumns = pendingAddedColumns[:0]
+			pendingRemovedColumns = pendingRemovedColumns[:0]
 		}
 		return true
 	}
-	record := func(lineNo, adjustment int) bool {
+	record := func(
+		lineNo, adjustment, addedColumn int,
+		removedColumns []int,
+	) bool {
 		if lineNo < nextLine {
 			return true
 		}
@@ -40,6 +78,12 @@ func (c cLanguage) walkAdditionalSymbolOccurrences(
 			return false
 		}
 		pendingAdjustment += adjustment
+		if addedColumn > 0 {
+			pendingAddedColumns = append(pendingAddedColumns, addedColumn)
+		}
+		if len(removedColumns) > 0 {
+			pendingRemovedColumns = append(pendingRemovedColumns, removedColumns...)
+		}
 		return true
 	}
 
@@ -51,13 +95,16 @@ func (c cLanguage) walkAdditionalSymbolOccurrences(
 		}
 		return lineCursor + 1
 	}
+	var removedColumnScratch []int
 	recordToken := func(start, end int, text string, identifier bool) bool {
-		if start < 0 || end <= start || end > len(analysis.source) ||
-			!cPhysicalRangeContainsNewline(analysis.source, start, end) {
+		if start < 0 || end <= start || end > len(analysis.source) {
 			return true
 		}
-		lineNo := lineAt(start)
-		for lineNo <= len(lines) {
+		if !cPhysicalRangeContainsNewline(analysis.source, start, end) {
+			return true
+		}
+		firstLine := lineAt(start)
+		for lineNo := firstLine; lineNo <= len(lines); lineNo++ {
 			lineStart := max(start, analysis.lineStarts[lineNo-1])
 			lineEnd := len(analysis.source)
 			if lineNo < len(analysis.lineStarts) {
@@ -68,22 +115,37 @@ func (c cLanguage) walkAdditionalSymbolOccurrences(
 			}
 			segmentEnd := min(end, lineEnd)
 			adjustment := 0
+			if visitAt != nil {
+				removedColumnScratch = removedColumnScratch[:0]
+			}
 			if lineStart < segmentEnd {
-				adjustment = -cCountValidSymbolOccurrences(
-					analysis.source[lineStart:segmentEnd],
-					symbol,
-				)
+				segment := analysis.source[lineStart:segmentEnd]
+				if visitAt != nil {
+					adjustment = -cWalkValidSymbolOccurrences(
+						segment, symbol, func(start int) {
+							removedColumnScratch = append(
+								removedColumnScratch,
+								lineStart-analysis.lineStarts[lineNo-1]+start+1,
+							)
+						},
+					)
+				} else {
+					adjustment = -cCountValidSymbolOccurrences(segment, symbol)
+				}
 			}
-			if identifier && lineNo == lineAt(start) && text == symbol {
+			addedColumn := 0
+			if identifier && lineNo == firstLine && text == symbol {
 				adjustment++
+				if visitAt != nil {
+					addedColumn = start - analysis.lineStarts[firstLine-1] + 1
+				}
 			}
-			if !record(lineNo, adjustment) {
+			if !record(lineNo, adjustment, addedColumn, removedColumnScratch) {
 				return false
 			}
 			if end <= lineEnd || lineNo == len(lines) {
 				break
 			}
-			lineNo++
 		}
 		return true
 	}

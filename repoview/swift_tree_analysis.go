@@ -395,6 +395,7 @@ func swiftTreeDefinitionsWithContext(
 		}
 		line, column := positions.lineColumn(nameStart)
 		scopeStart, scopeEnd := line, line
+		ownedEndLine, ownedEndColumn := 0, 0
 		if ownsScope {
 			scope := tree.nodes[scopeIndex]
 			start := swiftSyntaxAttachedScopeStart(
@@ -405,10 +406,15 @@ func swiftTreeDefinitionsWithContext(
 				end = scope.endByte
 			}
 			scopeStart, scopeEnd = positions.lineSpan(start, end)
+			ownedEndLine, ownedEndColumn = positions.lineColumn(end)
+		}
+		if !ownsScope || ownedEndLine != scopeEnd {
+			ownedEndColumn = 0
 		}
 		definitions = append(definitions, sourceDefinition{
 			symbol: symbol, line: line, column: column,
-			scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+			scopeStart: scopeStart, scopeEnd: scopeEnd,
+			ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 		})
 	}
 

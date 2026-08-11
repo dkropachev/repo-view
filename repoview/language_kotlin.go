@@ -146,7 +146,7 @@ func kotlinMergeDefinitions(
 	definitions := make([]sourceDefinition, 0, len(concrete)+len(lexical))
 	seen := make(map[kotlinDefinitionKey]int, len(concrete)+len(lexical))
 	physicalHeaderSymbols := make(map[int]map[kotlinDefinitionKey]struct{})
-	appendDefinition := func(definition sourceDefinition) {
+	appendDefinition := func(definition sourceDefinition, authoritativeEnd bool) {
 		definition = normalizeCDefinition(definition, lineCount)
 		if definition.symbol == "" {
 			return
@@ -160,7 +160,13 @@ func kotlinMergeDefinitions(
 				*current = definition
 			} else if definition.ownsScope == current.ownsScope {
 				current.scopeStart = min(current.scopeStart, definition.scopeStart)
-				current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+				if definition.scopeEnd > current.scopeEnd {
+					current.scopeEnd = definition.scopeEnd
+					current.ownedEndColumn = definition.ownedEndColumn
+				} else if definition.scopeEnd == current.scopeEnd &&
+					(authoritativeEnd || current.ownedEndColumn == 0) {
+					current.ownedEndColumn = definition.ownedEndColumn
+				}
 			}
 			return
 		}
@@ -168,7 +174,7 @@ func kotlinMergeDefinitions(
 		definitions = append(definitions, definition)
 	}
 	for _, definition := range concrete {
-		appendDefinition(definition)
+		appendDefinition(definition, false)
 	}
 	for _, definition := range lexical {
 		identity := kotlinDefinitionKey{
@@ -180,7 +186,7 @@ func kotlinMergeDefinitions(
 		)
 		if _, duplicate := seen[identity]; duplicate {
 			if !hasTree || trusted || touchesRecovery {
-				appendDefinition(definition)
+				appendDefinition(definition, true)
 			}
 			continue
 		}
@@ -190,7 +196,7 @@ func kotlinMergeDefinitions(
 			) {
 			continue
 		}
-		appendDefinition(definition)
+		appendDefinition(definition, true)
 	}
 	return kotlinSortUniqueDefinitions(definitions, lineCount)
 }
@@ -490,12 +496,33 @@ func (kotlinLanguage) countSymbolOccurrences(line, symbol string) int {
 	if line == "" || symbol == "" {
 		return 0
 	}
+	return kotlinWalkSymbolOccurrences(line, symbol, nil)
+}
+
+func (kotlinLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || symbol == "" {
+		return nil
+	}
+	var columns []int
+	kotlinWalkSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
+func kotlinWalkSymbolOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	requireQuoted := kotlinHardKeyword(symbol)
 	walkKotlinLexically(line, kotlinLexicalSink{token: func(token kotlinToken) bool {
 		if token.kind == kotlinTokenIdentifier && token.text == symbol &&
 			(!requireQuoted || token.quotedIdentifier) {
 			count++
+			if visit != nil {
+				visit(token.nameStart)
+			}
 		}
 		return true
 	}})
@@ -506,22 +533,6 @@ func (kotlinLanguage) prepareSymbolOccurrenceCounter(symbol string) func(string)
 	return func(line string) int {
 		return kotlinLanguage{}.countSymbolOccurrences(line, symbol)
 	}
-}
-
-func (kotlin kotlinLanguage) walkAdditionalSymbolOccurrences(
-	lines []string,
-	_ string,
-	visit func(lineNo, additionalCount int) bool,
-) bool {
-	if visit == nil {
-		return false
-	}
-	for index := range lines {
-		if !visit(index+1, 0) {
-			break
-		}
-	}
-	return true
 }
 
 func (kotlin kotlinLanguage) symbolOnLine(

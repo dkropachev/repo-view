@@ -24,6 +24,7 @@ func TestKotlinBackendContractRegistrationAndPublicIntegration(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: kotlinTestImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: kotlinTestImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: kotlinTestImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: kotlinTestImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: kotlinTestImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -380,6 +381,50 @@ tasks.register<Test>("test") { useJUnitPlatform() }
 	if len(found.Results) != 2 || found.Results[0].Kind != "def" ||
 		found.Results[1].Kind != "ref" {
 		t.Fatalf("script versionName results = %#v, want def and ref", found.Results)
+	}
+}
+
+func TestKotlinQualifiedFindClassifiesDefinitionsReferencesAndTrivia(t *testing.T) {
+	t.Parallel()
+
+	const source = "fun `foo.bar`() { foo /* same-line trivia */ . bar() }\n" +
+		"fun use() {\n" +
+		"    foo.bar()\n" +
+		"    foo /* cross-line trivia */ .\n" +
+		"        bar()\n" +
+		"    val opaque = \"foo.bar\"\n" +
+		"    // foo.bar\n" +
+		"}\n"
+	lines := kotlinTestLines(source)
+	analysis := analyzeKotlinSource(strings.TrimSuffix(source, "\n"), len(lines))
+	if analysis.tree == nil || len(analysis.recoverySpans) != 0 {
+		t.Fatalf("qualified Kotlin fixture is not concrete-valid: tree=%v recovery=%#v",
+			analysis.tree != nil, analysis.recoverySpans)
+	}
+	root := t.TempDir()
+	writeFile(t, root, "Qualified.kt", source)
+	view := mustView(t, root)
+
+	found, err := view.Find("foo.bar", Options{
+		Include: IncludeBoth,
+		Return:  ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLines := make([]int, len(found.Results))
+	gotKinds := make([]string, len(found.Results))
+	for index, result := range found.Results {
+		gotLines[index] = result.Line
+		gotKinds[index] = result.Kind
+	}
+	if want := []int{1, 1, 3, 4}; !slices.Equal(gotLines, want) {
+		t.Fatalf("qualified Find lines = %#v, want %#v; results=%#v",
+			gotLines, want, found.Results)
+	}
+	if want := []string{"def", "ref", "ref", "ref"}; !slices.Equal(gotKinds, want) {
+		t.Fatalf("qualified Find kinds = %#v, want %#v; results=%#v",
+			gotKinds, want, found.Results)
 	}
 }
 

@@ -33,6 +33,36 @@ for numeric in changed_context changed_limit changed_max_code_lines changed_max_
     exit 2
   fi
 done
+decimal_greater_than() {
+  local left="$1"
+  local right="$2"
+  while [[ "${#left}" -gt 1 && "${left:0:1}" == "0" ]]; do
+    left="${left:1}"
+  done
+  while [[ "${#right}" -gt 1 && "${right:0:1}" == "0" ]]; do
+    right="${right:1}"
+  done
+  if [[ "${#left}" -ne "${#right}" ]]; then
+    [[ "${#left}" -gt "${#right}" ]]
+    return
+  fi
+  [[ "${left}" > "${right}" ]]
+}
+decimal_equal() {
+  ! decimal_greater_than "$1" "$2" && ! decimal_greater_than "$2" "$1"
+}
+for positive in changed_limit changed_max_code_lines changed_max_patch_lines; do
+  value="${!positive}"
+  if [[ "${value}" =~ ^0+$ ]]; then
+    printf '%s must be a positive integer: %s\n' "${positive}" "${value}" >&2
+    exit 2
+  fi
+done
+if decimal_greater_than "${changed_context}" "${navigation_context_cap}"; then
+  printf 'changed_context %s exceeds navigation_context_cap %s\n' \
+    "${changed_context}" "${navigation_context_cap}" >&2
+  exit 2
+fi
 case "${reasoning_effort}" in
   ""|inherit|low|medium|high|xhigh|ultra) ;;
   *)
@@ -54,8 +84,12 @@ case "${navigation_policy}" in
     exit 2
     ;;
 esac
-if [[ "${navigation_policy}" == "batched" && "${navigation_command_cap}" -eq 0 ]]; then
+if [[ "${navigation_policy}" == "batched" && "${navigation_command_cap}" =~ ^0+$ ]]; then
   printf 'REPO_VIEW_NAVIGATION_COMMAND_CAP must be positive for batched navigation\n' >&2
+  exit 2
+fi
+if [[ "${navigation_policy}" == "batched" && "${navigation_context_cap}" =~ ^0+$ ]]; then
+  printf 'REPO_VIEW_NAVIGATION_CONTEXT_CAP must be positive for batched navigation\n' >&2
   exit 2
 fi
 navigation_semantics_configured=false
@@ -75,7 +109,7 @@ if "${navigation_semantics_configured}"; then
     printf 'mechanical navigation semantics configuration is incomplete\n' >&2
     exit 2
   fi
-  if [[ "${navigation_command_cap}" -eq 0 ]]; then
+  if [[ "${navigation_command_cap}" =~ ^0+$ ]]; then
     printf 'mechanical navigation semantics require a positive command cap\n' >&2
     exit 2
   fi
@@ -97,8 +131,21 @@ if "${navigation_semantics_configured}"; then
       exit 2
       ;;
   esac
+  if [[ "${required_changed_return}" != "${changed_return}" ]]; then
+    printf 'REPO_VIEW_REQUIRED_CHANGED_RETURN must match REPO_VIEW_CHANGED_RETURN\n' >&2
+    exit 2
+  fi
+  if ! decimal_equal "${required_changed_context}" "${changed_context}"; then
+    printf 'REPO_VIEW_REQUIRED_CHANGED_CONTEXT must match REPO_VIEW_CHANGED_CONTEXT\n' >&2
+    exit 2
+  fi
+  if [[ "${required_changed_context}" =~ ^0+$ &&
+        "${required_changed_return}" != "locations" ]]; then
+    printf 'mechanically enforced changed context must be positive unless return is locations\n' >&2
+    exit 2
+  fi
 fi
-if [[ "${navigation_command_cap}" -gt 0 ]]; then
+if [[ ! "${navigation_command_cap}" =~ ^0+$ ]]; then
   json_events=false
   for argument in "$@"; do
     if [[ "${argument}" == "--json" ]]; then
@@ -225,7 +272,7 @@ cleanup_navigation_transcript() {
   rmdir -- "${repo_view_bin_dir}" 2>/dev/null || true
 }
 trap cleanup_navigation_transcript EXIT
-if [[ "${navigation_command_cap}" -gt 0 ]]; then
+if [[ ! "${navigation_command_cap}" =~ ^0+$ ]]; then
   navigation_transcript="$(mktemp "${repo_view_bin_dir}/navigation-transcript.XXXXXX.jsonl")"
   linker_flags+=(
     "-X main.enforcedNavigationCommandCap=${navigation_command_cap}"

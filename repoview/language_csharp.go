@@ -168,7 +168,13 @@ func csharpMergeDefinitions(
 				*current = definition
 			} else if definition.ownsScope == current.ownsScope {
 				current.scopeStart = min(current.scopeStart, definition.scopeStart)
-				current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+				if definition.scopeEnd > current.scopeEnd {
+					current.scopeEnd = definition.scopeEnd
+					current.ownedEndColumn = definition.ownedEndColumn
+				} else if definition.scopeEnd == current.scopeEnd &&
+					current.ownedEndColumn == 0 {
+					current.ownedEndColumn = definition.ownedEndColumn
+				}
 			}
 			return
 		}
@@ -566,6 +572,24 @@ func (csharpLanguage) countSymbolOccurrences(line, symbol string) int {
 	if line == "" || symbol == "" || len(symbol) > len(line) {
 		return 0
 	}
+	return csharpWalkSymbolOccurrences(line, symbol, nil)
+}
+
+func (csharpLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || symbol == "" || len(symbol) > len(line) {
+		return nil
+	}
+	var columns []int
+	csharpWalkSymbolOccurrences(line, symbol, func(start int) {
+		columns = append(columns, start+1)
+	})
+	return columns
+}
+
+func csharpWalkSymbolOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	if csharpSourceIdentifier(symbol) {
 		count := 0
 		for offset := 0; offset < len(line); {
@@ -576,6 +600,9 @@ func (csharpLanguage) countSymbolOccurrences(line, symbol string) int {
 			if end := csharpIdentifierEnd(line, offset); end > offset {
 				if line[offset:end] == symbol {
 					count++
+					if visit != nil {
+						visit(offset)
+					}
 				}
 				offset = end
 				continue
@@ -585,7 +612,7 @@ func (csharpLanguage) countSymbolOccurrences(line, symbol string) int {
 		}
 		return count
 	}
-	return csharpCountCompositeOccurrences(line, symbol)
+	return csharpWalkCompositeOccurrences(line, symbol, visit)
 }
 
 func (csharpLanguage) prepareSymbolOccurrenceCounter(
@@ -596,7 +623,10 @@ func (csharpLanguage) prepareSymbolOccurrenceCounter(
 	}
 }
 
-func csharpCountCompositeOccurrences(line, symbol string) int {
+func csharpWalkCompositeOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	for start := 0; start+len(symbol) <= len(line); {
 		relative := strings.Index(line[start:], symbol)
@@ -610,6 +640,9 @@ func csharpCountCompositeOccurrences(line, symbol string) int {
 		if (position == 0 || !csharpIdentifierContinueRune(before)) &&
 			(end == len(line) || !csharpIdentifierContinueRune(after)) {
 			count++
+			if visit != nil {
+				visit(position)
+			}
 		}
 		start = position + max(1, len(symbol))
 	}
@@ -618,18 +651,261 @@ func csharpCountCompositeOccurrences(line, symbol string) int {
 
 func (csharp csharpLanguage) walkAdditionalSymbolOccurrences(
 	lines []string,
-	_ string,
+	symbol string,
 	visit func(lineNo, additionalCount int) bool,
 ) bool {
 	if visit == nil {
 		return false
 	}
-	for index := range lines {
-		if !visit(index+1, 0) {
-			break
+	return csharp.walkAdditionalSymbolOccurrencesAt(
+		lines, symbol,
+		func(lineNo, additionalCount int, _, _ []int) bool {
+			return visit(lineNo, additionalCount)
+		},
+	)
+}
+
+func (csharp csharpLanguage) walkAdditionalSymbolOccurrencesAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	if visit == nil {
+		return false
+	}
+	if csharpSourceIdentifier(symbol) {
+		for index := range lines {
+			if !visit(index+1, 0, nil, nil) {
+				break
+			}
 		}
+		return true
+	}
+
+	pattern, ok := csharpCompositeOccurrencePattern(symbol)
+	if !ok {
+		return false
+	}
+	analysis := csharp.sourceAnalysis(lines)
+	if analysis == nil || len(lines) == 0 {
+		return true
+	}
+	// Comments are trivia between C# tokens, while literals must remain
+	// adjacency barriers. Interpolation expressions stay as code so qualified
+	// references inside them receive the same reconciliation as ordinary code.
+	code := csharpCompositeOccurrenceSource(analysis.source)
+	prefix := csharpCompositeOccurrencePrefix(pattern)
+	starts := make([]int, len(pattern))
+	tokenCount := 0
+	matched := 0
+	nextLine := 1
+	pendingLogicalColumns := make([]int, 0, 1)
+	visitorStopped := false
+	matchLines := csharpOccurrenceLineCursor{starts: analysis.lineStarts}
+	frontierLines := csharpOccurrenceLineCursor{starts: analysis.lineStarts}
+
+	emitThrough := func(lastLine int) bool {
+		lastLine = min(lastLine, len(lines))
+		for nextLine <= lastLine {
+			lineIndex := nextLine - 1
+			lineStart, lineEnd := 0, 0
+			if lineIndex < len(analysis.lineStarts) {
+				lineStart = analysis.lineStarts[lineIndex]
+				lineEnd = len(code)
+				if lineIndex+1 < len(analysis.lineStarts) {
+					lineEnd = max(lineStart, analysis.lineStarts[lineIndex+1]-1)
+				}
+			}
+
+			logicalIndex := 0
+			physicalCount := 0
+			var addedColumns, removedColumns []int
+			if lineStart <= lineEnd && lineEnd <= len(code) {
+				physicalCount = csharpWalkCompositeOccurrences(
+					code[lineStart:lineEnd], symbol,
+					func(start int) {
+						column := start + 1
+						for logicalIndex < len(pendingLogicalColumns) &&
+							pendingLogicalColumns[logicalIndex] < column {
+							addedColumns = append(
+								addedColumns, pendingLogicalColumns[logicalIndex],
+							)
+							logicalIndex++
+						}
+						if logicalIndex < len(pendingLogicalColumns) &&
+							pendingLogicalColumns[logicalIndex] == column {
+							logicalIndex++
+							return
+						}
+						removedColumns = append(removedColumns, column)
+					},
+				)
+			}
+			if logicalIndex == 0 && physicalCount == 0 {
+				addedColumns = pendingLogicalColumns
+			} else {
+				addedColumns = append(
+					addedColumns, pendingLogicalColumns[logicalIndex:]...,
+				)
+			}
+			if !visit(
+				nextLine,
+				len(pendingLogicalColumns)-physicalCount,
+				addedColumns, removedColumns,
+			) {
+				visitorStopped = true
+				return false
+			}
+			nextLine++
+			pendingLogicalColumns = pendingLogicalColumns[:0]
+		}
+		return true
+	}
+	record := func(lineNo, start int) bool {
+		if lineNo < nextLine {
+			return true
+		}
+		if !emitThrough(lineNo - 1) {
+			return false
+		}
+		if lineNo <= len(analysis.lineStarts) {
+			pendingLogicalColumns = append(
+				pendingLogicalColumns,
+				start-analysis.lineStarts[lineNo-1]+1,
+			)
+		}
+		return true
+	}
+	walkCSharpLexically(code, csharpLexicalSink{token: func(token csharpToken) bool {
+		starts[tokenCount%len(starts)] = token.start
+		tokenCount++
+		for matched > 0 && token.text != pattern[matched] {
+			matched = prefix[matched-1]
+		}
+		if token.text == pattern[matched] {
+			matched++
+		}
+		if matched == len(pattern) {
+			start := starts[(tokenCount-len(pattern))%len(starts)]
+			lineNo := matchLines.lineAt(start)
+			column := 0
+			if lineNo >= 1 && lineNo <= len(analysis.lineStarts) {
+				column = start - analysis.lineStarts[lineNo-1] + 1
+			}
+			if csharpCompositeOccurrenceAllowedAt(
+				analysis.scopeResolver, symbol, lineNo, column,
+			) && !record(lineNo, start) {
+				return false
+			}
+			matched = prefix[matched-1]
+		}
+		frontier := token.end
+		if matched > 0 {
+			frontier = starts[(tokenCount-matched)%len(starts)]
+		}
+		return emitThrough(frontierLines.lineAt(frontier) - 1)
+	}})
+	if !visitorStopped {
+		_ = emitThrough(len(lines))
 	}
 	return true
+}
+
+func csharpCompositeOccurrencePattern(symbol string) ([]string, bool) {
+	if symbol == "" || csharpSourceIdentifier(symbol) ||
+		!csharpDefinitionSymbolValid(symbol) {
+		return nil, false
+	}
+	pattern := make([]string, 0, 8)
+	walkCSharpLexically(symbol, csharpLexicalSink{token: func(token csharpToken) bool {
+		pattern = append(pattern, token.text)
+		return true
+	}})
+	return pattern, len(pattern) > 1
+}
+
+func csharpCompositeOccurrenceAllowedAt(
+	resolver *cPreparedFindScopeResolver,
+	symbol string,
+	lineNo, column int,
+) bool {
+	if !strings.HasPrefix(symbol, "~") {
+		return true
+	}
+	if resolver == nil || lineNo < 1 || column < 1 {
+		return false
+	}
+	for _, definitionColumn := range resolver.definitionColumns(lineNo, symbol) {
+		if definitionColumn == column {
+			return true
+		}
+	}
+	return false
+}
+
+func csharpCompositeOccurrencePrefix(pattern []string) []int {
+	prefix := make([]int, len(pattern))
+	for index, matched := 1, 0; index < len(pattern); index++ {
+		for matched > 0 && pattern[index] != pattern[matched] {
+			matched = prefix[matched-1]
+		}
+		if pattern[index] == pattern[matched] {
+			matched++
+		}
+		prefix[index] = matched
+	}
+	return prefix
+}
+
+type csharpOccurrenceLineCursor struct {
+	starts []int
+	index  int
+	offset int
+}
+
+func (cursor *csharpOccurrenceLineCursor) lineAt(offset int) int {
+	if cursor == nil || len(cursor.starts) == 0 {
+		return 1
+	}
+	if offset < cursor.offset {
+		cursor.index = 0
+	}
+	cursor.offset = max(0, offset)
+	for cursor.index+1 < len(cursor.starts) &&
+		cursor.starts[cursor.index+1] <= cursor.offset {
+		cursor.index++
+	}
+	return cursor.index + 1
+}
+
+func csharpCompositeOccurrenceSource(source string) string {
+	masked := []byte(source)
+	mask := func(span cByteSpan, barrier bool) bool {
+		start := max(0, min(span.start, len(masked)))
+		end := max(start, min(span.end, len(masked)))
+		barrierAt := -1
+		for index := start; index < end; index++ {
+			if masked[index] == '\n' || masked[index] == '\r' {
+				continue
+			}
+			if barrierAt < 0 {
+				barrierAt = index
+			}
+			masked[index] = ' '
+		}
+		if barrier && barrierAt >= 0 {
+			masked[barrierAt] = 0
+		}
+		return true
+	}
+	walkCSharpLexically(source, csharpLexicalSink{
+		comment: func(span cByteSpan) bool { return mask(span, false) },
+		literal: func(span cByteSpan) bool { return mask(span, true) },
+	})
+	return string(masked)
 }
 
 func (csharp csharpLanguage) symbolOnLine(

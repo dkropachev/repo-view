@@ -230,14 +230,8 @@ func cppSyntaxRawStringEnd(source string, start, limit int) (int, bool) {
 	if start < 0 || start >= limit || limit > len(source) {
 		return start, false
 	}
-	prefixEnd := -1
-	for _, prefix := range []string{`u8R"`, `LR"`, `uR"`, `UR"`, `R"`} {
-		if strings.HasPrefix(source[start:limit], prefix) {
-			prefixEnd = start + len(prefix)
-			break
-		}
-	}
-	if prefixEnd < 0 {
+	prefixEnd, ok := cppRawStringPrefixEnd(source, start, limit)
+	if !ok {
 		return start, false
 	}
 

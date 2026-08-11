@@ -254,9 +254,11 @@ func swiftIsWhitespace(character int32) bool {
 	return character >= 0 && unicode.IsSpace(character)
 }
 
-func swiftIsAlphaNumeric(character int32) bool {
-	return character >= 0 && (unicode.IsLetter(character) ||
-		unicode.IsNumber(character))
+func swiftIsIdentifierContinuation(character int32) bool {
+	return character >= 0 && setContains(
+		aux_sym_simple_identifier_token1_character_set_2,
+		character,
+	)
 }
 
 func swiftIsBaseOperatorSymbol(character int32) bool {
@@ -364,7 +366,7 @@ func swiftFixedOperatorCanEnd(operator swiftFixedOperator, lookahead int32) bool
 	case swiftTerminatorOperatorOrDot:
 		return !swiftIsBaseOperatorSymbol(lookahead) && lookahead != '.'
 	case swiftTerminatorAlphaNumeric:
-		return !swiftIsAlphaNumeric(lookahead)
+		return !swiftIsIdentifierContinuation(lookahead)
 	case swiftTerminatorNonWhitespace:
 		return swiftIsWhitespace(lookahead)
 	default:

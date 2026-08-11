@@ -2101,9 +2101,12 @@ func (parser *modulaConcreteParser) findDeclarationSemicolonBoundary(
 			continue
 		}
 		token := parser.tokens[index]
+		procedureTypeContinuation := typeBlocks &&
+			modulaProcedureTypeContinuation(parser.tokens, index)
 		if token.lineStart && modulaDeclarationSectionStarter(token.text) &&
-			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0) &&
-			!modulaProcedureTypeContinuation(parser.tokens, index) {
+			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0 ||
+				token.text == "PROCEDURE" && len(blocks) == 0) &&
+			!procedureTypeContinuation {
 			return -1, index
 		}
 		if unmatchedDirective {
@@ -2162,10 +2165,13 @@ func (parser *modulaConcreteParser) findDeclarationBoundary(
 			unmatchedDirective = true
 			continue
 		}
+		procedureTypeContinuation := typeBlocks &&
+			modulaProcedureTypeContinuation(parser.tokens, index)
 		if index >= start && token.lineStart &&
-			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0) &&
+			(unmatchedDirective || paren == 0 && bracket == 0 && len(blocks) == 0 ||
+				token.text == "PROCEDURE" && len(blocks) == 0) &&
 			modulaDeclarationSectionStarter(token.text) &&
-			!modulaProcedureTypeContinuation(parser.tokens, index) {
+			!procedureTypeContinuation {
 			return -1, index
 		}
 		if unmatchedDirective {
@@ -3327,9 +3333,16 @@ func modulaTreeDefinitions(
 			scopeEnd, _ := modulaLineAndColumn(
 				lineStarts, max(node.startByte, node.endByte-1),
 			)
+			ownedEndLine, ownedEndColumn := modulaLineAndColumn(
+				lineStarts, node.endByte,
+			)
+			if !ownsScope || ownedEndLine != scopeEnd {
+				ownedEndColumn = 0
+			}
 			definitions = append(definitions, sourceDefinition{
 				symbol: source[child.startByte:child.endByte], line: line, column: column,
-				scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+				scopeStart: scopeStart, scopeEnd: scopeEnd,
+				ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 			})
 		}
 		_ = index
@@ -3435,7 +3448,13 @@ func modulaSortUniqueDefinitions(
 					*last = definition
 				} else if definition.ownsScope == last.ownsScope {
 					last.scopeStart = min(last.scopeStart, definition.scopeStart)
-					last.scopeEnd = max(last.scopeEnd, definition.scopeEnd)
+					if definition.scopeEnd > last.scopeEnd {
+						last.scopeEnd = definition.scopeEnd
+						last.ownedEndColumn = definition.ownedEndColumn
+					} else if definition.scopeEnd == last.scopeEnd &&
+						last.ownedEndColumn == 0 {
+						last.ownedEndColumn = definition.ownedEndColumn
+					}
 				}
 				continue
 			}

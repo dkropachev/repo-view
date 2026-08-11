@@ -48,6 +48,48 @@ int visible() { return 1; }
 	}
 }
 
+func TestCPPPhaseTwoSplicedRawStringPrefixMasksPayload(t *testing.T) {
+	t.Parallel()
+
+	const source = "const char *s = R\\\n\"(text \" fake_symbol)\";\nint tail();\n"
+	rawStart := strings.Index(source, "R\\\n")
+	wantEnd := strings.Index(source, ")\";") + len(")\"")
+	if rawStart < 0 || wantEnd < len(")\"") {
+		t.Fatal("invalid spliced raw-string fixture")
+	}
+	if end, ok := cppRawStringEnd(source, rawStart); !ok || end != wantEnd {
+		t.Fatalf("lexical raw-string end = %d, %v; want %d, true", end, ok, wantEnd)
+	}
+	if end, ok := cppSyntaxRawStringEnd(source, rawStart, len(source)); !ok || end != wantEnd {
+		t.Fatalf("syntax raw-string end = %d, %v; want %d, true", end, ok, wantEnd)
+	}
+
+	lexed := lexCPP(source)
+	if len(lexed.stringSpans) != 1 || lexed.stringSpans[0] != (cByteSpan{
+		start: rawStart,
+		end:   wantEnd,
+	}) {
+		t.Fatalf("spliced raw-string spans = %#v, want %d-%d",
+			lexed.stringSpans, rawStart, wantEnd)
+	}
+	if got := cppDefinitionSymbols(newCPPLanguage().sourceDefinitions(cppTestLines(source))); !slices.Contains(got, "tail") || slices.Contains(got, "fake_symbol") {
+		t.Fatalf("spliced raw-string definitions = %#v, want tail only", got)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "spliced-raw.cpp", source)
+	found, err := mustView(t, root).Find("fake_symbol", Options{
+		Include: IncludeBoth, Return: ReturnLocations, NoStrings: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found.Results) != 0 {
+		t.Fatalf("spliced raw-string payload remained searchable with NoStrings: %#v",
+			found.Results)
+	}
+}
+
 func TestCPPIdentifiersCoverUCNRecoveryFormsAndRejectInvalidStarts(t *testing.T) {
 	t.Parallel()
 

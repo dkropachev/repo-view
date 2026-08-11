@@ -295,7 +295,13 @@ func cppCombinedDefinitions(
 					*current = definition
 				} else if definition.ownsScope == current.ownsScope {
 					current.scopeStart = min(current.scopeStart, definition.scopeStart)
-					current.scopeEnd = max(current.scopeEnd, definition.scopeEnd)
+					if definition.scopeEnd > current.scopeEnd {
+						current.scopeEnd = definition.scopeEnd
+						current.ownedEndColumn = definition.ownedEndColumn
+					} else if definition.scopeEnd == current.scopeEnd &&
+						current.ownedEndColumn == 0 {
+						current.ownedEndColumn = definition.ownedEndColumn
+					}
 				}
 				continue
 			}
@@ -491,7 +497,30 @@ func (cppLanguage) countSymbolOccurrences(line, symbol string) int {
 	return cppCountCompositeOccurrences(line, symbol)
 }
 
+func (cppLanguage) symbolOccurrenceColumns(line, symbol string) []int {
+	if line == "" || !cppNavigationSymbol(symbol) {
+		return nil
+	}
+	var columns []int
+	visit := func(start int) {
+		columns = append(columns, start+1)
+	}
+	if cppSourceIdentifier(symbol) {
+		cppWalkIdentifierOccurrences(line, symbol, visit)
+	} else {
+		cppWalkCompositeOccurrences(line, symbol, visit)
+	}
+	return columns
+}
+
 func cppCountIdentifierOccurrences(line, symbol string) int {
+	return cppWalkIdentifierOccurrences(line, symbol, nil)
+}
+
+func cppWalkIdentifierOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	for offset := 0; offset < len(line); {
 		if cPreprocessingNumberStart(line, offset) {
@@ -518,12 +547,22 @@ func cppCountIdentifierOccurrences(line, symbol string) int {
 		}
 		if line[start:offset] == symbol {
 			count++
+			if visit != nil {
+				visit(start)
+			}
 		}
 	}
 	return count
 }
 
 func cppCountCompositeOccurrences(line, symbol string) int {
+	return cppWalkCompositeOccurrences(line, symbol, nil)
+}
+
+func cppWalkCompositeOccurrences(
+	line, symbol string,
+	visit func(start int),
+) int {
 	count := 0
 	for offset := 0; offset <= len(line)-len(symbol); {
 		relative := strings.Index(line[offset:], symbol)
@@ -534,6 +573,9 @@ func cppCountCompositeOccurrences(line, symbol string) int {
 		end := start + len(symbol)
 		if cppCompositeBoundaries(line, start, end, symbol) {
 			count++
+			if visit != nil {
+				visit(start)
+			}
 		}
 		offset = max(start+1, end)
 	}
@@ -590,6 +632,25 @@ func (cpp cppLanguage) walkAdditionalSymbolOccurrences(
 	return cpp.walkCompositeSymbolOccurrences(lines, symbol, visit)
 }
 
+func (cpp cppLanguage) walkAdditionalSymbolOccurrencesAt(
+	lines []string,
+	symbol string,
+	visit func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
+	if visit == nil || !cppNavigationSymbol(symbol) || len(lines) == 0 {
+		return false
+	}
+	if cppSourceIdentifier(symbol) {
+		return cppWalkIdentifierOccurrenceAdjustmentsWithVisitor(
+			cpp.sourceAnalysis(lines), lines, symbol, nil, visit,
+		)
+	}
+	return cpp.walkCompositeSymbolOccurrencesWithVisitor(lines, symbol, nil, visit)
+}
+
 // cppWalkIdentifierOccurrenceAdjustments reconciles the physical-line search
 // with translation-phase line splicing. A logical identifier or pp-number can
 // cover several physical lines: the complete identifier belongs on its first
@@ -602,26 +663,56 @@ func cppWalkIdentifierOccurrenceAdjustments(
 	symbol string,
 	visit func(lineNo, additionalCount int) bool,
 ) bool {
+	return cppWalkIdentifierOccurrenceAdjustmentsWithVisitor(
+		analysis, lines, symbol, visit, nil,
+	)
+}
+
+func cppWalkIdentifierOccurrenceAdjustmentsWithVisitor(
+	analysis *cppSourceAnalysis,
+	lines []string,
+	symbol string,
+	visit func(lineNo, additionalCount int) bool,
+	visitAt func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
 	if analysis == nil || len(lines) == 0 {
 		return true
 	}
-
 	nextLine := 1
 	pendingAdjustment := 0
+	var pendingAddedColumns []int
+	var pendingRemovedColumns []int
 	stopped := false
 	emitThrough := func(lastLine int) bool {
 		lastLine = min(lastLine, len(lines))
 		for nextLine <= lastLine {
-			if !visit(nextLine, pendingAdjustment) {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(
+					nextLine, pendingAdjustment,
+					pendingAddedColumns, pendingRemovedColumns,
+				)
+			} else {
+				keepGoing = visit(nextLine, pendingAdjustment)
+			}
+			if !keepGoing {
 				stopped = true
 				return false
 			}
 			nextLine++
 			pendingAdjustment = 0
+			pendingAddedColumns = pendingAddedColumns[:0]
+			pendingRemovedColumns = pendingRemovedColumns[:0]
 		}
 		return true
 	}
-	record := func(lineNo, adjustment int) bool {
+	record := func(
+		lineNo, adjustment, addedColumn int,
+		removedColumns []int,
+	) bool {
 		if lineNo < nextLine {
 			return true
 		}
@@ -629,6 +720,12 @@ func cppWalkIdentifierOccurrenceAdjustments(
 			return false
 		}
 		pendingAdjustment += adjustment
+		if addedColumn > 0 {
+			pendingAddedColumns = append(pendingAddedColumns, addedColumn)
+		}
+		if len(removedColumns) > 0 {
+			pendingRemovedColumns = append(pendingRemovedColumns, removedColumns...)
+		}
 		return true
 	}
 
@@ -640,9 +737,12 @@ func cppWalkIdentifierOccurrenceAdjustments(
 		}
 		return lineCursor + 1
 	}
+	var removedColumnScratch []int
 	recordToken := func(start, end int, text string, identifier bool) bool {
-		if start < 0 || end <= start || end > len(analysis.source) ||
-			!cPhysicalRangeContainsNewline(analysis.source, start, end) {
+		if start < 0 || end <= start || end > len(analysis.source) {
+			return true
+		}
+		if !cPhysicalRangeContainsNewline(analysis.source, start, end) {
 			return true
 		}
 		firstLine := lineAt(start)
@@ -657,15 +757,32 @@ func cppWalkIdentifierOccurrenceAdjustments(
 			}
 			segmentEnd := min(end, lineEnd)
 			adjustment := 0
-			if lineStart < segmentEnd {
-				adjustment = -cppCountIdentifierOccurrences(
-					analysis.source[lineStart:segmentEnd], symbol,
-				)
+			if visitAt != nil {
+				removedColumnScratch = removedColumnScratch[:0]
 			}
+			if lineStart < segmentEnd {
+				segment := analysis.source[lineStart:segmentEnd]
+				if visitAt != nil {
+					adjustment = -cppWalkIdentifierOccurrences(
+						segment, symbol, func(start int) {
+							removedColumnScratch = append(
+								removedColumnScratch,
+								lineStart-analysis.lineStarts[lineNo-1]+start+1,
+							)
+						},
+					)
+				} else {
+					adjustment = -cppCountIdentifierOccurrences(segment, symbol)
+				}
+			}
+			addedColumn := 0
 			if identifier && lineNo == firstLine && text == symbol {
 				adjustment++
+				if visitAt != nil {
+					addedColumn = start - analysis.lineStarts[firstLine-1] + 1
+				}
 			}
-			if !record(lineNo, adjustment) {
+			if !record(lineNo, adjustment, addedColumn, removedColumnScratch) {
 				return false
 			}
 			if end <= lineEnd || lineNo == len(lines) {
@@ -733,38 +850,203 @@ func (cpp cppLanguage) walkCompositeSymbolOccurrences(
 	symbol string,
 	visit func(lineNo, additionalCount int) bool,
 ) bool {
+	return cpp.walkCompositeSymbolOccurrencesWithVisitor(lines, symbol, visit, nil)
+}
+
+func (cpp cppLanguage) walkCompositeSymbolOccurrencesWithVisitor(
+	lines []string,
+	symbol string,
+	visit func(lineNo, additionalCount int) bool,
+	visitAt func(
+		lineNo, additionalCount int,
+		addedColumns, removedColumns []int,
+	) bool,
+) bool {
 	analysis := cpp.sourceAnalysis(lines)
-	if analysis == nil || analysis.lexed.truncated {
+	if analysis == nil {
 		return false
 	}
 	want := cppSymbolTokenTexts(symbol)
-	anchored := make(map[int]int)
-	if len(want) > 0 {
-		for index := 0; index+len(want) <= len(analysis.lexed.tokens); index++ {
-			matches := true
-			for part := range want {
-				if analysis.lexed.tokens[index+part].text != want[part] {
-					matches = false
-					break
-				}
+	if len(want) == 0 {
+		for lineNo := range lines {
+			var keepGoing bool
+			if visitAt != nil {
+				keepGoing = visitAt(lineNo+1, 0, nil, nil)
+			} else {
+				keepGoing = visit(lineNo+1, 0)
 			}
-			if !matches {
-				continue
+			if !keepGoing {
+				break
 			}
-			line := cppLineAt(analysis.lineStarts, analysis.lexed.tokens[index].start)
-			anchored[line]++
 		}
+		return true
 	}
-	for lineNo, line := range lines {
-		additional := anchored[lineNo+1] - cppLanguage{}.countSymbolOccurrences(line, symbol)
-		if additional < 0 {
-			additional = 0
+
+	// Match the complete preprocessing-token stream so directive replacement
+	// lists and tokens beyond the retained head/tail window remain visible.
+	// KMP plus the start-offset ring bounds working memory by the query symbol,
+	// independent of source size and occurrence count.
+	failure := make([]int, len(want))
+	for index, prefix := 1, 0; index < len(want); index++ {
+		for prefix > 0 && want[index] != want[prefix] {
+			prefix = failure[prefix-1]
 		}
-		if !visit(lineNo+1, additional) {
+		if want[index] == want[prefix] {
+			prefix++
+		}
+		failure[index] = prefix
+	}
+	starts := make([]int, len(want))
+	seen, matched := 0, 0
+	directiveIndex, activeDirective := 0, -1
+	nextLine, logicalOnLine := 1, 0
+	var logicalColumns []int
+	var physicalColumns []int
+	var addedColumns []int
+	var removedColumns []int
+	stopped := false
+	emitThrough := func(lastLine int) bool {
+		lastLine = min(lastLine, len(lines))
+		for nextLine <= lastLine {
+			var keepGoing bool
+			if visitAt != nil {
+				physicalColumns = physicalColumns[:0]
+				physicalCount := cppWalkCodeCompositeOccurrences(
+					lines[nextLine-1], symbol, analysis.lineStarts[nextLine-1],
+					analysis.lexed.opaqueSpans,
+					func(column int) {
+						physicalColumns = append(physicalColumns, column)
+					},
+				)
+				addedColumns = addedColumns[:0]
+				removedColumns = removedColumns[:0]
+				for logicalIndex, physicalIndex := 0, 0; logicalIndex < len(logicalColumns) ||
+					physicalIndex < len(physicalColumns); {
+					switch {
+					case physicalIndex == len(physicalColumns) ||
+						logicalIndex < len(logicalColumns) &&
+							logicalColumns[logicalIndex] < physicalColumns[physicalIndex]:
+						addedColumns = append(addedColumns, logicalColumns[logicalIndex])
+						logicalIndex++
+					case logicalIndex == len(logicalColumns) ||
+						physicalColumns[physicalIndex] < logicalColumns[logicalIndex]:
+						removedColumns = append(removedColumns, physicalColumns[physicalIndex])
+						physicalIndex++
+					default:
+						logicalIndex++
+						physicalIndex++
+					}
+				}
+				keepGoing = visitAt(
+					nextLine, logicalOnLine-physicalCount,
+					addedColumns, removedColumns,
+				)
+			} else {
+				physicalCount := cppCountCodeCompositeOccurrences(
+					lines[nextLine-1], symbol, analysis.lineStarts[nextLine-1],
+					analysis.lexed.opaqueSpans,
+				)
+				keepGoing = visit(nextLine, logicalOnLine-physicalCount)
+			}
+			if !keepGoing {
+				stopped = true
+				return false
+			}
+			nextLine++
+			logicalOnLine = 0
+			logicalColumns = logicalColumns[:0]
+		}
+		return true
+	}
+	record := func(lineNo, start int) bool {
+		if lineNo < nextLine {
 			return true
 		}
+		if !emitThrough(lineNo - 1) {
+			return false
+		}
+		logicalOnLine++
+		if visitAt != nil && lineNo >= 1 && lineNo <= len(analysis.lineStarts) {
+			logicalColumns = append(
+				logicalColumns,
+				start-analysis.lineStarts[lineNo-1]+1,
+			)
+		}
+		return true
+	}
+
+	cppWalkLogicalCodeTokens(analysis, nil, func(token cToken) bool {
+		for directiveIndex < len(analysis.lexed.directiveSpans) &&
+			analysis.lexed.directiveSpans[directiveIndex].end <= token.start {
+			directiveIndex++
+		}
+		currentDirective := -1
+		if directiveIndex < len(analysis.lexed.directiveSpans) {
+			span := analysis.lexed.directiveSpans[directiveIndex]
+			if span.start <= token.start && token.start < span.end {
+				currentDirective = directiveIndex
+			}
+		}
+		if currentDirective != activeDirective {
+			// A preprocessing directive is its own logical token sequence: its
+			// replacement list cannot join code on an adjacent physical line.
+			matched = 0
+			activeDirective = currentDirective
+		}
+
+		starts[seen%len(starts)] = token.start
+		seen++
+		for matched > 0 && token.text != want[matched] {
+			matched = failure[matched-1]
+		}
+		if token.text == want[matched] {
+			matched++
+		}
+		if matched != len(want) {
+			return true
+		}
+
+		start := starts[(seen-len(want))%len(starts)]
+		matched = failure[matched-1]
+		return record(cppLineAt(analysis.lineStarts, start), start)
+	})
+	if !stopped {
+		_ = emitThrough(len(lines))
 	}
 	return true
+}
+
+func cppCountCodeCompositeOccurrences(
+	line, symbol string,
+	lineStart int,
+	opaqueSpans []cByteSpan,
+) int {
+	return cppWalkCodeCompositeOccurrences(
+		line, symbol, lineStart, opaqueSpans, nil,
+	)
+}
+
+func cppWalkCodeCompositeOccurrences(
+	line, symbol string,
+	lineStart int,
+	opaqueSpans []cByteSpan,
+	visit func(column int),
+) int {
+	count := 0
+	cppWalkCompositeOccurrences(line, symbol, func(start int) {
+		absoluteStart := lineStart + start
+		absoluteEnd := absoluteStart + len(symbol)
+		spanIndex := sort.Search(len(opaqueSpans), func(index int) bool {
+			return opaqueSpans[index].end > absoluteStart
+		})
+		if spanIndex == len(opaqueSpans) || opaqueSpans[spanIndex].start >= absoluteEnd {
+			count++
+			if visit != nil {
+				visit(start + 1)
+			}
+		}
+	})
+	return count
 }
 
 func cppSymbolTokenTexts(symbol string) []string {

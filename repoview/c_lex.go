@@ -626,9 +626,14 @@ func (lexer *cLexer) finishStreamFrame(closingToken cToken) {
 		if owner.name.kind == cTokenIdentifier && cSourceIdentifier(owner.name.text) &&
 			!cKeyword(owner.name.text) {
 			line, column := lexer.lineColumn(owner.name.start)
+			ownedEndLine, ownedEndColumn := lexer.lineColumn(closingToken.end)
+			if ownedEndLine != scopeEnd {
+				ownedEndColumn = 0
+			}
 			lexer.streamDefinitions = append(lexer.streamDefinitions, sourceDefinition{
 				symbol: owner.name.text, line: line, column: column,
-				scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: true,
+				scopeStart: scopeStart, scopeEnd: scopeEnd,
+				ownedEndColumn: ownedEndColumn, ownsScope: true,
 			})
 		}
 	}
@@ -2037,9 +2042,18 @@ func (resolver *cLexicalResolver) addOwningDefinition(
 	scopeEnd := resolver.lexer.lineAt(
 		max(token.end, resolver.lexer.tokens[closingIndex].end) - 1,
 	)
+	ownedEndColumn := 0
+	closingToken := resolver.lexer.tokens[closingIndex]
+	if closingToken.text == "}" {
+		ownedEndLine, exactEndColumn := resolver.lexer.lineColumn(closingToken.end)
+		if ownedEndLine == scopeEnd {
+			ownedEndColumn = exactEndColumn
+		}
+	}
 	definition := sourceDefinition{
 		symbol: token.text, line: line, column: column,
-		scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: true,
+		scopeStart: scopeStart, scopeEnd: scopeEnd,
+		ownedEndColumn: ownedEndColumn, ownsScope: true,
 	}
 	spliced := token.end-token.start != len(token.text)
 	lineRecovery := resolver.lexer.recoveryLines[line]

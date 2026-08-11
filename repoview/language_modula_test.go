@@ -26,6 +26,7 @@ func TestModulaBackendContractRegistrationAndGoModGate(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: modulaTestImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: modulaTestImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: modulaTestImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: modulaTestImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: modulaTestImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -854,6 +855,91 @@ END Qualified.
 	}
 	if got, want := modulaTestResultLines(found.Results), []int{3, 4, 5, 7, 8}; !slices.Equal(got, want) {
 		t.Fatalf("qualified trivia-spanning find lines = %#v, want %#v", got, want)
+	}
+}
+
+func TestModulaQualifiedOccurrenceWalkerReportsExactAddedColumns(t *testing.T) {
+	t.Parallel()
+
+	const source = `MODULE Qualified;
+BEGIN
+  Pkg.Target;
+  Pkg . Target;
+  Pkg.
+    Target;
+  Pkg.(* bridge *)Target;
+  Pkg.(* multi-line
+         bridge *)Target;
+END Qualified.
+`
+	lines := modulaTestLines(source)
+	prepared := newModulaLanguage().prepareSource(lines).(modulaLanguage)
+	type correction struct {
+		adjustment int
+		added      []int
+		removed    []int
+	}
+	corrections := make(map[int]correction)
+	handled := prepared.walkAdditionalSymbolOccurrencesAt(
+		lines, "Pkg.Target",
+		func(
+			lineNo, adjustment int,
+			addedColumns, removedColumns []int,
+		) bool {
+			if adjustment != 0 || len(addedColumns) > 0 || len(removedColumns) > 0 {
+				corrections[lineNo] = correction{
+					adjustment: adjustment,
+					added:      append([]int(nil), addedColumns...),
+					removed:    append([]int(nil), removedColumns...),
+				}
+			}
+			return true
+		},
+	)
+	want := map[int]correction{
+		4: {adjustment: 1, added: []int{strings.Index(lines[3], "Pkg") + 1}},
+		5: {adjustment: 1, added: []int{strings.Index(lines[4], "Pkg") + 1}},
+		7: {adjustment: 1, added: []int{strings.Index(lines[6], "Pkg") + 1}},
+		8: {adjustment: 1, added: []int{strings.Index(lines[7], "Pkg") + 1}},
+	}
+	if !handled || !reflect.DeepEqual(corrections, want) {
+		t.Fatalf("qualified positional corrections = %#v, handled=%v; want %#v",
+			corrections, handled, want)
+	}
+}
+
+func TestModulaFindUsesTriviaCorrectionPositionsOnDenseLines(t *testing.T) {
+	for _, test := range []struct {
+		name, source, want string
+	}{
+		{
+			name: "trivia-spanning reference",
+			source: "MODULE C; PROCEDURE First; BEGIN END First; " +
+				"PROCEDURE Second; BEGIN Pkg.(*x*)Target END Second; BEGIN END C.\n",
+			want: "Second",
+		},
+		{
+			name: "earlier physical reference",
+			source: "MODULE C; PROCEDURE First; BEGIN Pkg.Target END First; " +
+				"PROCEDURE Second; BEGIN Pkg.(*x*)Target END Second; BEGIN END C.\n",
+			want: "First",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFile(t, root, "Dense.mod", test.source)
+			found, err := mustView(t, root).Find("Pkg.Target", Options{
+				Include: IncludeRefs, Return: ReturnScope,
+				NoComments: true, NoStrings: true,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(found.Results) != 1 || found.Results[0].Scope != test.want {
+				t.Fatalf("dense positional Find = %#v, want scope %q",
+					found.Results, test.want)
+			}
+		})
 	}
 }
 

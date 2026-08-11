@@ -307,6 +307,44 @@ func TestCSharpTinyLexDoesNotEagerlyAllocateRetentionTail(t *testing.T) {
 	}
 }
 
+func TestCSharpCompositeOccurrenceCorrectionsUseBoundedLineStorage(t *testing.T) {
+	lines := make([]string, cMaximumIndexedFindLines+1)
+	lines[len(lines)-1] = "Alpha /* qualified-name trivia */ . Beta"
+	backend := prepareLanguageBackend(newCSharpLanguage(), lines).(csharpLanguage)
+
+	result := testing.Benchmark(func(b *testing.B) {
+		b.Helper()
+		for range b.N {
+			visited := 0
+			handled := backend.walkAdditionalSymbolOccurrencesAt(
+				lines, "Alpha.Beta",
+				func(
+					lineNo, adjustment int,
+					addedColumns, removedColumns []int,
+				) bool {
+					visited++
+					if lineNo == len(lines) && (adjustment != 1 ||
+						!slices.Equal(addedColumns, []int{1}) ||
+						len(removedColumns) != 0) {
+						panic("bounded composite correction lost its tail match")
+					}
+					return true
+				},
+			)
+			if !handled || visited != len(lines) {
+				panic("bounded composite correction stopped before EOF")
+			}
+		}
+	})
+	// The source itself is roughly one byte per empty physical line. Leave
+	// generous copying and runtime headroom while rejecting dense int/slice
+	// indexes whose headers alone consume many MiB at this line count.
+	if bytes := result.AllocedBytesPerOp(); bytes > 2<<20 {
+		t.Fatalf("composite occurrence reconciliation allocated %d bytes/op, want <=2MiB",
+			bytes)
+	}
+}
+
 func TestCSharpPreparedBackendRefreshesMutatedInputAndIsConcurrent(t *testing.T) {
 	first := csharpTestLines("class First { void Work() { Target(); } }")
 	second := csharpTestLines("class Second { void Other() { } }")

@@ -40,6 +40,9 @@ func TestJavaBackendContractAndPublicIntegration(t *testing.T) {
 	if _, ok := any(backend).(sourceSymbolOccurrenceAugmenter); !ok {
 		t.Fatal("Java backend does not augment split qualified-name occurrences")
 	}
+	if _, ok := any(backend).(sourceSymbolOccurrencePositionAugmenter); !ok {
+		t.Fatal("Java backend does not position split qualified-name occurrences")
+	}
 	if registered := languageForExtension(".java"); registered.name() != "java" {
 		t.Fatalf("registered .java backend = %q, want java", registered.name())
 	} else if _, ok := registered.(javaLanguage); !ok {
@@ -1153,7 +1156,11 @@ func javaTestLines(source string) []string {
 func javaDefinitionSummaries(definitions []sourceDefinition) []javaDefinitionSummary {
 	result := make([]javaDefinitionSummary, 0, len(definitions))
 	for _, definition := range definitions {
-		result = append(result, javaDefinitionSummary(definition))
+		result = append(result, javaDefinitionSummary{
+			symbol: definition.symbol, line: definition.line, column: definition.column,
+			scopeStart: definition.scopeStart, scopeEnd: definition.scopeEnd,
+			ownsScope: definition.ownsScope,
+		})
 	}
 	return result
 }

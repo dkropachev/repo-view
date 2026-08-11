@@ -25,6 +25,154 @@ type qualityCriterion struct {
 	NoneOf []string `json:"none_of"`
 }
 
+func TestTrackedExperimentSummaryMatchesLatestResolution(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolution, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "suite", "latest-resolution.md",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement.md",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBytes, err := os.ReadFile(filepath.Join(
+		repoRoot, "experiments", "lsp-replacement", "suite", "cases.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	type trackedCase struct {
+		ID       string `json:"id"`
+		Evidence string `json:"evidence"`
+		Live     struct {
+			Commit  string `json:"commit"`
+			Base    string `json:"base"`
+			Profile string `json:"profile"`
+		} `json:"live"`
+		Assertions []struct {
+			Field    string `json:"field"`
+			Operator string `json:"operator"`
+			Value    any    `json:"value"`
+		} `json:"assertions"`
+	}
+	var manifest struct {
+		Cases []trackedCase `json:"cases"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	caseByID := func(id string) trackedCase {
+		t.Helper()
+		for _, current := range manifest.Cases {
+			if current.ID == id {
+				return current
+			}
+		}
+		t.Fatalf("tracked case %q is absent", id)
+		return trackedCase{}
+	}
+	assertionNumber := func(current trackedCase, field string) int {
+		t.Helper()
+		for _, assertion := range current.Assertions {
+			if assertion.Field == field && assertion.Operator == "eq" {
+				value, ok := assertion.Value.(float64)
+				if !ok || value != float64(int(value)) {
+					t.Fatalf("case %s assertion %s = %#v", current.ID, field, assertion.Value)
+				}
+				return int(value)
+			}
+		}
+		t.Fatalf("case %s lacks exact assertion %s", current.ID, field)
+		return 0
+	}
+
+	cases := regexp.MustCompile(`(?m)^- Cases: \*\*([0-9]+)/([0-9]+) passed\*\*`).FindSubmatch(resolution)
+	checks := regexp.MustCompile(`(?m)^- Checks: \*\*([0-9]+)/([0-9]+) passed\*\*`).FindSubmatch(resolution)
+	if len(cases) != 3 || len(checks) != 3 {
+		t.Fatalf("latest resolution is missing case/check totals:\n%s", resolution)
+	}
+	want := fmt.Sprintf(
+		"- resolution: %s/%s cases, %s/%s checks;",
+		cases[1], cases[2], checks[1], checks[2],
+	)
+	if !strings.Contains(string(summary), want) {
+		t.Fatalf("tracked summary is stale: want %q", want)
+	}
+
+	shortCases := []struct {
+		id    string
+		label string
+	}{
+		{id: "01-simple-explain-accepted", label: "Short explain"},
+		{id: "02-simple-review-accepted", label: "Short review"},
+	}
+	for _, expected := range shortCases {
+		current := caseByID(expected.id)
+		calls := fmt.Sprintf(
+			"%d/%d/%d",
+			assertionNumber(current, "tool_call_count"),
+			assertionNumber(current, "repo_view_tool_call_count"),
+			assertionNumber(current, "other_tool_call_count"),
+		)
+		row := fmt.Sprintf(
+			"| %s | `%s` | %s |",
+			expected.label, strings.TrimPrefix(current.Evidence, "runs/"), calls,
+		)
+		if !strings.Contains(string(summary), row) {
+			t.Errorf("tracked summary lacks current short-case row prefix %q", row)
+		}
+		for _, identity := range []string{
+			current.Live.Commit,
+			current.Live.Base,
+			current.Live.Profile,
+		} {
+			if identity == "" || !strings.Contains(string(summary), identity) {
+				t.Errorf("tracked summary lacks %s identity %q", current.ID, identity)
+			}
+		}
+	}
+
+	deep := caseByID("16-deep-verified-accepted")
+	deepRows := regexp.MustCompile(
+		`(?m)^\| (deep-(?:explain|review)) \| ([0-9]+(?:\.[0-9]+)?%) \| `+
+			`([0-9]+/[0-9]+/[0-9]+) \| ([0-9]+%) \| ([^|]+) \|`,
+	).FindAllSubmatch(resolution, -1)
+	if len(deepRows) != 2 {
+		t.Fatalf("latest resolution is missing deep result rows:\n%s", resolution)
+	}
+	for _, fields := range deepRows {
+		label := strings.Replace(string(fields[1]), "deep-", "Deep ", 1)
+		row := fmt.Sprintf(
+			"| %s | `%s` | %s | %s | %s | %s |",
+			label,
+			strings.TrimPrefix(deep.Evidence, "runs/"),
+			fields[3],
+			fields[2],
+			fields[4],
+			strings.TrimSpace(string(fields[5])),
+		)
+		if !strings.Contains(string(summary), row) {
+			t.Errorf("tracked summary lacks current deep-case row %q", row)
+		}
+	}
+	for _, identity := range []string{
+		deep.Live.Commit,
+		deep.Live.Base,
+		deep.Live.Profile,
+	} {
+		if identity == "" || !strings.Contains(string(summary), identity) {
+			t.Errorf("tracked summary lacks deep-case identity %q", identity)
+		}
+	}
+}
+
 func TestValidateJudgeRunEnforcesNotWorseSemantics(t *testing.T) {
 	valid := func() qualityJudgeRun {
 		return qualityJudgeRun{

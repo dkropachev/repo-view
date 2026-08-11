@@ -1,10 +1,12 @@
 package repoview
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	pathpkg "path"
@@ -14,8 +16,21 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dkropachev/repo-view/internal/gitdiffcontract"
+)
+
+const (
+	maximumPatchBytes      = 16 << 20
+	maximumGitStderrBytes  = 64 << 10
+	maximumHunkHeaderBytes = 512
+)
+
+var errSnapshotBudget = errors.New("untracked patch snapshot exceeds byte limit")
+
+var changedHunkPattern = regexp.MustCompile(
+	`^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@`,
 )
 
 const (
@@ -81,15 +96,18 @@ const (
 )
 
 type Options struct {
-	Return         Return
-	Include        Include
-	Base           string
-	PathGlobs      []string
-	ExcludeGlobs   []string
-	MaxCodeLines   int
-	Context        int
-	Limit          int
-	MaxPatchLines  int
+	Return        Return
+	Include       Include
+	Base          string
+	PathGlobs     []string
+	ExcludeGlobs  []string
+	MaxCodeLines  int
+	Context       int
+	Limit         int
+	MaxPatchLines int
+	// ContextSet distinguishes an explicitly requested zero-line context from
+	// the zero value of Options, which retains the default context of five.
+	ContextSet     bool
 	ChangedOnly    bool
 	NoComments     bool
 	NoStrings      bool
@@ -161,6 +179,12 @@ type ChangedResponse struct {
 	ResultsTruncated bool              `json:"results_truncated"`
 }
 
+type positionedFindScopeResolver interface {
+	definitionColumns(lineNo int, symbol string) []int
+	navigationScopeAt(lineNo, column int, structuralLine string) (int, int)
+	scopeNameAt(lineNo, column int, structuralLine string) string
+}
+
 func (r *RepoView) Find(symbol string, opts Options) (FindResponse, error) {
 	if err := r.checkContext(); err != nil {
 		return FindResponse{}, err
@@ -227,8 +251,11 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		if opts.ChangedOnly && !changed[rel] {
 			continue
 		}
-		lines, err := readLines(path)
+		lines, _, err := r.readRelativeLines(rel)
 		if err != nil {
+			if errors.Is(err, errRepositoryRootChanged) {
+				return nil, err
+			}
 			continue
 		}
 		language := prepareLanguageBackend(
@@ -245,6 +272,8 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		if findScopeResolver == nil {
 			definitions = language.sourceDefinitions(lines)
 		}
+		positionedScopeResolver, hasPositionedScopeResolver :=
+			findScopeResolver.(positionedFindScopeResolver)
 		skipLines := language.ignoredSearchLines(
 			lines,
 			opts.DropComments || opts.NoComments,
@@ -262,10 +291,24 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 		}
 		var findSnippet preparedFindSnippet
 		findSnippetPrepared := false
+		var structuralLines []string
+		structuralLinesPrepared := false
+		structuralLine := func(lineNo int) string {
+			if !structuralLinesPrepared {
+				structuralLines = language.searchLines(lines, true, true)
+				structuralLinesPrepared = true
+			}
+			if lineNo < 1 || lineNo > len(structuralLines) {
+				return ""
+			}
+			return structuralLines[lineNo-1]
+		}
 		processStateLine := func(
 			state *symbolState,
 			lineOccurrenceCount func(string) int,
+			lineOccurrenceColumns func(string) []int,
 			lineNo, occurrenceAdjustment int,
+			addedColumns, removedColumns []int,
 		) bool {
 			// No symbol can receive more than the shared limit. Keep one
 			// additional result so truncation remains observable.
@@ -291,6 +334,16 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 			}
 			if occurrences == 0 {
 				return true
+			}
+			var hitColumns, definitionHitColumns []int
+			if hasPositionedScopeResolver {
+				hitColumns = lineOccurrenceColumns(line)
+				hitColumns = reconcileOccurrenceColumns(
+					hitColumns, addedColumns, removedColumns,
+				)
+				definitionHitColumns = positionedScopeResolver.definitionColumns(
+					lineNo, state.symbol,
+				)
 			}
 			var definitionsOnLine int
 			if findScopeResolver != nil {
@@ -320,6 +373,13 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 					}
 					preparedSnippet = &findSnippet
 				}
+				hitColumn := resultHitColumn(
+					hitColumns, definitionHitColumns, isDefinition,
+				)
+				hitStructuralLine := ""
+				if hasPositionedScopeResolver && hitColumn > 0 {
+					hitStructuralLine = structuralLine(lineNo)
+				}
 				result := r.resultForFindHit(
 					state.symbol,
 					kindForMatch(isDefinition),
@@ -327,6 +387,8 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 					language,
 					lines,
 					lineNo,
+					hitColumn,
+					hitStructuralLine,
 					opts,
 					findScopeResolver,
 					preparedSnippet,
@@ -352,6 +414,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 			lineOccurrenceCount := func(line string) int {
 				return countSymbolOccurrences(line, state.symbol)
 			}
+			lineOccurrenceColumns := func(line string) []int {
+				return independentSymbolColumns(line, state.symbol)
+			}
 			if preparer, ok := language.(symbolOccurrenceCounterPreparer); ok {
 				lineOccurrenceCount = preparer.prepareSymbolOccurrenceCounter(state.symbol)
 			} else if counter, ok := language.(symbolOccurrenceCounter); ok {
@@ -359,20 +424,44 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 					return counter.countSymbolOccurrences(line, state.symbol)
 				}
 			}
+			if resolver, ok := language.(symbolOccurrenceColumnResolver); ok {
+				lineOccurrenceColumns = func(line string) []int {
+					return resolver.symbolOccurrenceColumns(line, state.symbol)
+				}
+			}
+			if walker, ok := language.(sourceSymbolOccurrencePositionAugmenter); ok &&
+				walker.walkAdditionalSymbolOccurrencesAt(
+					lines, state.symbol,
+					func(
+						lineNo, occurrenceAdjustment int,
+						addedColumns, removedColumns []int,
+					) bool {
+						return processStateLine(
+							state, lineOccurrenceCount, lineOccurrenceColumns,
+							lineNo, occurrenceAdjustment,
+							addedColumns, removedColumns,
+						)
+					},
+				) {
+				continue
+			}
 			if walker, ok := language.(sourceSymbolOccurrenceAugmenter); ok &&
 				walker.walkAdditionalSymbolOccurrences(
 					lines, state.symbol,
 					func(lineNo, occurrenceAdjustment int) bool {
 						return processStateLine(
-							state, lineOccurrenceCount,
-							lineNo, occurrenceAdjustment,
+							state, lineOccurrenceCount, lineOccurrenceColumns,
+							lineNo, occurrenceAdjustment, nil, nil,
 						)
 					},
 				) {
 				continue
 			}
 			for lineIndex := range searchLines {
-				if !processStateLine(state, lineOccurrenceCount, lineIndex+1, 0) {
+				if !processStateLine(
+					state, lineOccurrenceCount, lineOccurrenceColumns,
+					lineIndex+1, 0, nil, nil,
+				) {
 					break
 				}
 			}
@@ -403,6 +492,9 @@ func (r *RepoView) FindMany(symbols []string, opts Options) ([]FindResponse, err
 			}
 		}
 	}
+	if err := r.verifyRootIdentity(); err != nil {
+		return nil, err
+	}
 	return responses, nil
 }
 
@@ -430,6 +522,24 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 	if err != nil {
 		return InspectResponse{}, err
 	}
+	if !matchPathFilters(path, opts.PathGlobs, opts.ExcludeGlobs) {
+		return InspectResponse{}, fmt.Errorf(
+			"repository path %q is excluded by the requested path filters",
+			path,
+		)
+	}
+	if opts.ChangedOnly {
+		changed, changedErr := r.changedFileSet(opts)
+		if changedErr != nil {
+			return InspectResponse{}, changedErr
+		}
+		if !changed[path] {
+			return InspectResponse{}, fmt.Errorf(
+				"repository path %q is not changed from the requested base",
+				path,
+			)
+		}
+	}
 	if lineNo < 1 || lineNo > len(lines) {
 		return InspectResponse{}, fmt.Errorf("line %d out of range for %s", lineNo, path)
 	}
@@ -439,7 +549,7 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 		r.resultForHit(symbol, "scope", filepath.ToSlash(path), language, lines, lineNo, opts),
 	}
 	if opts.Include == IncludeImports || opts.Include == IncludeAll {
-		if result, ok := importResult(filepath.ToSlash(path), language, lines); ok {
+		if result, ok := importResult(filepath.ToSlash(path), language, lines, opts); ok {
 			results = append(results, result)
 		}
 	}
@@ -451,20 +561,26 @@ func (r *RepoView) Inspect(location string, opts Options) (InspectResponse, erro
 		relatedLimit := opts.Limit
 		if relatedLimit > 0 {
 			relatedLimit -= len(results)
-		}
-		if relatedLimit <= 0 && opts.Limit > 0 {
-			return InspectResponse{
-				Location:         location,
-				Root:             r.root,
-				Symbol:           symbol,
-				Results:          results[:opts.Limit],
-				ResultsTruncated: true,
-			}, nil
+			if relatedLimit < 0 {
+				return InspectResponse{
+					Location:         location,
+					Root:             r.root,
+					Symbol:           symbol,
+					Results:          results[:opts.Limit],
+					ResultsTruncated: true,
+				}, nil
+			}
+			if relatedLimit == 0 {
+				// The initial results exactly fill the limit. Probe for one
+				// related result so truncation reflects an actual omission.
+				relatedLimit = 1
+			}
 		}
 		related, err := r.Find(symbol, Options{
 			Include:        relatedInclude,
 			Return:         opts.Return,
 			Context:        opts.Context,
+			ContextSet:     opts.ContextSet,
 			Limit:          relatedLimit,
 			PathGlobs:      opts.PathGlobs,
 			ExcludeGlobs:   opts.ExcludeGlobs,
@@ -554,6 +670,9 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	if err := validateOptions(opts); err != nil {
 		return ChangedResponse{}, err
 	}
+	if err := r.verifyRootIdentity(); err != nil {
+		return ChangedResponse{}, err
+	}
 	baseCommit, err := r.resolveBase(opts.Base)
 	if err != nil {
 		return ChangedResponse{}, err
@@ -563,16 +682,21 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		headCommit = r.changedState.HeadCommit
 		headSubject = r.changedState.HeadSubject
 	} else {
-		headCommit, err = r.gitText("rev-parse", "HEAD")
+		headCommit, err = r.resolveOptionalHead()
 		if err != nil {
 			return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
 		}
-		headSubject, err = r.gitText("show", "-s", "--format=%s", "HEAD")
-		if err != nil {
-			return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
+		if headCommit != "" {
+			headSubject, err = r.gitText("show", "-s", "--format=%s", headCommit)
+			if err != nil {
+				return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
+			}
 		}
 	}
-	files, err := r.changedFiles(baseCommit)
+	if baseCommit != "" && headCommit == "" {
+		return ChangedResponse{}, fmt.Errorf("compare Git base without a HEAD commit")
+	}
+	files, err := r.changedFiles(baseCommit, headCommit)
 	if err != nil {
 		return ChangedResponse{}, err
 	}
@@ -594,6 +718,7 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	}
 	patch, patchTruncated, err := r.changedPatch(
 		baseCommit,
+		headCommit,
 		selectedFiles,
 		opts.MaxPatchLines,
 	)
@@ -601,40 +726,72 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 		return ChangedResponse{}, err
 	}
 	results := make([]Result, 0)
+	seenResults := make(map[string]bool)
+	appendResult := func(result Result) bool {
+		key := resultKey(result)
+		if !seenResults[key] {
+			seenResults[key] = true
+			results = append(results, result)
+		}
+		return opts.Limit <= 0 || len(results) <= opts.Limit
+	}
+
+changedFiles:
 	for _, rel := range selectedFiles {
 		if err := r.checkContext(); err != nil {
 			return ChangedResponse{}, err
 		}
 		language := languageForExtension(filepath.Ext(rel))
-		lines, cleanRel, err := r.readRelativeLines(rel)
-		if err != nil || len(lines) == 0 {
-			results = append(results, Result{Kind: "file", Path: rel, Language: language.name()})
+		var lines []string
+		var cleanRel string
+		var readErr error
+		if baseCommit != "" && r.changedState == nil {
+			lines, cleanRel, readErr = r.readGitLinesAtRevision(rel, response.HeadCommit)
+		} else {
+			lines, cleanRel, readErr = r.readRelativeLines(rel)
+		}
+		if errors.Is(readErr, errRepositoryRootChanged) {
+			return ChangedResponse{}, readErr
+		}
+		if readErr != nil || len(lines) == 0 {
+			if !appendResult(Result{Kind: "file", Path: rel, Language: language.name()}) {
+				break
+			}
 			continue
 		}
 		language = prepareLanguageBackend(language, lines)
 		rel = cleanRel
-		lineNumbers, err := r.changedLines(rel, baseCommit, len(lines))
+		lineNumbers, err := r.changedLines(rel, baseCommit, headCommit, len(lines))
 		if err != nil {
 			return ChangedResponse{}, err
 		}
 		if len(lineNumbers) == 0 {
-			lineNumbers = []int{1}
+			if !appendResult(Result{
+				Kind: "file", Path: rel, Language: language.name(),
+			}) {
+				break
+			}
+			continue
 		}
 		if opts.Return == ReturnLocations {
 			for _, span := range mergeContextRanges(len(lines), lineNumbers, 0) {
-				results = append(results, r.resultForRange(
+				if !appendResult(r.resultForRange(
 					"", "changed", rel, language, lines, span[0], span[1],
 					linesInRange(lineNumbers, span[0], span[1]), opts,
-				))
+				)) {
+					break changedFiles
+				}
 			}
 			continue
 		}
 		if opts.Return == ReturnContext {
 			for _, span := range mergeContextRanges(len(lines), lineNumbers, opts.Context) {
-				results = append(results, r.resultForRange(
+				if !appendResult(r.resultForRange(
 					"", "changed", rel, language, lines, span[0], span[1],
 					linesInRange(lineNumbers, span[0], span[1]), opts,
-				))
+				)) {
+					break changedFiles
+				}
 			}
 			continue
 		}
@@ -642,8 +799,11 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 			if lineNo < 1 || lineNo > len(lines) {
 				lineNo = 1
 			}
-			results = append(results, r.resultForHit("", "changed", rel, language, lines, lineNo, opts))
-			results = dedupeResults(results)
+			if !appendResult(r.resultForHit(
+				"", "changed", rel, language, lines, lineNo, opts,
+			)) {
+				break changedFiles
+			}
 		}
 	}
 	if opts.Limit > 0 && len(results) > opts.Limit {
@@ -653,6 +813,9 @@ func (r *RepoView) Changed(opts Options) (ChangedResponse, error) {
 	response.Patch = patch
 	response.PatchTruncated = patchTruncated
 	response.Results = results
+	if err := r.verifyRootIdentity(); err != nil {
+		return ChangedResponse{}, err
+	}
 	return response, nil
 }
 
@@ -703,7 +866,7 @@ func (r *RepoView) resultForHit(
 	opts Options,
 ) Result {
 	return r.resultForFindHit(
-		symbol, kind, rel, language, lines, lineNo, opts, nil, nil,
+		symbol, kind, rel, language, lines, lineNo, 0, "", opts, nil, nil,
 	)
 }
 
@@ -711,7 +874,8 @@ func (r *RepoView) resultForFindHit(
 	symbol, kind, rel string,
 	language languageBackend,
 	lines []string,
-	lineNo int,
+	lineNo, hitColumn int,
+	structuralLine string,
 	opts Options,
 	findScopeResolver preparedFindScopeResolver,
 	preparedSnippet *preparedFindSnippet,
@@ -719,7 +883,12 @@ func (r *RepoView) resultForFindHit(
 	start, end := lineNo, lineNo
 	switch opts.Return {
 	case ReturnScope:
-		if findScopeResolver != nil {
+		if positioned, ok := findScopeResolver.(positionedFindScopeResolver); ok &&
+			hitColumn > 0 {
+			start, end = positioned.navigationScopeAt(
+				lineNo, hitColumn, structuralLine,
+			)
+		} else if findScopeResolver != nil {
 			start, end = findScopeResolver.navigationScope(lineNo)
 		} else if resolver, ok := language.(navigationScopeResolver); ok {
 			start, end = resolver.navigationScope(lines, lineNo)
@@ -735,6 +904,14 @@ func (r *RepoView) resultForFindHit(
 	switch {
 	case kind == "def":
 		scope = symbol
+	case hitColumn > 0:
+		if positioned, ok := findScopeResolver.(positionedFindScopeResolver); ok {
+			scope = positioned.scopeNameAt(lineNo, hitColumn, structuralLine)
+		} else if findScopeResolver != nil {
+			scope = findScopeResolver.scopeName(lineNo)
+		} else {
+			scope = scopeName(lines, lineNo, language)
+		}
 	case findScopeResolver != nil:
 		scope = findScopeResolver.scopeName(lineNo)
 	default:
@@ -757,6 +934,95 @@ func (r *RepoView) resultForFindHit(
 			)
 	}
 	return result
+}
+
+func independentSymbolColumns(line, symbol string) []int {
+	if line == "" || symbol == "" || len(symbol) > len(line) {
+		return nil
+	}
+	var columns []int
+	for offset := 0; offset <= len(line)-len(symbol); {
+		relative := strings.Index(line[offset:], symbol)
+		if relative < 0 {
+			break
+		}
+		position := offset + relative
+		before, _ := utf8.DecodeLastRuneInString(line[:position])
+		afterIndex := position + len(symbol)
+		after, _ := utf8.DecodeRuneInString(line[afterIndex:])
+		if (position == 0 || !isIdent(before)) &&
+			(afterIndex == len(line) || !isIdent(after)) {
+			columns = append(columns, position+1)
+		}
+		_, size := utf8.DecodeRuneInString(line[position:])
+		offset = position + max(1, size)
+	}
+	return columns
+}
+
+func resultHitColumn(
+	occurrenceColumns, definitionColumns []int,
+	isDefinition bool,
+) int {
+	if isDefinition {
+		if len(definitionColumns) > 0 {
+			return definitionColumns[0]
+		}
+		return 0
+	}
+	if len(occurrenceColumns) == 0 {
+		return 0
+	}
+	if len(definitionColumns) == 0 {
+		return occurrenceColumns[0]
+	}
+	definitionCounts := make(map[int]int, len(definitionColumns))
+	for _, column := range definitionColumns {
+		definitionCounts[column]++
+	}
+	for _, column := range occurrenceColumns {
+		if definitionCounts[column] > 0 {
+			definitionCounts[column]--
+			continue
+		}
+		return column
+	}
+	return 0
+}
+
+func reconcileOccurrenceColumns(
+	columns, addedColumns, removedColumns []int,
+) []int {
+	if len(addedColumns) == 0 && len(removedColumns) == 0 {
+		return columns
+	}
+	removed := make(map[int]int, len(removedColumns))
+	for _, column := range removedColumns {
+		if column > 0 {
+			removed[column]++
+		}
+	}
+	corrected := make([]int, 0, len(columns)+len(addedColumns))
+	for _, column := range columns {
+		if removed[column] > 0 {
+			removed[column]--
+			continue
+		}
+		corrected = append(corrected, column)
+	}
+	for _, column := range addedColumns {
+		if column > 0 {
+			corrected = append(corrected, column)
+		}
+	}
+	sort.Ints(corrected)
+	unique := corrected[:0]
+	for _, column := range corrected {
+		if len(unique) == 0 || unique[len(unique)-1] != column {
+			unique = append(unique, column)
+		}
+	}
+	return unique
 }
 
 type preparedFindSnippet struct {
@@ -842,14 +1108,14 @@ func resultSnippetWithPrepared(
 }
 
 func normalizeOptions(opts Options, defaultReturn Return) Options {
+	if opts.Context == 0 && !opts.ContextSet {
+		opts.Context = 5
+	}
 	if opts.Include == "" {
 		opts.Include = IncludeBoth
 	}
 	if opts.Return == "" {
 		opts.Return = defaultReturn
-	}
-	if opts.Context == 0 {
-		opts.Context = 5
 	}
 	if opts.MaxCodeLines == 0 {
 		opts.MaxCodeLines = 80
@@ -1167,19 +1433,41 @@ func wantsInspectRelated(include Include) bool {
 	return include == IncludeDefs || include == IncludeRefs || include == IncludeBoth || include == IncludeAll
 }
 
-func importResult(path string, language languageBackend, lines []string) (Result, bool) {
+func importResult(
+	path string,
+	language languageBackend,
+	lines []string,
+	opts Options,
+) (Result, bool) {
 	start, end, ok := language.importRange(lines)
 	if !ok {
 		return Result{}, false
 	}
-	return Result{
+	result := Result{
 		Kind:      "imports",
 		Path:      path,
 		StartLine: start,
 		EndLine:   end,
 		Language:  language.name(),
-		Code:      strings.Join(lines[start-1:end], "\n"),
-	}, true
+	}
+	if opts.Return != ReturnLocations {
+		codeStart, codeEnd := start, end
+		switch opts.Return {
+		case ReturnLine:
+			codeEnd = codeStart
+		case ReturnContext:
+			codeStart, _ = contextRange(len(lines), start, opts.Context)
+			_, codeEnd = contextRange(len(lines), end, opts.Context)
+		case ReturnScope, ReturnLocations:
+		}
+		result.Code, result.CodeStartLine, result.CodeEndLine, result.CodeTruncated =
+			resultSnippet(language, lines, codeStart, codeEnd, start, opts)
+		if !result.CodeTruncated && (codeStart != start || codeEnd != end) {
+			result.CodeStartLine = codeStart
+			result.CodeEndLine = codeEnd
+		}
+	}
+	return result, true
 }
 
 func isKeyword(symbol string) bool {
@@ -1221,11 +1509,21 @@ func resultKey(result Result) string {
 }
 
 func (r *RepoView) changedFileSet(opts Options) (map[string]bool, error) {
+	if err := r.verifyRootIdentity(); err != nil {
+		return nil, err
+	}
 	baseCommit, err := r.resolveBase(opts.Base)
 	if err != nil {
 		return nil, err
 	}
-	files, err := r.changedFiles(baseCommit)
+	headCommit, err := r.resolveOptionalHead()
+	if err != nil {
+		return nil, err
+	}
+	if baseCommit != "" && headCommit == "" {
+		return nil, fmt.Errorf("cannot compare Git base without a HEAD commit")
+	}
+	files, err := r.changedFiles(baseCommit, headCommit)
 	if err != nil {
 		return nil, err
 	}
@@ -1236,7 +1534,7 @@ func (r *RepoView) changedFileSet(opts Options) (map[string]bool, error) {
 	return out, nil
 }
 
-func (r *RepoView) changedFiles(base string) ([]string, error) {
+func (r *RepoView) changedFiles(base, head string) ([]string, error) {
 	if r.changedState != nil {
 		if base != r.changedState.BaseCommit {
 			return nil, errors.New("changed-state cache is not bound to the requested base")
@@ -1248,11 +1546,17 @@ func (r *RepoView) changedFiles(base string) ([]string, error) {
 		return files, nil
 	}
 	if base != "" {
-		return r.gitFileList(gitdiffcontract.NameOnlyArguments(base, "HEAD")...)
+		return r.gitFileList(gitdiffcontract.NameOnlyArguments(base, head)...)
+	}
+	staged := []string{
+		"diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
+	}
+	if head != "" {
+		staged = append(staged, head)
 	}
 	commands := [][]string{
+		staged,
 		{"diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z"},
-		{"diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "-z"},
 		{"ls-files", "--others", "--exclude-standard", "-z"},
 	}
 	seen := map[string]bool{}
@@ -1273,8 +1577,176 @@ func (r *RepoView) changedFiles(base string) ([]string, error) {
 	return files, nil
 }
 
+type patchOutputCollector struct {
+	output          []byte
+	maxLines        int
+	maxBytes        int
+	lines           int
+	pendingNewlines int
+	truncated       bool
+}
+
+func newPatchOutputCollector(maxLines, maxBytes int) *patchOutputCollector {
+	return &patchOutputCollector{maxLines: maxLines, maxBytes: maxBytes}
+}
+
+func (c *patchOutputCollector) appendFragment(fragment []byte) bool {
+	if len(fragment) == 0 {
+		return true
+	}
+	if len(c.output) > 0 {
+		if !c.consume([]byte{'\n'}) {
+			return false
+		}
+	}
+	return c.consume(fragment)
+}
+
+func (c *patchOutputCollector) consume(input []byte) bool {
+	for _, character := range input {
+		if character == '\n' {
+			c.pendingNewlines++
+			// A completed command's trailing newlines are trimmed, so defer
+			// accounting until a later non-newline proves they are part of the
+			// patch. The extra bounded probe prevents an adversarial stream of
+			// only newlines from running forever.
+			if c.pendingNewlines > c.maxBytes+1 {
+				allowedNewlines := c.maxLines - c.lines
+				if len(c.output) == 0 {
+					allowedNewlines = c.maxLines - 1
+				}
+				c.appendNewlines(min(
+					allowedNewlines,
+					c.maxBytes-len(c.output),
+				))
+				c.pendingNewlines = 0
+				c.truncated = true
+				return false
+			}
+			continue
+		}
+
+		candidateLines := c.lines + c.pendingNewlines
+		if len(c.output) == 0 {
+			candidateLines = c.pendingNewlines + 1
+		}
+		if candidateLines > c.maxLines {
+			allowedNewlines := c.maxLines - c.lines
+			if len(c.output) == 0 {
+				allowedNewlines = c.maxLines - 1
+			}
+			c.appendNewlines(min(allowedNewlines, c.maxBytes-len(c.output)))
+			c.pendingNewlines = 0
+			c.truncated = true
+			return false
+		}
+
+		requiredBytes := c.pendingNewlines + 1
+		remainingBytes := c.maxBytes - len(c.output)
+		if requiredBytes > remainingBytes {
+			newlines := min(c.pendingNewlines, remainingBytes)
+			c.appendNewlines(newlines)
+			remainingBytes -= newlines
+			if remainingBytes > 0 {
+				c.output = append(c.output, character)
+			}
+			c.pendingNewlines = 0
+			c.truncated = true
+			return false
+		}
+
+		wasEmpty := len(c.output) == 0
+		c.appendNewlines(c.pendingNewlines)
+		c.output = append(c.output, character)
+		if wasEmpty {
+			c.lines = c.pendingNewlines + 1
+		} else {
+			c.lines += c.pendingNewlines
+		}
+		c.pendingNewlines = 0
+	}
+	return true
+}
+
+func (c *patchOutputCollector) appendNewlines(count int) {
+	for range max(0, count) {
+		c.output = append(c.output, '\n')
+	}
+}
+
+func (c *patchOutputCollector) commitPendingNewlines() {
+	remaining := c.maxBytes - len(c.output)
+	c.appendNewlines(min(c.pendingNewlines, max(0, remaining)))
+	c.pendingNewlines = 0
+}
+
+type boundedByteWriter struct {
+	data  []byte
+	limit int
+}
+
+func (w *boundedByteWriter) Write(input []byte) (int, error) {
+	remaining := max(0, w.limit-len(w.data))
+	w.data = append(w.data, input[:min(len(input), remaining)]...)
+	return len(input), nil
+}
+
+func boundedPatchCommandOutput(
+	cmd *exec.Cmd,
+	maxLines, maxBytes int,
+	allowExitOne bool,
+) ([]byte, bool, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, false, err
+	}
+	stderr := &boundedByteWriter{limit: maximumGitStderrBytes}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, false, err
+	}
+
+	collector := newPatchOutputCollector(maxLines, maxBytes)
+	buffer := make([]byte, 32<<10)
+	var readErr error
+	for {
+		count, currentErr := stdout.Read(buffer)
+		if count > 0 && !collector.consume(buffer[:count]) {
+			_ = cmd.Process.Kill()
+			_ = stdout.Close()
+			break
+		}
+		if currentErr != nil {
+			if !errors.Is(currentErr, io.EOF) {
+				readErr = currentErr
+			}
+			break
+		}
+	}
+	waitErr := cmd.Wait()
+	if collector.truncated {
+		collector.commitPendingNewlines()
+		return collector.output, true, nil
+	}
+	if readErr != nil {
+		return nil, false, readErr
+	}
+	if waitErr == nil {
+		return collector.output, false, nil
+	}
+	var exitErr *exec.ExitError
+	if allowExitOne && errors.As(waitErr, &exitErr) && exitErr.ExitCode() == 1 {
+		return collector.output, false, nil
+	}
+	detail := strings.TrimSpace(string(stderr.data))
+	if detail != "" {
+		return nil, false, fmt.Errorf("%w: %s", waitErr, detail)
+	}
+	return nil, false, waitErr
+}
+
 func (r *RepoView) changedPatch(
-	base string,
+	base, head string,
 	files []string,
 	maxLines int,
 ) (string, bool, error) {
@@ -1303,9 +1775,19 @@ func (r *RepoView) changedPatch(
 		patch, truncated := truncatePatchLines(strings.Join(outputs, "\n"), maxLines)
 		return patch, truncated, nil
 	}
-	var outputs []string
-	aggregateOutputBytes := 0
-	commands := [][]string{{
+	patch := newPatchOutputCollector(maxLines, maximumPatchBytes)
+	staged := []string{
+		"diff",
+		"--cached",
+		"--no-color",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--find-renames",
+	}
+	if head != "" {
+		staged = append(staged, head)
+	}
+	commands := [][]string{staged, {
 		"diff",
 		"--no-color",
 		"--no-ext-diff",
@@ -1313,44 +1795,29 @@ func (r *RepoView) changedPatch(
 		"--find-renames",
 	}}
 	if base != "" {
-		commands = nil
-		for _, file := range files {
-			arguments := gitdiffcontract.PatchArguments(base, "HEAD")
-			commands = append(commands, append(arguments, file))
-		}
-	} else {
-		commands = append(commands, []string{
-			"diff",
-			"--cached",
-			"--no-color",
-			"--no-ext-diff",
-			"--no-textconv",
-			"--find-renames",
-		})
+		commands = [][]string{gitdiffcontract.PatchArguments(base, head)}
 	}
 	for _, args := range commands {
 		if base == "" {
 			args = append(args, "--")
-			args = append(args, files...)
 		}
-		var output []byte
-		var err error
-		if base != "" {
-			output, err = r.gitOutputLimit(maximumPerFilePatchBytes, args...)
-		} else {
-			output, err = r.gitOutput(args...)
-		}
+		args = append(args, files...)
+		cmd := r.gitCommand(args...)
+		output, truncated, err := boundedPatchCommandOutput(
+			cmd,
+			maxLines,
+			maximumPatchBytes,
+			false,
+		)
 		if err != nil {
 			return "", false, fmt.Errorf("read changed patch: %w", err)
 		}
-		if base != "" {
-			if len(output) > maximumAggregatePatchBytes-aggregateOutputBytes {
-				return "", false, errors.New("changed patches exceed their aggregate limit")
-			}
-			aggregateOutputBytes += len(output)
+		appended := patch.appendFragment(output)
+		if truncated {
+			patch.commitPendingNewlines()
 		}
-		if len(output) > 0 {
-			outputs = append(outputs, strings.TrimRight(string(output), "\n"))
+		if truncated || !appended {
+			return string(patch.output), true, nil
 		}
 	}
 	if base == "" {
@@ -1360,35 +1827,40 @@ func (r *RepoView) changedPatch(
 		if err != nil {
 			return "", false, fmt.Errorf("list untracked changed files: %w", err)
 		}
+		gitDir := ""
+		if len(untracked) > 0 {
+			gitDir, err = r.absoluteGitDir()
+			if err != nil {
+				return "", false, err
+			}
+		}
 		for _, rel := range untracked {
-			if _, _, err := r.resolveRegularPath(rel); err != nil {
+			clean, resolveErr := r.validateRelativeRegularFile(rel)
+			if resolveErr != nil {
 				continue
 			}
-			output, diffErr := r.gitOutput(
-				"diff",
-				"--no-index",
-				"--no-color",
-				"--no-ext-diff",
-				"--no-textconv",
-				"--",
-				os.DevNull,
-				rel,
+			output, truncated, diffErr := r.untrackedFilePatch(
+				clean,
+				gitDir,
+				maxLines,
+				maximumPatchBytes,
 			)
-			var exitErr *exec.ExitError
-			var closeErr *gitExecutableCloseError
-			if diffErr != nil &&
-				(errors.As(diffErr, &closeErr) ||
-					!errors.As(diffErr, &exitErr) || exitErr.ExitCode() != 1) {
+			if errors.Is(diffErr, errSnapshotBudget) {
+				return string(patch.output), true, nil
+			}
+			if diffErr != nil {
 				return "", false, fmt.Errorf("read untracked patch for %s: %w", rel, diffErr)
 			}
-			if len(output) > 0 {
-				outputs = append(outputs, strings.TrimRight(string(output), "\n"))
+			appended := patch.appendFragment(output)
+			if truncated {
+				patch.commitPendingNewlines()
+			}
+			if truncated || !appended {
+				return string(patch.output), true, nil
 			}
 		}
 	}
-	patch := strings.Join(outputs, "\n")
-	truncatedPatch, truncated := truncatePatchLines(patch, maxLines)
-	return truncatedPatch, truncated, nil
+	return string(patch.output), false, nil
 }
 
 func truncatePatchLines(patch string, maxLines int) (string, bool) {
@@ -1397,6 +1869,103 @@ func truncatePatchLines(patch string, maxLines int) (string, bool) {
 		return strings.Join(lines[:maxLines], "\n"), true
 	}
 	return patch, false
+}
+
+func (r *RepoView) untrackedFilePatch(
+	rel, gitDir string,
+	maxLines, maxBytes int,
+) ([]byte, bool, error) {
+	snapshotRoot, err := os.MkdirTemp("", "repo-view-untracked-patch-")
+	if err != nil {
+		return nil, false, err
+	}
+	defer os.RemoveAll(snapshotRoot)
+	snapshotBytesRemaining := int64(maxBytes)
+
+	snapshotPath := filepath.Join(snapshotRoot, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o700); err != nil {
+		return nil, false, err
+	}
+	if err := r.snapshotRelativeRegularFile(
+		rel,
+		snapshotPath,
+		&snapshotBytesRemaining,
+	); err != nil {
+		return nil, false, err
+	}
+	if err := r.snapshotGitAttributes(
+		rel,
+		snapshotRoot,
+		&snapshotBytesRemaining,
+	); err != nil {
+		return nil, false, err
+	}
+	cmd := r.gitCommand(
+		"--git-dir="+gitDir,
+		"--work-tree="+snapshotRoot,
+		"diff",
+		"--no-index",
+		"--no-color",
+		"--no-ext-diff",
+		"--no-textconv",
+		"--",
+		os.DevNull,
+		rel,
+	)
+	cmd.Dir = snapshotRoot
+	return boundedPatchCommandOutput(cmd, maxLines, maxBytes, true)
+}
+
+func (r *RepoView) snapshotGitAttributes(
+	rel, snapshotRoot string,
+	snapshotBytesRemaining *int64,
+) error {
+	directories := []string{""}
+	if directory := pathpkg.Dir(rel); directory != "." {
+		current := ""
+		for _, component := range strings.Split(directory, "/") {
+			current = pathpkg.Join(current, component)
+			directories = append(directories, current)
+		}
+	}
+	for _, directory := range directories {
+		attributePath := pathpkg.Join(directory, ".gitattributes")
+		if attributePath == rel {
+			continue
+		}
+		clean, err := r.validateRelativeRegularFile(attributePath)
+		if err != nil {
+			continue
+		}
+		snapshotPath := filepath.Join(snapshotRoot, filepath.FromSlash(clean))
+		if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o700); err != nil {
+			return err
+		}
+		if err := r.snapshotRelativeRegularFile(
+			clean,
+			snapshotPath,
+			snapshotBytesRemaining,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *RepoView) absoluteGitDir() (string, error) {
+	cmd := r.gitCommand("rev-parse", "--absolute-git-dir")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve Git metadata directory: %w", err)
+	}
+	directory := strings.TrimSuffix(string(output), "\n")
+	if directory == "" || strings.ContainsRune(directory, '\x00') {
+		return "", fmt.Errorf("git metadata directory is invalid")
+	}
+	if !filepath.IsAbs(directory) {
+		directory = filepath.Join(r.root, directory)
+	}
+	return filepath.Clean(directory), nil
 }
 
 func (r *RepoView) gitFileList(args ...string) ([]string, error) {
@@ -1477,12 +2046,40 @@ func (r *RepoView) VerifyBaseCommit(base string) error {
 	return nil
 }
 
+func (r *RepoView) resolveOptionalHead() (string, error) {
+	if r.changedState != nil {
+		return r.changedState.HeadCommit, nil
+	}
+	output, err := r.gitOutput(
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		"--end-of-options",
+		"HEAD^{commit}",
+	)
+	if err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return "", nil
+		}
+		return "", fmt.Errorf("resolve Git HEAD commit: %w", err)
+	}
+	resolved := strings.TrimSpace(string(output))
+	if !canonicalGitObjectID(resolved) {
+		return "", fmt.Errorf("git HEAD did not resolve canonically")
+	}
+	return resolved, nil
+}
+
 func (r *RepoView) gitText(args ...string) (string, error) {
 	output, err := r.gitOutput(args...)
 	return strings.TrimSpace(string(output)), err
 }
 
-func (r *RepoView) changedLines(rel, base string, sourceLineCount int) ([]int, error) {
+func (r *RepoView) changedLines(
+	rel, base, head string,
+	sourceLineCount int,
+) ([]int, error) {
 	if r.changedState != nil {
 		if base != r.changedState.BaseCommit {
 			return nil, errors.New("changed-state cache is not bound to the requested base")
@@ -1513,10 +2110,15 @@ func (r *RepoView) changedLines(rel, base string, sourceLineCount int) ([]int, e
 		}
 		return lines, nil
 	}
+	if base == "" && head == "" {
+		if sourceLineCount > maximumExpandedChangedLines {
+			return nil, errors.New("changed-line expansion exceeds its limit")
+		}
+		return integerRange(1, sourceLineCount), nil
+	}
 	var args []string
 	if base != "" {
-		args = gitdiffcontract.ChangedLineArguments(base, "HEAD")
-		args = append(args, rel)
+		args = gitdiffcontract.ChangedLineArguments(base, head)
 	} else {
 		args = []string{
 			"diff",
@@ -1524,55 +2126,168 @@ func (r *RepoView) changedLines(rel, base string, sourceLineCount int) ([]int, e
 			"--no-ext-diff",
 			"--no-textconv",
 			"--unified=0",
-			"--",
-			rel,
 		}
+		// Compare HEAD directly with the working tree so staged and unstaged
+		// changes share the working tree's line-coordinate system.
+		args = append(args, head)
 	}
-	var output []byte
-	var err error
 	if base != "" {
-		output, err = r.gitOutputLimit(maximumPerFilePatchBytes, args...)
+		args = append(args, rel)
 	} else {
-		output, err = r.gitOutput(args...)
+		args = append(args, "--", rel)
 	}
+	cmd := r.gitCommand(args...)
+	lines, err := changedLineNumbersFromCommand(cmd, sourceLineCount)
 	if err != nil {
 		return nil, fmt.Errorf("read changed lines for %s: %w", rel, err)
 	}
-	lines, err := parseCanonicalChangedLineNumbers(output)
-	if err != nil {
-		return nil, fmt.Errorf("parse changed lines for %s: %w", rel, err)
-	}
-	if base == "" {
-		cachedArgs := []string{
-			"diff",
-			"--cached",
-			"--no-color",
-			"--no-ext-diff",
-			"--no-textconv",
-			"--unified=0",
-			"--",
-			rel,
+	if base == "" && len(lines) == 0 {
+		untracked, listErr := r.gitFileList(
+			"ls-files", "--others", "--exclude-standard", "-z", "--", rel,
+		)
+		if listErr != nil {
+			return nil, fmt.Errorf("inspect untracked source %s: %w", rel, listErr)
 		}
-		cachedOutput, err := r.gitOutput(cachedArgs...)
-		if err != nil {
-			return nil, fmt.Errorf("read staged changed lines for %s: %w", rel, err)
+		for _, candidate := range untracked {
+			if candidate != rel {
+				continue
+			}
+			if sourceLineCount > maximumExpandedChangedLines {
+				return nil, errors.New("changed-line expansion exceeds its limit")
+			}
+			return integerRange(1, sourceLineCount), nil
 		}
-		cachedLines, parseErr := parseCanonicalChangedLineNumbers(cachedOutput)
-		if parseErr != nil {
-			return nil, fmt.Errorf("parse staged changed lines for %s: %w", rel, parseErr)
-		}
-		lines = append(lines, cachedLines...)
 	}
 	sort.Ints(lines)
 	return uniqueInts(lines), nil
 }
 
-func (r *RepoView) gitOutput(args ...string) ([]byte, error) {
-	return r.gitOutputContext(r.operationContext(), args...)
+func changedLineNumbersFromCommand(
+	cmd *exec.Cmd,
+	maximumLine int,
+) ([]int, error) {
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	stderr := &boundedByteWriter{limit: maximumGitStderrBytes}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	reader := bufio.NewReaderSize(stdout, 32<<10)
+	header := make([]byte, 0, maximumHunkHeaderBytes)
+	lines := make([]int, 0)
+	var readErr error
+	for {
+		header = header[:0]
+		finished := false
+		for {
+			fragment, isPrefix, currentErr := reader.ReadLine()
+			if len(header) < maximumHunkHeaderBytes {
+				remaining := maximumHunkHeaderBytes - len(header)
+				header = append(header, fragment[:min(len(fragment), remaining)]...)
+			}
+			if currentErr != nil {
+				finished = true
+				if !errors.Is(currentErr, io.EOF) {
+					readErr = currentErr
+				}
+				break
+			}
+			if !isPrefix {
+				break
+			}
+		}
+		if len(header) >= 3 && header[0] == '@' && header[1] == '@' && header[2] == ' ' {
+			start, end, ok := changedHunkLineRange(string(header), maximumLine)
+			if ok {
+				width := end - start + 1
+				if width > maximumExpandedChangedLines-len(lines) {
+					readErr = errors.New("changed-line expansion exceeds its limit")
+					finished = true
+				} else {
+					for line := start; line <= end; line++ {
+						lines = append(lines, line)
+					}
+				}
+			}
+		}
+		if finished {
+			break
+		}
+	}
+	if readErr != nil {
+		_ = cmd.Process.Kill()
+		_ = stdout.Close()
+	}
+	waitErr := cmd.Wait()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nil, readErr
+	}
+	if waitErr != nil {
+		detail := strings.TrimSpace(string(stderr.data))
+		if detail != "" {
+			return nil, fmt.Errorf("%w: %s", waitErr, detail)
+		}
+		return nil, waitErr
+	}
+	return lines, nil
 }
 
-func (r *RepoView) gitOutputLimit(limit int, args ...string) ([]byte, error) {
-	return r.gitOutputContextLimit(r.operationContext(), limit, args...)
+func integerRange(start, end int) []int {
+	if end < start {
+		return nil
+	}
+	values := make([]int, end-start+1)
+	for index := range values {
+		values[index] = start + index
+	}
+	return values
+}
+
+func (r *RepoView) gitCommand(args ...string) *exec.Cmd {
+	ctx := r.operationContext()
+	safeArgs := gitdiffcontract.InvocationPrefix()
+	safeArgs = append(safeArgs, args...)
+
+	failedCommand := func(err error) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, "git")
+		cmd.Err = err
+		return cmd
+	}
+	if r.changedState != nil {
+		return failedCommand(errors.New("git is disabled in changed-state cache mode"))
+	}
+	if err := r.verifyRootIdentity(); err != nil {
+		return failedCommand(err)
+	}
+
+	var cmd *exec.Cmd
+	if r.pinnedGit == nil {
+		cmd = exec.CommandContext(ctx, "git", safeArgs...)
+	} else {
+		pinnedCommand, executable, err := r.pinnedGit.commandContext(ctx, safeArgs...)
+		if err != nil {
+			return failedCommand(fmt.Errorf("pin git executable for invocation: %w", err))
+		}
+		cmd = pinnedCommand
+		// Cmd has no completion callback. Keep the authenticated descriptor alive
+		// through Start/Wait and close it when the completed command becomes
+		// unreachable. Existing bounded gitOutput calls retain their stronger
+		// immediate close and post-execution identity verification.
+		runtime.SetFinalizer(cmd, func(*exec.Cmd) {
+			_ = executable.Close()
+		})
+	}
+	cmd.Dir = r.root
+	cmd.Env = isolatedGitEnvironment()
+	return cmd
+}
+
+func (r *RepoView) gitOutput(args ...string) ([]byte, error) {
+	return r.gitOutputContext(r.operationContext(), args...)
 }
 
 func (r *RepoView) gitOutputContext(
@@ -1595,6 +2310,9 @@ func (r *RepoView) gitOutputContextLimit(
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+	if err := r.verifyRootIdentity(); err != nil {
+		return nil, err
 	}
 	safeArgs := gitdiffcontract.InvocationPrefix()
 	safeArgs = append(safeArgs, args...)
@@ -1690,6 +2408,33 @@ func parseCanonicalChangedLineNumbers(patch []byte) ([]int, error) {
 func parseChangedLineNumbers(patch string) []int {
 	lines, _ := parseCanonicalChangedLineNumbers([]byte(patch))
 	return lines
+}
+
+func changedHunkLineRange(header string, maximumLine int) (int, int, bool) {
+	match := changedHunkPattern.FindStringSubmatch(header)
+	if match == nil || maximumLine < 1 {
+		return 0, 0, false
+	}
+	start, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0, 0, false
+	}
+	count := 1
+	if match[2] != "" {
+		count, err = strconv.Atoi(match[2])
+		if err != nil {
+			return 0, 0, false
+		}
+	}
+	start = min(max(1, start), maximumLine)
+	if count == 0 {
+		return start, start, true
+	}
+	remaining := maximumLine - start
+	if count-1 > remaining {
+		return start, maximumLine, true
+	}
+	return start, start + count - 1, true
 }
 
 func uniqueInts(values []int) []int {

@@ -224,10 +224,48 @@ func TestSwiftScannerFixedAndCustomOperators(t *testing.T) {
 			t.Errorf("reserved operator %q accepted as custom", reserved)
 		}
 	}
+	for _, identifier := range []string{
+		"async_value",
+		"async\u0301",
+		"async😀",
+		"async9",
+	} {
+		if result := swiftScanTest(
+			t,
+			&swiftScanner{},
+			identifier,
+			swiftAsyncKeyword,
+		); result.ok {
+			t.Errorf("identifier prefix %q was accepted as async keyword: %#v",
+				identifier, result)
+		}
+	}
 	longOperator := strings.Repeat("~", swiftMaximumExternalScanAdvances+1)
 	if swiftScanTest(t, &swiftScanner{}, longOperator, swiftCustomOperator).ok {
 		t.Fatal("custom operator beyond scanner cap was accepted")
 	}
+}
+
+func TestSwiftGrammarDoesNotSplitKeywordPrefixesAtUnderscores(t *testing.T) {
+	const source = `if condition {}
+else_value()
+do {}
+catch_error()
+`
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	parser := treesitterparser.NewParser()
+	parser.SetLanguage(Language())
+	tree := parser.ParseString(ctx, []byte(source))
+	if tree == nil || ctx.Err() != nil {
+		t.Fatalf("parse failed: tree=%v err=%v", tree, ctx.Err())
+	}
+	swiftWalkTestTree(t, tree.RootNode(), func(node treesitter.Node) {
+		if node.IsMissing() || node.Symbol() == treesitter.SymbolError {
+			t.Fatalf("valid Swift produced recovery node %q at %d",
+				node.Type(), node.StartByte())
+		}
+	})
 }
 
 func TestSwiftScannerSemicolonDecisions(t *testing.T) {

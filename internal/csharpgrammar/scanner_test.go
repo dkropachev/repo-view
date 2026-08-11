@@ -87,6 +87,147 @@ public static class Extensions
 	}
 }
 
+func TestCSharpGrammarParsesEscapedInterpolationBraces(t *testing.T) {
+	for _, test := range []struct {
+		name               string
+		source             string
+		wantInterpolations int
+	}{
+		{"regular escaped pair", `var value = $"{{escaped}}";`, 0},
+		{"regular escaped pair before interpolation", `var value = $"{{{regularValue}}}";`, 1},
+		{"verbatim escaped pair", `var value = $@"{{escaped}}";`, 0},
+		{"verbatim escaped pair before interpolation", `var value = $@"{{{verbatimValue}}}";`, 1},
+		{"raw one-dollar interpolation", `var value = $"""X{rawValue}Z""";`, 1},
+		{"raw two-dollar literal braces", `var value = $$"""literal { brace }""";`, 0},
+		{"raw two-dollar literal prefix before interpolation", `var value = $$"""X{{{rawValue}}}Z""";`, 1},
+		{"raw three-dollar literal braces", `var value = $$$"""literal {{ braces }}""";`, 0},
+		{"raw three-dollar one-brace prefix before interpolation", `var value = $$$"""X{{{{rawValue}}}}Z""";`, 1},
+		{"raw three-dollar literal prefix before interpolation", `var value = $$$"""X{{{{{rawValue}}}}}Z""";`, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree := parseCSharpTestSource(t, test.source)
+			interpolations := 0
+			csharpWalkTestTree(t, tree.RootNode(), func(node treesitter.Node) {
+				if node.IsMissing() || node.Symbol() == treesitter.SymbolError {
+					t.Fatalf("valid C# produced recovery node %q at %d",
+						node.Type(), node.StartByte())
+				}
+				if node.Type() != "interpolation" {
+					return
+				}
+				interpolations++
+				if node.ChildCount() != 3 ||
+					node.Child(0).Type() != "interpolation_brace" ||
+					node.Child(1).Type() != "identifier" ||
+					node.Child(2).Type() != "interpolation_brace" {
+					t.Errorf("interpolation has malformed structure: %s", node.String())
+				}
+			})
+			if interpolations != test.wantInterpolations {
+				t.Errorf("interpolation nodes = %d, want %d; tree: %s",
+					interpolations, test.wantInterpolations, tree.RootNode().String())
+			}
+		})
+	}
+}
+
+func TestCSharpGrammarRejectsTooManyRawInterpolationBraces(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{"one-dollar opening", `var value = $"""X{{rawValue}}Z""";`},
+		{"two-dollar opening", `var value = $$"""X{{{{rawValue}}}}Z""";`},
+		{"three-dollar opening", `var value = $$$"""X{{{{{{rawValue}}}}}}Z""";`},
+		{"one-dollar closing", `var value = $"""X{rawValue}}Z""";`},
+		{"two-dollar closing", `var value = $$"""X{{rawValue}}}}Z""";`},
+		{"three-dollar closing", `var value = $$$"""X{{{rawValue}}}}}}Z""";`},
+		{"one-dollar standalone closing", `var value = $"""X}Z""";`},
+		{"two-dollar standalone closing", `var value = $$"""X}}Z""";`},
+		{"two-dollar standalone mixed closing", `var value = $$"""X}}}Z""";`},
+		{"two-dollar standalone doubled closing", `var value = $$"""X}}}}Z""";`},
+		{"three-dollar standalone closing", `var value = $$$"""X}}}Z""";`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tree := parseCSharpTestSource(t, test.source)
+			recovered := false
+			csharpWalkTestTree(t, tree.RootNode(), func(node treesitter.Node) {
+				if node.IsMissing() || node.Symbol() == treesitter.SymbolError {
+					recovered = true
+				}
+			})
+			if !recovered {
+				t.Errorf("invalid raw interpolation brace run parsed without recovery: %s",
+					tree.RootNode().String())
+			}
+		})
+	}
+}
+
+func TestCSharpGrammarRawInterpolationBraceRunThresholds(t *testing.T) {
+	inspect := func(source string) (bool, int) {
+		t.Helper()
+		tree := parseCSharpTestSource(t, source)
+		recovered := false
+		interpolations := 0
+		csharpWalkTestTree(t, tree.RootNode(), func(node treesitter.Node) {
+			if node.IsMissing() || node.Symbol() == treesitter.SymbolError {
+				recovered = true
+			}
+			if node.Type() == "interpolation" {
+				interpolations++
+			}
+		})
+		return recovered, interpolations
+	}
+
+	for dollarCount := 1; dollarCount <= 4; dollarCount++ {
+		delimiter := strings.Repeat("$", dollarCount) + `"""`
+		for braceCount := 1; braceCount <= 2*dollarCount+1; braceCount++ {
+			braces := strings.Repeat("{", braceCount) + "rawValue" +
+				strings.Repeat("}", braceCount)
+			source := `var value = ` + delimiter + "X" + braces + `Z""";`
+			recovered, interpolations := inspect(source)
+			wantRecovery := braceCount >= 2*dollarCount
+			wantInterpolations := 0
+			if braceCount >= dollarCount && !wantRecovery {
+				wantInterpolations = 1
+			}
+			if recovered != wantRecovery ||
+				(!recovered && interpolations != wantInterpolations) {
+				t.Errorf(
+					"dollars=%d symmetric braces=%d: recovery/interpolations = %t/%d, want %t/%d; source=%s",
+					dollarCount,
+					braceCount,
+					recovered,
+					interpolations,
+					wantRecovery,
+					wantInterpolations,
+					source,
+				)
+			}
+		}
+
+		for braceCount := 1; braceCount <= 2*dollarCount+1; braceCount++ {
+			source := `var value = ` + delimiter + "X" +
+				strings.Repeat("}", braceCount) + `Z""";`
+			recovered, interpolations := inspect(source)
+			wantRecovery := braceCount >= dollarCount
+			if recovered != wantRecovery || (!recovered && interpolations != 0) {
+				t.Errorf(
+					"dollars=%d standalone closing braces=%d: recovery/interpolations = %t/%d, want %t/0; source=%s",
+					dollarCount,
+					braceCount,
+					recovered,
+					interpolations,
+					wantRecovery,
+					source,
+				)
+			}
+		}
+	}
+}
+
 func TestCSharpScannerStateRoundTripAndBounds(t *testing.T) {
 	scanner := &csharpScanner{
 		quoteCount: 7,

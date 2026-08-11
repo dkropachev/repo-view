@@ -53,14 +53,24 @@ func TestLanguageRegistrySelectsExplicitBackends(t *testing.T) {
 
 func TestSupportedExtensionsComeFromLanguageRegistry(t *testing.T) {
 	t.Parallel()
-	extensions := defaultExtensions()
+	extensions := SupportedExtensions()
 	if len(extensions) != len(languagesByExtension) {
 		t.Fatalf("extensions = %d, registry = %d", len(extensions), len(languagesByExtension))
 	}
+	listed := make(map[string]bool, len(extensions))
+	for _, extension := range extensions {
+		listed[extension] = true
+	}
 	for extension := range languagesByExtension {
-		if !extensions[extension] {
+		if !listed[extension] {
 			t.Fatalf("registered extension %q is not searchable", extension)
 		}
+	}
+
+	first := extensions[0]
+	extensions[0] = ".mutated"
+	if fresh := SupportedExtensions(); fresh[0] != first {
+		t.Fatalf("mutating returned extensions changed registry copy: %#v", fresh)
 	}
 }
 

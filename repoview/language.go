@@ -66,6 +66,13 @@ type symbolOccurrenceCounter interface {
 	countSymbolOccurrences(line, symbol string) int
 }
 
+// symbolOccurrenceColumnResolver returns the one-based byte columns for the
+// same physical occurrences counted by symbolOccurrenceCounter. Find uses the
+// exact language boundaries when several named scopes share one source line.
+type symbolOccurrenceColumnResolver interface {
+	symbolOccurrenceColumns(line, symbol string) []int
+}
+
 // symbolOccurrenceCounterPreparer lets a backend build immutable per-query
 // matching state once per file instead of rebuilding it for every physical
 // line. The returned counter must be safe for sequential calls in line order.
@@ -84,6 +91,24 @@ type sourceSymbolOccurrenceAugmenter interface {
 		lines []string,
 		symbol string,
 		visit func(lineNo, additionalCount int) bool,
+	) bool
+}
+
+// sourceSymbolOccurrencePositionAugmenter is the positional companion to
+// sourceSymbolOccurrenceAugmenter. addedColumns are one-based raw byte columns
+// for logical code-token occurrences that the physical counter cannot see;
+// removedColumns identify raw physical spellings rejected by the logical
+// token stream. Both slices describe only the visited physical line and need
+// remain valid only for the duration of visit. The signed count keeps exactly
+// the same meaning as the non-positional contract.
+type sourceSymbolOccurrencePositionAugmenter interface {
+	walkAdditionalSymbolOccurrencesAt(
+		lines []string,
+		symbol string,
+		visit func(
+			lineNo, additionalCount int,
+			addedColumns, removedColumns []int,
+		) bool,
 	) bool
 }
 
@@ -121,12 +146,13 @@ type sourceScopeNameResolver interface {
 }
 
 type sourceDefinition struct {
-	symbol     string
-	line       int
-	column     int
-	scopeStart int
-	scopeEnd   int
-	ownsScope  bool
+	symbol         string
+	line           int
+	column         int
+	scopeStart     int
+	scopeEnd       int
+	ownedEndColumn int
+	ownsScope      bool
 }
 
 type languageDefinition struct {
@@ -344,7 +370,9 @@ func prepareLanguageBackend(backend languageBackend, lines []string) languageBac
 	return backend
 }
 
-func supportedExtensions() []string {
+// SupportedExtensions returns a sorted copy of the source extensions handled
+// by the registered language backends.
+func SupportedExtensions() []string {
 	extensions := make([]string, 0, len(languagesByExtension))
 	for extension := range languagesByExtension {
 		extensions = append(extensions, extension)

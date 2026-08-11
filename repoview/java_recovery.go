@@ -68,27 +68,32 @@ func analyzeJavaLexicallyWithPositionsMode(
 	appendDefinition := func(
 		name javaToken,
 		startOffset, endOffset int,
-		ownsScope bool,
+		ownsScope, exactEnd bool,
 	) {
 		if !javaTokenIsSourceName(name) || name.start < 0 || name.end > len(source) {
 			return
 		}
 		line, column := positions.lineColumn(name.start)
 		scopeStart, scopeEnd := line, line
+		ownedEndColumn := 0
 		if ownsScope {
 			startOffset = javaLexicalAttachedStart(lexed.input, lexed.commentSpans, startOffset)
 			scopeStart, scopeEnd = positions.lineSpan(
 				max(0, min(startOffset, len(source))),
 				max(0, min(endOffset, len(source))),
 			)
+			ownedEndColumn = javaExactOwnedEndColumn(
+				positions, scopeEnd, endOffset, exactEnd,
+			)
 		}
 		definition := normalizeJavaTreeDefinition(sourceDefinition{
-			symbol:     name.text,
-			line:       line,
-			column:     column,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			ownsScope:  ownsScope,
+			symbol:         name.text,
+			line:           line,
+			column:         column,
+			scopeStart:     scopeStart,
+			scopeEnd:       scopeEnd,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      ownsScope,
 		}, lineCount)
 		if definition.symbol != "" {
 			definitions = append(definitions, definition)
@@ -112,7 +117,9 @@ func analyzeJavaLexicallyWithPositionsMode(
 		if bodyOpen < 0 {
 			continue
 		}
-		bodyEnd := javaBraceEndOffset(source, tokens, delimiters, bodyOpen)
+		bodyEnd, exactEnd := javaBraceEndOffsetExact(
+			source, lexed.input, tokens, delimiters, bodyOpen,
+		)
 		declarationStart := index
 		if keyword == "interface" && index > 0 && tokens[index-1].value == "@" {
 			declarationStart = index - 1
@@ -140,7 +147,7 @@ func analyzeJavaLexicallyWithPositionsMode(
 			continue
 		}
 		typeBodies[bodyOpen] = javaTypeBody{name: tokens[nameIndex].value, kind: keyword}
-		appendDefinition(tokens[nameIndex], startOffset, bodyEnd, true)
+		appendDefinition(tokens[nameIndex], startOffset, bodyEnd, true, exactEnd)
 	}
 	javaRegisterLexicalAnonymousBodies(tokens, delimiters, typeBodies)
 	enumConstantBodies := javaRegisterLexicalEnumConstantBodies(
@@ -179,19 +186,25 @@ func analyzeJavaLexicallyWithPositionsMode(
 			end:        tokens[nameEnd].end,
 			identifier: true,
 		}
-		bodyEnd := javaBraceEndOffset(source, tokens, delimiters, bodyOpen)
+		bodyEnd, exactEnd := javaBraceEndOffsetExact(
+			source, lexed.input, tokens, delimiters, bodyOpen,
+		)
 		line, column := positions.lineColumn(name.start)
 		scopeStart, scopeEnd := positions.lineSpan(
 			javaLexicalAttachedStart(lexed.input, lexed.commentSpans, tokens[startIndex].start),
 			bodyEnd,
 		)
+		ownedEndColumn := javaExactOwnedEndColumn(
+			positions, scopeEnd, bodyEnd, exactEnd,
+		)
 		definitions = append(definitions, normalizeJavaTreeDefinition(sourceDefinition{
-			symbol:     name.text,
-			line:       line,
-			column:     column,
-			scopeStart: scopeStart,
-			scopeEnd:   scopeEnd,
-			ownsScope:  true,
+			symbol:         name.text,
+			line:           line,
+			column:         column,
+			scopeStart:     scopeStart,
+			scopeEnd:       scopeEnd,
+			ownedEndColumn: ownedEndColumn,
+			ownsScope:      true,
 		}, lineCount))
 	}
 	javaAppendLexicalCompactCallables(
@@ -1012,6 +1025,54 @@ func javaBraceEndOffset(
 	return len(source)
 }
 
+func javaBraceEndOffsetExact(
+	source string,
+	input *javaUnicodeInput,
+	tokens []javaToken,
+	delimiters javaDelimiterAnalysis,
+	open int,
+) (int, bool) {
+	closeIndex := javaDelimiterMatch(delimiters, open)
+	if closeIndex <= open || closeIndex >= len(tokens) {
+		return len(source), false
+	}
+	closing := tokens[closeIndex]
+	return closing.end, javaTokenIsExactPunctuation(input, closing, '}')
+}
+
+func javaTokenIsExactPunctuation(
+	input *javaUnicodeInput,
+	token javaToken,
+	want rune,
+) bool {
+	if input == nil || token.start < 0 || token.start >= token.end ||
+		token.end > len(input.source) {
+		return false
+	}
+	cursor := input.cursor(token.start, token.end)
+	unit, ok := cursor.next()
+	if !ok || unit.start != token.start || unit.end != token.end || unit.value != want {
+		return false
+	}
+	_, extra := cursor.next()
+	return !extra
+}
+
+func javaExactOwnedEndColumn(
+	positions javaSourcePositions,
+	scopeEnd, endOffset int,
+	exact bool,
+) int {
+	if !exact {
+		return 0
+	}
+	endLine, endColumn := positions.lineColumn(endOffset)
+	if endLine != scopeEnd {
+		return 0
+	}
+	return endColumn
+}
+
 func javaAppendLexicalRecordComponents(
 	tokens []javaToken,
 	delimiters javaDelimiterAnalysis,
@@ -1189,9 +1250,12 @@ func javaAppendLexicalCallables(
 					invalidDefinitionHeaders[name.start] = struct{}{}
 					continue
 				}
+				endOffset, exactEnd := javaBraceEndOffsetExact(
+					source, input, tokens, delimiters, open,
+				)
 				javaAppendOwnedLexicalDefinition(
 					lineCount, comments, input, positions, name,
-					tokens[start].start, javaBraceEndOffset(source, tokens, delimiters, open),
+					tokens[start].start, endOffset, exactEnd,
 					definitions,
 				)
 			}
@@ -1253,12 +1317,15 @@ func javaAppendLexicalCallables(
 			continue
 		}
 		endOffset := tokens[endToken].end
+		exactEnd := javaTokenIsExactPunctuation(input, tokens[endToken], ';')
 		if bodyToken >= 0 {
-			endOffset = javaBraceEndOffset(source, tokens, delimiters, bodyToken)
+			endOffset, exactEnd = javaBraceEndOffsetExact(
+				source, input, tokens, delimiters, bodyToken,
+			)
 		}
 		javaAppendOwnedLexicalDefinition(
 			lineCount, comments, input, positions, name,
-			tokens[start].start, endOffset, definitions,
+			tokens[start].start, endOffset, exactEnd, definitions,
 		)
 	}
 }
@@ -1320,6 +1387,7 @@ func javaAppendOwnedLexicalDefinition(
 	positions javaSourcePositions,
 	name javaToken,
 	startOffset, endOffset int,
+	exactEnd bool,
 	definitions *[]sourceDefinition,
 ) {
 	if !javaTokenIsSourceName(name) {
@@ -1329,9 +1397,13 @@ func javaAppendOwnedLexicalDefinition(
 	scopeStart, scopeEnd := positions.lineSpan(
 		javaLexicalAttachedStart(input, comments, startOffset), endOffset,
 	)
+	ownedEndColumn := javaExactOwnedEndColumn(
+		positions, scopeEnd, endOffset, exactEnd,
+	)
 	*definitions = append(*definitions, normalizeJavaTreeDefinition(sourceDefinition{
 		symbol: name.text, line: line, column: column,
-		scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: true,
+		scopeStart: scopeStart, scopeEnd: scopeEnd,
+		ownedEndColumn: ownedEndColumn, ownsScope: true,
 	}, lineCount))
 }
 
@@ -1557,6 +1629,7 @@ func javaAppendLexicalFields(
 		}
 		startOffset := tokens[start].start
 		endOffset := tokens[semicolon].end
+		exactEnd := javaTokenIsExactPunctuation(input, tokens[semicolon], ';')
 		ownedScopeStart, ownedScopeEnd := 0, 0
 		ownedScopeReady := false
 		firstHeaderInvalid := false
@@ -1602,9 +1675,16 @@ func javaAppendLexicalFields(
 				}
 				scopeStart, scopeEnd = ownedScopeStart, ownedScopeEnd
 			}
+			ownedEndColumn := 0
+			if ownsScope {
+				ownedEndColumn = javaExactOwnedEndColumn(
+					positions, scopeEnd, endOffset, exactEnd,
+				)
+			}
 			*definitions = append(*definitions, normalizeJavaTreeDefinition(sourceDefinition{
 				symbol: name.text, line: line, column: column,
-				scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+				scopeStart: scopeStart, scopeEnd: scopeEnd,
+				ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 			}, lineCount))
 		}
 	}
@@ -2206,18 +2286,26 @@ func javaAppendLexicalEnumConstants(
 			}
 			line, column := positions.lineColumn(tokens[nameIndex].start)
 			scopeStart, scopeEnd := line, line
+			ownedEndColumn := 0
 			ownsScope := classBody >= 0
 			if ownsScope {
+				endOffset, exactEnd := javaBraceEndOffsetExact(
+					source, input, tokens, delimiters, classBody,
+				)
 				scopeStart, scopeEnd = positions.lineSpan(
 					javaLexicalAttachedStart(
 						input, comments, tokens[segmentStart].start,
 					),
-					javaBraceEndOffset(source, tokens, delimiters, classBody),
+					endOffset,
+				)
+				ownedEndColumn = javaExactOwnedEndColumn(
+					positions, scopeEnd, endOffset, exactEnd,
 				)
 			}
 			*definitions = append(*definitions, normalizeJavaTreeDefinition(sourceDefinition{
 				symbol: tokens[nameIndex].text, line: line, column: column,
-				scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+				scopeStart: scopeStart, scopeEnd: scopeEnd,
+				ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 			}, lineCount))
 		}
 		segmentStart = index + 1

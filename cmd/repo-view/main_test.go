@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
 	"os"
@@ -46,6 +47,21 @@ func TestReturnLocationsMapsToNoEmbeddedCode(t *testing.T) {
 	}
 	if options.Return != repoview.ReturnLocations {
 		t.Fatalf("return = %q", options.Return)
+	}
+}
+
+func TestCommonFlagsPreserveExplicitZeroContext(t *testing.T) {
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	common := addCommonFlags(flags, repoview.ReturnScope)
+	if err := flags.Parse([]string{"--return", "locations", "--context", "0"}); err != nil {
+		t.Fatal(err)
+	}
+	options, err := common.buildOptions(repoview.IncludeBoth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Context != 0 || !options.ContextSet {
+		t.Fatalf("context = %d, context set = %t", options.Context, options.ContextSet)
 	}
 }
 
@@ -99,6 +115,35 @@ func TestFenceLanguageCoversModulaSourceExtensions(t *testing.T) {
 	}
 }
 
+func TestFenceLanguageCoversCSharpAndRegisteredCPPExtensions(t *testing.T) {
+	t.Parallel()
+
+	for _, path := range []string{"Source.cs", "Script.csx"} {
+		if got := fenceLanguage(path); got != "csharp" {
+			t.Fatalf("fenceLanguage(%q) = %q, want csharp", path, got)
+		}
+	}
+	for _, path := range []string{
+		"source.CXX", "source.c++", "header.HXX", "template.tpp", "module.cppm",
+	} {
+		if got := fenceLanguage(path); got != "cpp" {
+			t.Fatalf("fenceLanguage(%q) = %q, want cpp", path, got)
+		}
+	}
+}
+
+func TestPrintResultsUsesFenceLongerThanEmbeddedBackticks(t *testing.T) {
+	output := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path: "found.go", StartLine: 1, EndLine: 3,
+			Code: "before\n```\nafter",
+		}}, repoview.ReturnScope)
+	})
+	if !strings.Contains(output, "````go\nbefore\n```\nafter\n````\n") {
+		t.Fatalf("adaptive fenced output = %q", output)
+	}
+}
+
 func TestPrintLocationsUsesPointLine(t *testing.T) {
 	output := captureStdout(t, func() {
 		printResults([]repoview.Result{{
@@ -123,6 +168,74 @@ func TestPrintLocationsUsesRangeStartWithoutPointLine(t *testing.T) {
 	})
 	if output != "found.go:4\n" {
 		t.Fatalf("output = %q", output)
+	}
+}
+
+func TestPrintResultsEscapesControlCharactersInRepositoryPaths(t *testing.T) {
+	const hostilePath = "safe.go\n\x1b[31m# injected"
+	const escapedPath = `"safe.go\n\x1b[31m# injected"`
+
+	locations := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path: hostilePath,
+			Line: 7,
+		}}, repoview.ReturnLocations)
+	})
+	if locations != escapedPath+":7\n" {
+		t.Fatalf("location output = %q", locations)
+	}
+
+	scopes := captureStdout(t, func() {
+		printResults([]repoview.Result{{
+			Path:      hostilePath,
+			StartLine: 4,
+			EndLine:   6,
+			Code:      "safe code",
+		}}, repoview.ReturnScope)
+	})
+	if !strings.HasPrefix(scopes, "# "+escapedPath+":4-6\n") ||
+		strings.Contains(scopes, "\n\x1b[31m# injected") {
+		t.Fatalf("scope output = %q", scopes)
+	}
+}
+
+func TestPrintChangedResponseEscapesControlCharactersInMetadata(t *testing.T) {
+	output := captureStdout(t, func() {
+		printChangedResponse(repoview.ChangedResponse{
+			HeadCommit:  "abc123",
+			HeadSubject: "safe\n# injected\x1b[31m",
+			Base:        "main\x1b[2J",
+			BaseCommit:  "def456",
+		}, repoview.ReturnLocations)
+	})
+	if strings.Contains(output, "\n# injected") || strings.ContainsRune(output, '\x1b') ||
+		!strings.Contains(output, `"safe\n# injected\x1b[31m"`) ||
+		!strings.Contains(output, `"main\x1b[2J"`) {
+		t.Fatalf("changed metadata output = %q", output)
+	}
+}
+
+func TestSingleInspectErrorEscapesControlCharactersInPath(t *testing.T) {
+	root := t.TempDir()
+	const name = "hostile\n\x1b[31m.go"
+	if err := os.WriteFile(
+		filepath.Join(root, name),
+		[]byte("package demo\n"),
+		0o600,
+	); err != nil {
+		t.Skipf("control-character filenames unavailable: %v", err)
+	}
+
+	status := 0
+	output := captureStderr(t, func() {
+		status = run([]string{
+			"inspect", name + ":99", "--root", root, "--return", "line",
+		})
+	})
+	if status != 1 || strings.ContainsRune(output, '\x1b') ||
+		strings.Contains(output, "hostile\n") ||
+		!strings.Contains(output, `hostile\n\x1b[31m.go`) {
+		t.Fatalf("status = %d, stderr = %q", status, output)
 	}
 }
 
@@ -302,6 +415,191 @@ func TestCompiledOptionCapSurvivesUnsetEnvironment(t *testing.T) {
 	}
 }
 
+func TestCodexWrapperRejectsInvalidNavigationConfigurationBeforeBuild(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required to test the Bash wrapper")
+	}
+	script := filepath.Join("..", "..", "scripts", "codex-with-repo-view")
+	if _, err := os.Stat(script); err != nil {
+		t.Fatal(err)
+	}
+
+	mechanical := []string{
+		"REPO_VIEW_NAVIGATION_COMMAND_CAP=1",
+		"REPO_VIEW_REQUIRE_NAVIGATION_SEMANTICS=1",
+		"REPO_VIEW_REQUIRED_ROOT=/tmp",
+		"REPO_VIEW_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}
+	tests := []struct {
+		name        string
+		environment []string
+		want        string
+	}{
+		{
+			name:        "zero result limit",
+			environment: []string{"REPO_VIEW_CHANGED_LIMIT=0"},
+			want:        "changed_limit must be a positive integer",
+		},
+		{
+			name:        "zero code line cap",
+			environment: []string{"REPO_VIEW_CHANGED_MAX_CODE_LINES=0"},
+			want:        "changed_max_code_lines must be a positive integer",
+		},
+		{
+			name:        "zero patch line cap",
+			environment: []string{"REPO_VIEW_CHANGED_MAX_PATCH_LINES=0"},
+			want:        "changed_max_patch_lines must be a positive integer",
+		},
+		{
+			name: "changed context above cap",
+			environment: []string{
+				"REPO_VIEW_CHANGED_CONTEXT=21",
+				"REPO_VIEW_NAVIGATION_CONTEXT_CAP=20",
+			},
+			want: "changed_context 21 exceeds navigation_context_cap 20",
+		},
+		{
+			name: "zero batched context cap",
+			environment: []string{
+				"REPO_VIEW_CHANGED_CONTEXT=0",
+				"REPO_VIEW_NAVIGATION_CONTEXT_CAP=0",
+				"REPO_VIEW_NAVIGATION_POLICY=batched",
+				"REPO_VIEW_NAVIGATION_COMMAND_CAP=1",
+			},
+			want: "REPO_VIEW_NAVIGATION_CONTEXT_CAP must be positive",
+		},
+		{
+			name: "mechanical return mismatch",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=4",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=locations",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=4",
+			),
+			want: "REPO_VIEW_REQUIRED_CHANGED_RETURN must match REPO_VIEW_CHANGED_RETURN",
+		},
+		{
+			name: "mechanical context mismatch",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=4",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=context",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=5",
+			),
+			want: "REPO_VIEW_REQUIRED_CHANGED_CONTEXT must match REPO_VIEW_CHANGED_CONTEXT",
+		},
+		{
+			name: "zero mechanical context with code return",
+			environment: append(append([]string{}, mechanical...),
+				"REPO_VIEW_CHANGED_RETURN=context",
+				"REPO_VIEW_CHANGED_CONTEXT=0",
+				"REPO_VIEW_REQUIRED_CHANGED_RETURN=context",
+				"REPO_VIEW_REQUIRED_CHANGED_CONTEXT=0",
+			),
+			want: "mechanically enforced changed context must be positive unless return is locations",
+		},
+	}
+
+	baseEnvironment := make([]string, 0, len(os.Environ()))
+	for _, variable := range os.Environ() {
+		if !strings.HasPrefix(variable, "REPO_VIEW_") {
+			baseEnvironment = append(baseEnvironment, variable)
+		}
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			command := exec.Command(bash, script, "exec")
+			command.Env = append(append([]string{}, baseEnvironment...), test.environment...)
+			output, commandErr := command.CombinedOutput()
+			var exitError *exec.ExitError
+			if !errors.As(commandErr, &exitError) || exitError.ExitCode() != 2 ||
+				!strings.Contains(string(output), test.want) {
+				t.Fatalf("error = %v, output = %q, want exit 2 containing %q",
+					commandErr, output, test.want)
+			}
+		})
+	}
+}
+
+func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
+	root := filepath.Join("..", "..")
+	read := func(path string) string {
+		t.Helper()
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(data)
+	}
+	manifest := read("go.mod")
+	notices := read("THIRD_PARTY_NOTICES.md")
+	workflow := read(filepath.Join(".github", "workflows", "release.yml"))
+
+	for _, module := range []string{
+		"github.com/dcosson/treesitter-go",
+		"golang.org/x/text",
+	} {
+		fields := strings.Fields(manifest)
+		version := ""
+		for index := 0; index+1 < len(fields); index++ {
+			if fields[index] == module {
+				version = fields[index+1]
+				break
+			}
+		}
+		if version == "" {
+			t.Fatalf("direct module %s is absent from go.mod", module)
+		}
+		if !strings.Contains(notices, module) ||
+			!strings.Contains(notices, "version `"+version+"`") {
+			t.Errorf("notices do not identify %s %s", module, version)
+		}
+	}
+	for _, marker := range []string{
+		"Copyright (c) 2014-2023 Max Brunsfeld, Damien Guard, Amaan Qureshi",
+		"Copyright (c) 2019 fwcd",
+		"Copyright (c) 2021 alex-pinkus",
+		"Copyright (c) 2026 Danny Cosson",
+		"tree-sitter `v0.26.6`",
+		"`tree-sitter-c`",
+		"`v0.24.1`",
+		"`tree-sitter-cpp`",
+		"`v0.23.4`",
+		"`tree-sitter-java`",
+		"`v0.23.5`",
+		"`tree-sitter-javascript`",
+		"`v0.25.0`",
+		"`tree-sitter-typescript`",
+		"`v0.23.2`, including its TypeScript and TSX grammars",
+		"`tree-sitter-python`",
+		"`v0.23.6`",
+		"`tree-sitter-rust`",
+		"`v0.24.0`",
+		"Copyright (c) 2018 Max Brunsfeld (tree-sitter runtime)",
+		"Copyright (c) 2017 Ayman Nadeem (Java grammar)",
+		"Copyright (c) 2016 Max Brunsfeld (Python grammar)",
+		"Copyright (c) 2017 Maxim Sokolov (Rust grammar)",
+		"Copyright 2009 The Go Authors.",
+		"Redistribution and use in source and binary forms",
+		"Additional IP Rights Grant (Patents)",
+		"Copyright © 1991-2026 Unicode, Inc.",
+		"unicode-ident 1.0.24",
+		"repoview/javascript_unicode.go",
+		"repoview/python_xid.go",
+		"Permission is hereby granted, free of charge",
+	} {
+		if !strings.Contains(notices, marker) {
+			t.Errorf("third-party notices lack %q", marker)
+		}
+	}
+	if !strings.Contains(workflow, "cp THIRD_PARTY_NOTICES.md build/") ||
+		strings.Count(workflow, `"$binary" THIRD_PARTY_NOTICES.md`) != 2 ||
+		!strings.Contains(workflow, "release archive lacks THIRD_PARTY_NOTICES.md") {
+		t.Fatal("release workflow does not package and verify notices in both archive formats")
+	}
+}
+
 func TestCommonFlagsPreserveRepeatablePathFilters(t *testing.T) {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	common := addCommonFlags(flags, repoview.ReturnScope)
@@ -343,6 +641,13 @@ func TestOptionCapRejectsZeroValueBypasses(t *testing.T) {
 	if err := enforceOptionCap("--max-code-lines", 0, "REPO_VIEW_MAX_CODE_LINES_CAP"); err == nil ||
 		!strings.Contains(err.Error(), "use --return locations to omit code") {
 		t.Fatalf("code error = %v", err)
+	}
+}
+
+func TestContextCapAllowsExplicitZero(t *testing.T) {
+	t.Setenv("REPO_VIEW_CONTEXT_CAP", "0")
+	if err := enforceOptionCap("--context", 0, "REPO_VIEW_CONTEXT_CAP"); err != nil {
+		t.Fatalf("explicit zero context rejected: %v", err)
 	}
 }
 
@@ -1297,6 +1602,32 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = writer
 	defer func() {
 		os.Stdout = previous
+	}()
+
+	fn()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	output, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(output)
+}
+
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	previous := os.Stderr
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = writer
+	defer func() {
+		os.Stderr = previous
 	}()
 
 	fn()

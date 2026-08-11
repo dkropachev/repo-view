@@ -34,6 +34,7 @@ func TestCPPBackendContractRegistryAndPublicIntegration(t *testing.T) {
 		{name: "sourceScopeNameResolver", implemented: cppImplements[sourceScopeNameResolver](backend)},
 		{name: "symbolOccurrenceCounter", implemented: cppImplements[symbolOccurrenceCounter](backend)},
 		{name: "sourceSymbolOccurrenceAugmenter", implemented: cppImplements[sourceSymbolOccurrenceAugmenter](backend)},
+		{name: "sourceSymbolOccurrencePositionAugmenter", implemented: cppImplements[sourceSymbolOccurrencePositionAugmenter](backend)},
 		{name: "authoritativeSymbolOnLineResolver", implemented: cppImplements[authoritativeSymbolOnLineResolver](backend)},
 	}
 	for _, contract := range contracts {
@@ -539,7 +540,11 @@ func cppDefinitionAt(
 }
 
 func cppSummarizeDefinition(definition sourceDefinition) cppDefinitionSummary {
-	return cppDefinitionSummary(definition)
+	return cppDefinitionSummary{
+		symbol: definition.symbol, line: definition.line, column: definition.column,
+		scopeStart: definition.scopeStart, scopeEnd: definition.scopeEnd,
+		ownsScope: definition.ownsScope,
+	}
 }
 
 func cppLineContaining(t *testing.T, lines []string, fragment string) int {

@@ -3413,7 +3413,7 @@ retain_invalid_judge() {
       printf '%s/rejected-%s-%s.%s' \
         "${quality_dir_fd_path}" "${stem}" "${stamp}" "${suffix}"
     )"
-    if [[ -e "${source_path}" ]]; then
+    if [[ -e "${source_path}" || -L "${source_path}" ]]; then
       mv -T -- \
         "${source_path}" \
         "${destination_path}"

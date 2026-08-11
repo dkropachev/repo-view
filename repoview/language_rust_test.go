@@ -878,6 +878,82 @@ func rustTestLines(source string) []string {
 	return strings.Split(strings.TrimSuffix(source, "\n"), "\n")
 }
 
+func TestRustFindUsesPositionedSameLineScopes(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		source    string
+		symbol    string
+		wantLine  int
+		wantScope string
+		recovery  bool
+	}{
+		{
+			name:      "sibling functions",
+			source:    "fn first() { inside(); } fn second() { target(); }\n",
+			symbol:    "target",
+			wantLine:  1,
+			wantScope: "second",
+		},
+		{
+			name:      "nested sibling functions",
+			source:    "fn outer() { fn first() { inside(); } fn second() { nested(); } }\n",
+			symbol:    "nested",
+			wantLine:  1,
+			wantScope: "second",
+		},
+		{
+			name:      "unicode partial identifier before valid occurrence",
+			source:    "fn first() { \U00011DB0suffix(); } fn second() { suffix(); }\n",
+			symbol:    "suffix",
+			wantLine:  1,
+			wantScope: "second",
+			recovery:  true,
+		},
+		{
+			name:     "top-level constant after function",
+			source:   "fn first() { inside(); } const LATER: usize = outside();\n",
+			symbol:   "outside",
+			wantLine: 1,
+		},
+		{
+			name: "top-level constant on multiline closing line",
+			source: `fn first() {
+    inside();
+} const LATER: usize = beyond();
+`,
+			symbol:   "beyond",
+			wantLine: 3,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if !test.recovery {
+				rustAssertConcreteSyntax(t, test.source)
+			}
+			root := t.TempDir()
+			writeFile(t, root, "same-line.rs", test.source)
+
+			response, err := mustView(t, root).Find(test.symbol, Options{
+				Include: IncludeRefs,
+				Return:  ReturnScope,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(response.Results) != 1 {
+				t.Fatalf("results = %#v", response.Results)
+			}
+			result := response.Results[0]
+			if result.Line != test.wantLine || result.StartLine != test.wantLine ||
+				result.EndLine != test.wantLine || result.Scope != test.wantScope {
+				t.Fatalf(
+					"result = %#v, want line/range %d and scope %q",
+					result, test.wantLine, test.wantScope,
+				)
+			}
+		})
+	}
+}
+
 func rustDefinitionSummaries(definitions []sourceDefinition) []rustDefinitionSummary {
 	result := make([]rustDefinitionSummary, 0, len(definitions))
 	for _, definition := range definitions {

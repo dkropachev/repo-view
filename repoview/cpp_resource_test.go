@@ -24,6 +24,318 @@ func TestCPPTokenRetentionIsBoundedAndStreamingFallbackKeepsMiddleDefinition(t *
 	}
 }
 
+func TestCPPStreamingFallbackKeepsMiddleClassDefinition(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+64)
+	source := padding + "class MiddleClass { int member; };" + padding
+	lexed := lexCPP(source)
+	if !lexed.truncated {
+		t.Fatal("fixture did not cross the retained-token frontier")
+	}
+	if got := cppDefinitionSymbols(newCPPLanguage().sourceDefinitions([]string{source})); !slices.Contains(got, "MiddleClass") {
+		t.Fatalf("streaming fallback lost middle class definition: %#v", got)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "middle.cpp", source)
+	found, err := mustView(t, root).Find("MiddleClass", Options{
+		Include: IncludeDefs, Return: ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(found.Results) != 1 || found.Results[0].Kind != "def" {
+		t.Fatalf("middle class Find = %#v, want one definition", found.Results)
+	}
+}
+
+func TestCPPStreamingFallbackTracksMiddleClassAndNamespaceBoundaries(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+64)
+	for _, testCase := range []struct {
+		name, heading, symbol string
+	}{
+		{name: "class", heading: "class MiddleClass ", symbol: "MiddleClass"},
+		{name: "namespace", heading: "namespace MiddleNamespace ", symbol: "MiddleNamespace"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			middle := testCase.heading +
+				"{ int field = target(); } int after = outside();"
+			source := padding + middle + padding
+			analysis := analyzeCPPSource(source, 1)
+			if analysis.tree != nil || !analysis.lexed.truncated {
+				t.Fatalf("fixture did not enter streamed fallback: tree=%v truncated=%v",
+					analysis.tree != nil, analysis.lexed.truncated)
+			}
+			definition := cppDefinitionAt(t, analysis.definitions, testCase.symbol, 1)
+			wantEndColumn := strings.Index(source, "} int after") + 2
+			if !definition.ownsScope || definition.scopeEnd != 1 ||
+				definition.ownedEndColumn != wantEndColumn {
+				t.Fatalf("streamed %s definition = %#v, want exact end 1:%d",
+					testCase.name, definition, wantEndColumn)
+			}
+
+			root := t.TempDir()
+			writeFile(t, root, "middle.cpp", source)
+			responses, err := mustView(t, root).FindMany(
+				[]string{"target", "outside"},
+				Options{Include: IncludeRefs, Return: ReturnScope},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(responses) != 2 || len(responses[0].Results) != 1 ||
+				responses[0].Results[0].Scope != testCase.symbol ||
+				len(responses[1].Results) != 1 || responses[1].Results[0].Scope != "" {
+				t.Fatalf("streamed %s FindMany = %#v, want inside %s and top-level outside",
+					testCase.name, responses, testCase.symbol)
+			}
+		})
+	}
+}
+
+func TestCPPStreamingFallbackDoesNotInventMiddleOwnerEOFBoundaries(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+64)
+	for _, testCase := range []struct {
+		heading, symbol string
+	}{
+		{heading: "class Unfinished ", symbol: "Unfinished"},
+		{heading: "namespace UnfinishedNamespace ", symbol: "UnfinishedNamespace"},
+	} {
+		source := padding + testCase.heading + "{ int field = target();" + padding
+		analysis := analyzeCPPSource(source, 1)
+		if analysis.tree != nil || !analysis.lexed.truncated {
+			t.Fatalf("fixture did not enter streamed fallback: tree=%v truncated=%v",
+				analysis.tree != nil, analysis.lexed.truncated)
+		}
+		definition := cppDefinitionAt(t, analysis.definitions, testCase.symbol, 1)
+		if definition.ownsScope || definition.ownedEndColumn != 0 {
+			t.Errorf("unfinished streamed definition = %#v, want non-owning EOF recovery",
+				definition)
+		}
+	}
+}
+
+func TestCPPStreamingFallbackRecoversMiddleCXXCallableScopes(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+128)
+	middle := strings.Join([]string{
+		"class Middle {",
+		"public:",
+		"    Middle(Value value = Value{}) noexcept(noexcept(Value{})) : first_{1}, second_(2) { ctor_target(); } int after_ctor = class_target();",
+		"    ~Middle() { dtor_target(); }",
+		"    explicit operator bool() const noexcept { conversion_target(); }",
+		"    Middle operator+(int) const { operator_target(); return {}; }",
+		"    auto trailing() const -> int { trailing_target(); return 1; }",
+		"};",
+		"int global_value = global_target();",
+	}, "\n")
+	source := padding + "\n" + middle + "\n" + padding
+	analysis := analyzeCPPSource(source, len(strings.Split(source, "\n")))
+	if analysis.tree != nil || !analysis.lexed.truncated {
+		t.Fatalf("fixture did not enter streamed fallback: tree=%v truncated=%v",
+			analysis.tree != nil, analysis.lexed.truncated)
+	}
+
+	lines := strings.Split(source, "\n")
+	for _, testCase := range []struct {
+		symbol, closingFragment string
+		line                    int
+	}{
+		{symbol: "Middle", line: 4, closingFragment: "} int after_ctor"},
+		{symbol: "~Middle", line: 5, closingFragment: "}"},
+		{symbol: "operator bool", line: 6, closingFragment: "}"},
+		{symbol: "operator+", line: 7, closingFragment: "}"},
+		{symbol: "trailing", line: 8, closingFragment: "}"},
+	} {
+		definition := cppDefinitionAt(
+			t, analysis.definitions, testCase.symbol, testCase.line,
+		)
+		wantEndColumn := strings.LastIndex(
+			lines[testCase.line-1], testCase.closingFragment,
+		) + 2
+		if !definition.ownsScope || definition.scopeStart != testCase.line ||
+			definition.scopeEnd != testCase.line ||
+			definition.ownedEndColumn != wantEndColumn {
+			t.Errorf("streamed callable %q = %#v, want exact end %d:%d",
+				testCase.symbol, definition, testCase.line, wantEndColumn)
+		}
+	}
+	classDefinition := cppDefinitionAt(t, analysis.definitions, "Middle", 2)
+	if !classDefinition.ownsScope || classDefinition.scopeEnd != 9 ||
+		classDefinition.ownedEndColumn != 2 {
+		t.Errorf("streamed class = %#v, want exact end 9:2", classDefinition)
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "middle.cpp", source)
+	queries := []string{
+		"ctor_target", "class_target", "dtor_target", "conversion_target",
+		"operator_target", "trailing_target", "global_target",
+	}
+	wantScopes := []string{
+		"Middle", "Middle", "~Middle", "operator bool", "operator+", "trailing", "",
+	}
+	responses, err := mustView(t, root).FindMany(
+		queries, Options{Include: IncludeRefs, Return: ReturnScope},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(responses) != len(queries) {
+		t.Fatalf("FindMany responses = %d, want %d", len(responses), len(queries))
+	}
+	for index, response := range responses {
+		if len(response.Results) != 1 || response.Results[0].Scope != wantScopes[index] {
+			t.Errorf("FindMany(%q) = %#v, want scope %q",
+				queries[index], response.Results, wantScopes[index])
+		}
+	}
+}
+
+func TestCPPStreamingFallbackRecoversQualifiedCXXCallables(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+128)
+	middle := strings.Join([]string{
+		"class Qualified {",
+		"public:",
+		"    Qualified();",
+		"    ~Qualified();",
+		"    explicit operator bool() const;",
+		"    int value_;",
+		"};",
+		"Qualified::Qualified() : value_{1} { qualified_ctor_target(); }",
+		"Qualified::~Qualified() { qualified_dtor_target(); }",
+		"Qualified::operator bool() const { qualified_conversion_target(); }",
+	}, "\n")
+	source := padding + "\n" + middle + "\n" + padding
+	analysis := analyzeCPPSource(source, len(strings.Split(source, "\n")))
+	if analysis.tree != nil || !analysis.lexed.truncated {
+		t.Fatalf("fixture did not enter streamed fallback: tree=%v truncated=%v",
+			analysis.tree != nil, analysis.lexed.truncated)
+	}
+	for _, testCase := range []struct {
+		symbol string
+		line   int
+	}{
+		{symbol: "Qualified", line: 9},
+		{symbol: "~Qualified", line: 10},
+		{symbol: "operator bool", line: 11},
+	} {
+		definition := cppDefinitionAt(
+			t, analysis.definitions, testCase.symbol, testCase.line,
+		)
+		if !definition.ownsScope || definition.scopeStart != testCase.line ||
+			definition.scopeEnd != testCase.line || definition.ownedEndColumn == 0 {
+			t.Errorf("qualified streamed callable %q = %#v, want exact owning scope",
+				testCase.symbol, definition)
+		}
+	}
+
+	root := t.TempDir()
+	writeFile(t, root, "qualified.cpp", source)
+	queries := []string{
+		"qualified_ctor_target", "qualified_dtor_target", "qualified_conversion_target",
+	}
+	wantScopes := []string{"Qualified", "~Qualified", "operator bool"}
+	responses, err := mustView(t, root).FindMany(
+		queries, Options{Include: IncludeRefs, Return: ReturnScope},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, response := range responses {
+		if len(response.Results) != 1 || response.Results[0].Scope != wantScopes[index] {
+			t.Errorf("FindMany(%q) = %#v, want scope %q",
+				queries[index], response.Results, wantScopes[index])
+		}
+	}
+}
+
+func TestCPPStreamingFallbackDoesNotPromoteSpecialMemberCalls(t *testing.T) {
+	source := "class Guard { void member() { Guard(); this->~Guard(); } };"
+	scanner := newCPPOwningDefinitionStreamScanner(source, cLineStarts(source))
+	cppCodeTokensObserved(source, nil, nil, nil, scanner.consume)
+	if got := cppDefinitionCount(scanner.definitions, "Guard"); got != 1 {
+		t.Fatalf("streamed Guard definitions = %d, want only the class: %#v",
+			got, scanner.definitions)
+	}
+	if got := cppDefinitionCount(scanner.definitions, "~Guard"); got != 0 {
+		t.Fatalf("explicit destructor call became %d definitions: %#v",
+			got, scanner.definitions)
+	}
+}
+
+func TestCPPOwningDefinitionStreamScannerDoesNotOwnElaboratedReturnType(t *testing.T) {
+	source := "struct Result make() { target(); }"
+	scanner := newCPPOwningDefinitionStreamScanner(source, cLineStarts(source))
+	cppCodeTokensObserved(source, nil, nil, nil, scanner.consume)
+	result := cppDefinitionAt(t, scanner.definitions, "Result", 1)
+	if result.ownsScope {
+		t.Fatalf("elaborated return type owned the function body: %#v", result)
+	}
+	makeDefinition := cppDefinitionAt(t, scanner.definitions, "make", 1)
+	if !makeDefinition.ownsScope || makeDefinition.ownedEndColumn != len(source)+1 {
+		t.Fatalf("function after elaborated return type = %#v, want exact body",
+			makeDefinition)
+	}
+}
+
+func TestCPPStreamingFallbackKeepsUnfinishedCallableNonOwning(t *testing.T) {
+	padding := strings.Repeat(";", cppMaximumRetainedTokens/2+128)
+	source := padding + "\nclass Unfinished {\nUnfinished() { eof_target();" + padding
+	analysis := analyzeCPPSource(source, len(strings.Split(source, "\n")))
+	if analysis.tree != nil || !analysis.lexed.truncated {
+		t.Fatalf("fixture did not enter streamed fallback: tree=%v truncated=%v",
+			analysis.tree != nil, analysis.lexed.truncated)
+	}
+	definition := cppDefinitionAt(t, analysis.definitions, "Unfinished", 3)
+	if definition.ownsScope || definition.ownedEndColumn != 0 {
+		t.Fatalf("unfinished streamed constructor = %#v, want non-owning EOF recovery",
+			definition)
+	}
+}
+
+func TestCPPOwningDefinitionStreamScannerBoundsCallableHeader(t *testing.T) {
+	source := "Identifier;"
+	scanner := newCPPOwningDefinitionStreamScanner(source, cLineStarts(source))
+	identifier := cToken{
+		kind: cTokenIdentifier, text: "Identifier", start: 0, end: len("Identifier"),
+	}
+	for range cppMaximumStreamingCallableTokens + 64 {
+		scanner.consume(identifier)
+	}
+	if !scanner.statementOverflow || len(scanner.statement) != 0 {
+		t.Fatalf("oversized callable header retained state: len=%d overflow=%v",
+			len(scanner.statement), scanner.statementOverflow)
+	}
+	if cap(scanner.statement) > 2*cppMaximumStreamingCallableTokens {
+		t.Fatalf("callable header capacity = %d, want bounded near %d",
+			cap(scanner.statement), cppMaximumStreamingCallableTokens)
+	}
+	scanner.consume(cToken{text: ";", start: len("Identifier"), end: len(source)})
+	if scanner.statementOverflow || len(scanner.statement) != 0 {
+		t.Fatalf("statement boundary did not reset bounded header state: %#v", scanner)
+	}
+}
+
+func TestCPPOwningDefinitionStreamScannerBoundsStructuralDepth(t *testing.T) {
+	depth := cppMaximumStreamingOwnerDepth + 64
+	source := "class Outer {" + strings.Repeat("{", depth) +
+		strings.Repeat("}", depth) + "}"
+	lineStarts := cLineStarts(source)
+	scanner := newCPPOwningDefinitionStreamScanner(source, lineStarts)
+	cppCodeTokensObserved(source, nil, nil, nil, scanner.consume)
+	if len(scanner.frames) != 0 || scanner.overflowDepth != 0 {
+		t.Fatalf("streaming owner stack did not unwind: frames=%d overflow=%d",
+			len(scanner.frames), scanner.overflowDepth)
+	}
+	if cap(scanner.frames) > 2*cppMaximumStreamingOwnerDepth {
+		t.Fatalf("streaming owner frame capacity = %d, want bounded near %d",
+			cap(scanner.frames), cppMaximumStreamingOwnerDepth)
+	}
+	definition := cppDefinitionAt(t, scanner.definitions, "Outer", 1)
+	if !definition.ownsScope || definition.ownedEndColumn != len(source)+1 {
+		t.Fatalf("deep streamed owner = %#v, want confirmed outer boundary", definition)
+	}
+}
+
 func TestCPPRetainedTailDoesNotTurnNestedContextualImportIntoDependency(t *testing.T) {
 	prefix := "int caller() {\n" + strings.Repeat("value++;", cppMaximumRetainedTokens+1024)
 	source := prefix + "\nimport fake;\n}\n"

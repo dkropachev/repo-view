@@ -39,6 +39,7 @@ func csharpTreeDefinitions(
 		}
 		line, column := positions.lineColumn(nameStart)
 		scopeStart, scopeEnd := line, line
+		ownedEndLine, ownedEndColumn := 0, 0
 		if ownsScope {
 			scope := tree.nodes[scopeIndex]
 			start := scope.startByte
@@ -46,10 +47,15 @@ func csharpTreeDefinitions(
 				start = min(start, attached[scopeIndex])
 			}
 			scopeStart, scopeEnd = positions.lineSpan(start, scope.endByte)
+			ownedEndLine, ownedEndColumn = positions.lineColumn(scope.endByte)
+		}
+		if !ownsScope || ownedEndLine != scopeEnd {
+			ownedEndColumn = 0
 		}
 		definitions = append(definitions, sourceDefinition{
 			symbol: symbol, line: line, column: column,
-			scopeStart: scopeStart, scopeEnd: scopeEnd, ownsScope: ownsScope,
+			scopeStart: scopeStart, scopeEnd: scopeEnd,
+			ownedEndColumn: ownedEndColumn, ownsScope: ownsScope,
 		})
 	}
 
@@ -125,7 +131,16 @@ func csharpTreeDefinitions(
 					csharpTreeDeclarationOwnsScope(tree, nodeIndex),
 			)
 			if node.kind == "file_scoped_namespace_declaration" && len(definitions) > 0 {
-				definitions[len(definitions)-1].scopeEnd = lineCount
+				definition := &definitions[len(definitions)-1]
+				definition.scopeEnd = lineCount
+				// A file-scoped namespace owns through EOF, not merely through
+				// its declaration semicolon. Retarget the exact final-line
+				// boundary after widening the tree node's scope.
+				endLine, endColumn := positions.lineColumn(len(source))
+				definition.ownedEndColumn = 0
+				if endLine == lineCount {
+					definition.ownedEndColumn = endColumn
+				}
 			}
 
 		case "destructor_declaration":
