@@ -1,6 +1,6 @@
 # ScopeSifter
 
-[![CI](https://github.com/scopesifter/scopesifter/actions/workflows/ci.yml/badge.svg)](https://github.com/scopesifter/scopesifter/actions/workflows/ci.yml)
+[![CI](https://github.com/yapless/scopesifter/actions/workflows/ci.yml/badge.svg)](https://github.com/yapless/scopesifter/actions/workflows/ci.yml)
 
 `ScopeSifter` is a Go code navigation library and CLI. It finds where a function,
 class, method, type, or other symbol is used and can return:
@@ -16,12 +16,12 @@ It can also drop comments and Python docstrings from returned snippets.
 Install the latest source with Go:
 
 ```bash
-go install github.com/scopesifter/scopesifter/cmd/scopesifter@latest
+go install github.com/yapless/scopesifter/cmd/scopesifter@latest
 ```
 
 Version tags publish prebuilt Linux, macOS, and Windows binaries, plus a
 `SHA256SUMS` file, on the
-[GitHub Releases page](https://github.com/scopesifter/scopesifter/releases).
+[GitHub Releases page](https://github.com/yapless/scopesifter/releases).
 
 ## Navigation CLI
 

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 func TestDecodeValidatesJSONLAgainstProviderEvidence(t *testing.T) {

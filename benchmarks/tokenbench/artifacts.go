@@ -17,7 +17,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	executionsnapshot "github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 const (
@@ -36,7 +36,7 @@ const (
 
 // trustedArtifactManifestSHA256 is set only at link time, for example:
 //
-//	-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<sha256>
+//	-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<sha256>
 //
 // A blank or malformed value disables publishable artifact preparation. It is
 // intentionally unexported: runtime callers cannot widen the binary's policy.

@@ -11,10 +11,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
-	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness/fake"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
+	executionsnapshot "github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 type recordingExecutor struct {

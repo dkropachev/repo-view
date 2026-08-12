@@ -17,10 +17,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
 

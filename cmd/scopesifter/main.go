@@ -15,8 +15,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/internal/runstats"
-	"github.com/scopesifter/scopesifter/navigator"
+	"github.com/yapless/scopesifter/internal/runstats"
+	"github.com/yapless/scopesifter/navigator"
 )
 
 var (

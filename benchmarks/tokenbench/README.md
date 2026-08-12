@@ -144,7 +144,7 @@ link time:
 ```sh
 manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v2.json | awk '{print $1}')"
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```

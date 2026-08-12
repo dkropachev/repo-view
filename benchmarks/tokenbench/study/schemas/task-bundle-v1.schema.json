@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-bundle-v1.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/study/schemas/task-bundle-v1.schema.json",
   "title": "Tokenbench task artifact bundle v1",
   "type": "object",
   "additionalProperties": false,

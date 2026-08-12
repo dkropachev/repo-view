@@ -1,4 +1,4 @@
-module github.com/scopesifter/scopesifter
+module github.com/yapless/scopesifter
 
 go 1.26
 

@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	executionsnapshot "github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/source"
 )
 
 // PreparedOrigins is the adapter-free first phase. Its private fields make it

@@ -18,7 +18,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/gitdiffcontract"
 )
 
 const (

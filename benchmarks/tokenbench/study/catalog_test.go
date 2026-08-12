@@ -77,7 +77,7 @@ func taskCatalogFixture(t *testing.T) TaskCatalog {
 					RepositorySlug: repository.repositorySlug,
 					Source: CatalogSource{
 						UpstreamURL:      repository.upstreamURL,
-						SourceURL:        "https://github.com/scopesifter/" + repository.repositorySlug,
+						SourceURL:        "https://github.com/yapless/" + repository.repositorySlug,
 						BaseObjectID:     baseObjectID,
 						HeadObjectID:     headObjectID,
 						SourceTreeSHA256: catalogFixtureDigest("tree:" + taskID),
@@ -160,7 +160,7 @@ func TestTaskCatalogCanonicalRoundTrip(t *testing.T) {
 		t.Fatal("catalog changed during canonical round trip")
 	}
 	// A v1 field or list-order change must deliberately update this wire golden.
-	const wantDigest = "b2034d22c718ff4bcd8088346b40907fc13ea474c9b97ee3a253baf45aa25aba"
+	const wantDigest = "3a225ac3087e1ef1e899cd6651424dfc2d1ab9da5cb550d9f0b9a7c0b77d60a8"
 	if rawDigest := catalogFixtureDigest(string(raw)); rawDigest != wantDigest {
 		t.Fatalf("encoded catalog digest = %q, want %q", rawDigest, wantDigest)
 	}
@@ -300,7 +300,7 @@ func TestTaskCatalogRejectsProvenanceAndDigestDrift(t *testing.T) {
 	valid := taskCatalogFixture(t)
 	cases := map[string]func(*CatalogTask){
 		"upstream":                func(task *CatalogTask) { task.Source.UpstreamURL = "https://github.com/example/project" },
-		"source":                  func(task *CatalogTask) { task.Source.SourceURL = "https://github.com/scopesifter/other" },
+		"source":                  func(task *CatalogTask) { task.Source.SourceURL = "https://github.com/yapless/other" },
 		"missing comparison head": func(task *CatalogTask) { task.Source.HeadObjectID = nil },
 		"base object":             func(task *CatalogTask) { task.Source.BaseObjectID = strings.Repeat("g", 40) },
 		"head object": func(task *CatalogTask) {
@@ -502,7 +502,7 @@ func TestTaskCatalogSchemaMatchesClosedGoSurface(t *testing.T) {
 	if document.SchemaVersion != "https://json-schema.org/draft/2020-12/schema" {
 		t.Fatalf("unexpected JSON Schema version %q", document.SchemaVersion)
 	}
-	if document.ID != "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-catalog-v1.schema.json" {
+	if document.ID != "https://github.com/yapless/scopesifter/benchmarks/tokenbench/study/schemas/task-catalog-v1.schema.json" {
 		t.Fatalf("unexpected task catalog schema ID %q", document.ID)
 	}
 	checkClosedSchemaObject(t, "catalog", document.schemaObject)

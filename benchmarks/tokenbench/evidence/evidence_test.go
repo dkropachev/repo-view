@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {

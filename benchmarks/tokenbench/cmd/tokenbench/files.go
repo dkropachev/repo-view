@@ -17,8 +17,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/evidence"
 	"golang.org/x/sys/unix"
 )
 

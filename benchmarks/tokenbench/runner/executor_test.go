@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 	"golang.org/x/sys/unix"
 )
 

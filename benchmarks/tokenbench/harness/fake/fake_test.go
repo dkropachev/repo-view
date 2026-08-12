@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/conformance"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness/conformance"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness/fake"
 )
 
 func TestConformance(t *testing.T) {

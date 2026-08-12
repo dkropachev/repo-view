@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scopesifter/scopesifter/navigator"
+	"github.com/yapless/scopesifter/navigator"
 )
 
 func TestSplitPositionalsAllowsFlagsAfterSymbol(t *testing.T) {

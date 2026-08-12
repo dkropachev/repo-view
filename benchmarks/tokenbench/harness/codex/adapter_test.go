@@ -11,9 +11,9 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/conformance"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness/conformance"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 type decodeForgingAdapterWrapper struct{ *Adapter }

@@ -22,7 +22,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/source"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
 

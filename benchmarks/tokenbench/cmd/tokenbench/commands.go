@@ -12,14 +12,14 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
-	runnercodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
-	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
+	runnercodex "github.com/yapless/scopesifter/benchmarks/tokenbench/runner/codex"
+	executionsnapshot "github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 const (

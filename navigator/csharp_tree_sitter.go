@@ -1,6 +1,6 @@
 package navigator
 
-import csharpgrammar "github.com/scopesifter/scopesifter/internal/csharpgrammar"
+import csharpgrammar "github.com/yapless/scopesifter/internal/csharpgrammar"
 
 // parseCSharpSyntax gates the official C# grammar behind the lexical resource
 // frontiers. Inputs outside those frontiers are handled by full-source bounded

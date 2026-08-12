@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/schemas/suite-v3.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/schemas/suite-v3.schema.json",
   "title": "Tokenbench authored code suite v3",
   "description": "One common code task and harness configuration with catalog, toolchain, and trusted execution-artifact commitments. Arms, writable paths, environments, and tool registrations are intentionally absent. This document is audit data and does not authorize a writable workspace.",
   "type": "object",
