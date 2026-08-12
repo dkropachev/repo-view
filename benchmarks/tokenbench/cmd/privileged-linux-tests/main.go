@@ -15,9 +15,12 @@ import (
 )
 
 const (
-	requiredEnvironment  = "TOKENBENCH_REQUIRE_PRIVILEGED_TESTS"
-	containerEnvironment = "TOKENBENCH_PRIVILEGED_CONTAINER"
-	pinnedImageDefault   = "golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
+	requiredEnvironment             = "TOKENBENCH_REQUIRE_PRIVILEGED_TESTS"
+	containerEnvironment            = "TOKENBENCH_PRIVILEGED_CONTAINER"
+	commandRunnerImageEnvironment   = "TOKENBENCH_COMMAND_RUNNER_IMAGE"
+	commandRunnerUtilityEnvironment = "TOKENBENCH_COMMAND_RUNNER_UTILITY"
+	commandRunnerUtilityFlag        = "--command-runner-utility"
+	pinnedImageDefault              = "golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
 )
 
 type binarySpec struct {
@@ -49,6 +52,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return errors.New("container mode requires its host marker")
 		}
 		return containerMain(stdout, stderr)
+	case len(args) == 2 && args[0] == commandRunnerUtilityFlag:
+		return runCommandRunnerUtility(args[1], stdout, stderr)
 	case len(args) >= 4 && args[0] == "--cgroup-entry":
 		return cgroupEntry(args[1], args[2], args[3:])
 	default:
@@ -178,6 +183,14 @@ func compileLinuxBinaries(repositoryRoot, binaryDirectory string, stdout, stderr
 		}
 	}
 	arguments := []string{
+		"build", "-mod=readonly", "-trimpath",
+		"-o", filepath.Join(binaryDirectory, "tokenbench"),
+		"./benchmarks/tokenbench/cmd/tokenbench",
+	}
+	if err := runBuild(repositoryRoot, buildEnvironment, arguments, stdout, stderr); err != nil {
+		return fmt.Errorf("compile production tokenbench command runner: %w", err)
+	}
+	arguments = []string{
 		"build", "-mod=readonly", "-trimpath",
 		"-o", filepath.Join(binaryDirectory, "privileged-linux-tests"),
 		"./benchmarks/tokenbench/cmd/privileged-linux-tests",

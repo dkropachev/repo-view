@@ -112,9 +112,11 @@ CGO_ENABLED=0 go build -trimpath \
 
 Do not add a shell artifact. The resulting static Go tokenbench executable is
 also the command interpreter: immutable snapshot construction copies its exact
-bytes to the Codex v0.144.0 compatibility pathname and commits the same-image
+bytes to the pinned Codex v0.144.0 discovery pathname and commits the same-image
 relationship. The interpreter accepts only `-c COMMAND`; it does not run Bash
-and does not claim complete Bash behavior.
+and exposes only its documented supported command surface. Remove the discovery
+pathname as soon as the pinned Codex release no longer requires fixed-basename
+discovery.
 
 The executable itself becomes the runner/arm-init image in the immutable
 snapshot. It must therefore be a native static ELF executable at one real,

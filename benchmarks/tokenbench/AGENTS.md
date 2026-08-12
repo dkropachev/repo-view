@@ -78,7 +78,8 @@ tokenbench evidence.
   them is durable.
 - The model `PATH` is exactly the immutable toolbox directory. Codex v0.144.0's
   fixed basename discovery may resolve only the code-owned Go command-runner
-  compatibility pathname there. Never load or execute Bash, fall back to
+  discovery pathname there. Delete that pathname as soon as the pinned Codex
+  release no longer requires it. Never load or execute Bash, fall back to
   ambient `PATH`, `/usr/bin`, user home configuration, or a dynamic loader.
 - Preserve the exact same source/toolbox/runtime paths for both arms. Do not
   encode arm name, randomized order, attempt ID, or repetition into anything

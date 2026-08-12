@@ -22,8 +22,8 @@ const codexDiscoveryBasename = "bash"
 // changes in a way that can affect an observed model tool call.
 const Implementation = "tokenbench.command-runner/go+mvdan-sh-v3.13.1/v1"
 
-// Invoked reports whether argv0 is the compatibility pathname through which
-// Codex v0.144.0 discovers the closed command runner. That Codex release has no
+// Invoked reports whether argv0 is the pinned discovery pathname through which
+// Codex v0.144.0 finds the closed command runner. That Codex release has no
 // configurable default-shell path on its CLI: on Linux it searches for this
 // basename before falling back to ambient absolute paths. The executable bytes
 // at this pathname are the tokenbench Go runner, never a Bash image. Requiring

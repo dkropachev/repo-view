@@ -87,7 +87,7 @@ func TestValidateAndPlanRejectNonCodexAdapter(t *testing.T) {
 	}
 }
 
-func TestDispatchUsesGoCommandRunnerAtCodexCompatibilityPath(t *testing.T) {
+func TestDispatchUsesGoCommandRunnerAtPinnedCodexDiscoveryPath(t *testing.T) {
 	t.Parallel()
 	var stdout, stderr bytes.Buffer
 	exitCode := dispatch(

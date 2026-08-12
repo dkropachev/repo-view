@@ -172,19 +172,22 @@ Codex CLI v0.144.0 has no configurable default-shell path and recognizes only a
 fixed set of basenames. Its toolbox pathname therefore retains the basename it
 searches first on Linux, but the executable at that path is the Go interpreter;
 no Bash image is loaded or executed. The interpreter accepts only the pinned
-non-login `-c COMMAND` form. Its tested compatibility surface covers pipelines,
-redirection, variables, conditionals, exit status, and cancellation; evidence
-commits `tokenbench.command-runner/go+mvdan-sh-v3.13.1/v1` and must not claim
-untested Bash compatibility.
+non-login `-c COMMAND` form. Its supported command surface is limited to the
+tested pipelines, redirection, variables, conditionals, exit status, and
+cancellation behavior; evidence commits
+`tokenbench.command-runner/go+mvdan-sh-v3.13.1/v1` and must not claim Bash
+behavior outside that surface.
 
 This discovery constraint was audited against the peeled
 `rust-v0.144.0` source commit
 `767822446c7a594caa19609ca435281a9ec67e0d`: `shell_detect.rs` obtains the Unix
 default from `getpwuid_r`, then searches the fixed Bash/Zsh/sh names and absolute
 fallbacks; the production CLI provides no user-shell override. `SHELL` controls
-child environment policy but not this selection. The compatibility pathname is
-therefore narrower than adding a Codex fork, a synthetic passwd database, or a
-private mount over an ambient absolute shell path.
+child environment policy but not this selection. The pinned discovery pathname
+is therefore narrower than adding a Codex fork, a synthetic passwd database,
+or a private mount over an ambient absolute shell path. It is version-scoped
+and must be deleted as soon as the pinned Codex release no longer requires
+fixed-basename discovery.
 
 The snapshot builder:
 

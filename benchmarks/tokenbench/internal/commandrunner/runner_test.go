@@ -13,7 +13,7 @@ import (
 func TestInvokedOnlyForPinnedCodexDiscoveryBasename(t *testing.T) {
 	t.Parallel()
 	if !Invoked("/snapshot/toolbox/bash", "/snapshot/toolbox") {
-		t.Fatal("compatibility pathname was not recognized")
+		t.Fatal("pinned Codex discovery pathname was not recognized")
 	}
 	for _, input := range []struct {
 		argv0 string

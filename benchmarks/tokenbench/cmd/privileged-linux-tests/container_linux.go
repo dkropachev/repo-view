@@ -38,12 +38,17 @@ var privilegedSuites = []privilegedSuite{
 		names: []string{
 			"TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath",
 			"TestArmCleanupRetriesTransientRmdirWithinDeadline",
+			"TestPrivilegedGoCommandRunnerDiscoveryPath",
 			"TestLandlockBlocksCgroupEscapeAndAllowsOnlyPinnedWritableRoots",
 			"TestLandlockFullPolicyDeniesHostReadsExecutablesAndLoaderBypass",
 			"TestPrivilegedExactConnectKernelBoundary",
 			"TestPrivilegedExactConnectRejectsAncestorProgram",
 			"TestPrivilegedArmInitPIDNamespaceBoundary",
 			"TestProcessInspectionSeccompKillsX32SyscallTable",
+		},
+		environment: map[string]string{
+			commandRunnerImageEnvironment:   "/tokenbench-tests/tokenbench",
+			commandRunnerUtilityEnvironment: "/tokenbench-tests/privileged-linux-tests",
 		},
 	},
 	{

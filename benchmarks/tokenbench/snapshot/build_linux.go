@@ -22,6 +22,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
@@ -280,7 +281,7 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		{"verifier Git", request.Origins.Git, filepath.Join(toolsPath, "verifier-git"), true},
 		{"runner/arm-init", request.Origins.Runner, filepath.Join(toolsPath, "runner-arm-init"), true},
 		// Codex v0.144.0 recognizes only a fixed set of shell basenames and has
-		// no CLI default-shell override. The compatibility pathname contains a
+		// no CLI default-shell override. The pinned discovery pathname contains a
 		// second copy of the pinned Go runner image, never a Bash artifact.
 		{"Go command runner", request.Origins.Runner, filepath.Join(toolboxPath, "bash"), true},
 	}
@@ -319,6 +320,12 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 	}, utilityPathsForRoot(toolboxPath).values()...)
 	if err := validateNativeExecutableABIs(allExecutablePaths); err != nil {
 		return nil, err
+	}
+	if err := commandrunner.VerifyEntrypoint(
+		ctx,
+		filepath.Join(toolboxPath, "bash"),
+	); err != nil {
+		return nil, fmt.Errorf("prove copied Go command-runner entrypoint: %w", err)
 	}
 
 	gitPath := filepath.Join(toolsPath, "verifier-git")
