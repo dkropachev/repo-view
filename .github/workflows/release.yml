@@ -11,6 +11,10 @@ permissions:
 concurrency:
   group: release-${{ github.ref }}
 
+defaults:
+  run:
+    shell: sh
+
 jobs:
   release:
     name: Release
