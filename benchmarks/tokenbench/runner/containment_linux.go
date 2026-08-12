@@ -117,6 +117,11 @@ type cgroupResourceCounterKeys struct {
 	PIDsEvents        []string `json:"pids_events"`
 }
 
+type armCgroupInitializationOperations struct {
+	captureResources         func(*os.Root) (*harness.ResourceOutcome, error)
+	configureAndVerifyLimits func(*os.Root) error
+}
+
 var inheritedControlNames = []string{
 	"cgroup.controllers",
 	"cgroup.freeze",
@@ -752,49 +757,71 @@ func (manager *cgroupManager) newArm() (*armCgroup, error) {
 	if err := manager.verifyPolicy(); err != nil {
 		return nil, fmt.Errorf("verify inherited cgroup policy before arm creation: %w", err)
 	}
-	if err := manager.root.Mkdir(pairCgroupName, 0o700); err != nil {
-		return nil, fmt.Errorf("create arm cgroup: %w", err)
-	}
-	armRoot, err := manager.root.OpenRoot(pairCgroupName)
+	directory, keys, err := initializeArmCgroup(
+		manager.root,
+		manager.resourceKeys,
+		armCgroupInitializationOperations{
+			captureResources:         captureCgroupResourceOutcome,
+			configureAndVerifyLimits: configureArmLimits,
+		},
+	)
 	if err != nil {
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, fmt.Errorf("open arm cgroup root: %w", err)
-	}
-	if err := configureArmLimits(armRoot); err != nil {
-		_ = armRoot.Close()
-		_ = manager.root.Remove(pairCgroupName)
 		return nil, err
 	}
-	initialResources, err := captureCgroupResourceOutcome(armRoot)
-	if err != nil {
-		_ = armRoot.Close()
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, fmt.Errorf("capture initial arm resource counters: %w", err)
-	}
-	keys := cgroupResourceKeys(initialResources)
-	if len(manager.resourceKeys.CPUStat) == 0 {
-		manager.resourceKeys = keys
-	} else if err := requireCgroupResourceKeys(keys, manager.resourceKeys); err != nil {
-		_ = armRoot.Close()
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, err
-	}
-	if err := requireZeroInitialResources(initialResources); err != nil {
-		_ = armRoot.Close()
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, err
-	}
-	if err := armRoot.Close(); err != nil {
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, fmt.Errorf("close configured arm cgroup root: %w", err)
-	}
-	directory, err := manager.root.Open(pairCgroupName)
-	if err != nil {
-		_ = manager.root.Remove(pairCgroupName)
-		return nil, fmt.Errorf("open arm cgroup: %w", err)
-	}
+	manager.resourceKeys = keys
 	manager.active[pairCgroupName] = struct{}{}
 	return &armCgroup{manager: manager, name: pairCgroupName, directory: directory}, nil
+}
+
+func initializeArmCgroup(
+	parent *os.Root,
+	previousKeys cgroupResourceCounterKeys,
+	operations armCgroupInitializationOperations,
+) (*os.File, cgroupResourceCounterKeys, error) {
+	name := pairCgroupName
+	if err := parent.Mkdir(name, 0o700); err != nil {
+		return nil, cgroupResourceCounterKeys{}, fmt.Errorf("create arm cgroup: %w", err)
+	}
+	armRoot, err := parent.OpenRoot(name)
+	if err != nil {
+		_ = parent.Remove(name)
+		return nil, cgroupResourceCounterKeys{}, fmt.Errorf("open arm cgroup root: %w", err)
+	}
+	fail := func(err error) (*os.File, cgroupResourceCounterKeys, error) {
+		_ = armRoot.Close()
+		_ = parent.Remove(name)
+		return nil, cgroupResourceCounterKeys{}, err
+	}
+	// Capture strict zero-use accounting before setting cpu.max. Enabling a
+	// finite CFS quota starts the kernel period timer even when this cgroup has
+	// never contained a task, so nr_periods may legitimately become nonzero
+	// after configuration and cannot prove stale workload accounting.
+	initialResources, err := operations.captureResources(armRoot)
+	if err != nil {
+		return fail(fmt.Errorf("capture initial arm resource counters: %w", err))
+	}
+	keys := cgroupResourceKeys(initialResources)
+	if len(previousKeys.CPUStat) != 0 {
+		if err := requireCgroupResourceKeys(keys, previousKeys); err != nil {
+			return fail(err)
+		}
+	}
+	if err := requireZeroInitialResources(initialResources); err != nil {
+		return fail(err)
+	}
+	if err := operations.configureAndVerifyLimits(armRoot); err != nil {
+		return fail(err)
+	}
+	if err := armRoot.Close(); err != nil {
+		_ = parent.Remove(name)
+		return nil, cgroupResourceCounterKeys{}, fmt.Errorf("close configured arm cgroup root: %w", err)
+	}
+	directory, err := parent.Open(name)
+	if err != nil {
+		_ = parent.Remove(name)
+		return nil, cgroupResourceCounterKeys{}, fmt.Errorf("open arm cgroup: %w", err)
+	}
+	return directory, keys, nil
 }
 
 func (arm *armCgroup) killAndRemove(deadline time.Duration) error {
@@ -1058,8 +1085,15 @@ func requireCgroupResourceKeys(got, want cgroupResourceCounterKeys) error {
 }
 
 func requireZeroInitialResources(outcome *harness.ResourceOutcome) error {
+	// nr_periods is the number of elapsed CFS bandwidth periods. A fresh,
+	// empty cgroup can observe it advancing as soon as the kernel activates a
+	// quota timer, so it is not evidence that a task consumed resources.
+	for _, counter := range outcome.CPUStat {
+		if counter.Name != "nr_periods" && counter.Value != 0 {
+			return fmt.Errorf("fresh arm cgroup counter %s started at %d", counter.Name, counter.Value)
+		}
+	}
 	for _, counters := range [][]harness.ResourceCounter{
-		outcome.CPUStat,
 		outcome.MemoryEvents,
 		outcome.MemoryEventsLocal,
 		outcome.PIDsEvents,
@@ -1127,7 +1161,18 @@ func cgroupRootEmpty(root *os.Root) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read cgroup processes: %w", err)
 	}
-	return len(processes) == 0, nil
+	if len(processes) != 0 {
+		return false, nil
+	}
+	pidsCurrent, err := readCgroupScalar(root, "pids.current")
+	if err != nil {
+		return false, fmt.Errorf("read current cgroup process count: %w", err)
+	}
+	// cgroup.events and cgroup.procs can both report an empty subtree before
+	// the pids controller publishes its final decrement. Resource capture must
+	// wait for that decrement too, otherwise an immediately following read can
+	// produce a nonzero pids.current and an invalid ResourceOutcome.
+	return pidsCurrent == 0, nil
 }
 
 func (manager *cgroupManager) close() error {

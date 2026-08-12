@@ -31,6 +31,7 @@ var (
 	enforcedChangedReturn            string
 	enforcedChangedContext           string
 	enforcedNavigationSemantics      string
+	releaseRevision                  = "development"
 )
 
 func main() {
@@ -62,6 +63,9 @@ func run(args []string) int {
 		return runChanged(args[1:])
 	case "mcp":
 		return runMCP(args[1:])
+	case "version":
+		fmt.Fprintln(os.Stdout, releaseRevision)
+		return 0
 	default:
 		printUsage(os.Stderr)
 		return 2

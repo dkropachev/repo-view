@@ -15,7 +15,7 @@ import (
 const (
 	// Version identifies changes that can alter patch bytes, rename
 	// classification, or changed-line locations.
-	Version = "scopesifter.git-diff/v2"
+	Version = "scopesifter.git-diff/v3"
 
 	RenameSimilarity = 50
 	RenameLimit      = 20_000
@@ -42,6 +42,7 @@ func InvocationPrefix() []string {
 		"-c", "core.pager=cat",
 		"-c", "core.untrackedCache=false",
 		"-c", "diff.external=",
+		"-c", "diff.ignoreSubmodules=dirty",
 		"-c", "diff.renames=true",
 		"-c", "diff.renameLimit=" + strconv.Itoa(RenameLimit),
 		"-c", "merge.renameLimit=" + strconv.Itoa(RenameLimit),
@@ -92,6 +93,7 @@ func NumstatArguments(base, head string) []string {
 func metadataArguments(format, base, head string) []string {
 	return []string{
 		"diff", "--no-ext-diff", "--no-textconv", format, "-z",
+		"--ignore-submodules=dirty",
 		"--find-renames=" + strconv.Itoa(RenameSimilarity) + "%",
 		"-l" + strconv.Itoa(RenameLimit),
 		base + "..." + head, "--",
@@ -114,6 +116,7 @@ func ChangedLineArguments(base, head string) []string {
 func patchArguments(base, head string, contextLines int) []string {
 	return []string{
 		"diff", "--no-color", "--no-ext-diff", "--no-textconv",
+		"--ignore-submodules=dirty",
 		"--find-renames=" + strconv.Itoa(RenameSimilarity) + "%",
 		"-l" + strconv.Itoa(RenameLimit),
 		"--diff-algorithm=myers", "--no-indent-heuristic",

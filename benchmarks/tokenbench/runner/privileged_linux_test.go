@@ -5,19 +5,30 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 	"golang.org/x/sys/unix"
 )
 
-const requirePrivilegedTestsEnvironment = "TOKENBENCH_REQUIRE_PRIVILEGED_TESTS"
+const (
+	requirePrivilegedTestsEnvironment      = "TOKENBENCH_REQUIRE_PRIVILEGED_TESTS"
+	commandRunnerImageFixtureEnvironment   = "TOKENBENCH_COMMAND_RUNNER_IMAGE"
+	commandRunnerUtilityFixtureEnvironment = "TOKENBENCH_COMMAND_RUNNER_UTILITY"
+	commandRunnerUtilityFlag               = "--command-runner-utility"
+	commandRunnerUtilityMarker             = "tokenbench-command-runner-utility-v1"
+)
 
 func privilegedTestUnavailable(t *testing.T, format string, arguments ...any) {
 	t.Helper()
@@ -81,6 +92,258 @@ func privilegedArmInit(t *testing.T) (*pinnedCommonExecutable, *os.File, *os.Fil
 	}
 	t.Cleanup(func() { _ = devNull.Close() })
 	return launcher, common, devNull
+}
+
+func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
+	imageSource := privilegedExecutableFixture(
+		t,
+		commandRunnerImageFixtureEnvironment,
+	)
+	utilitySource := privilegedExecutableFixture(
+		t,
+		commandRunnerUtilityFixtureEnvironment,
+	)
+	runtimeRoot := t.TempDir()
+	toolbox := filepath.Join(runtimeRoot, "toolbox")
+	workingDirectory := filepath.Join(runtimeRoot, "work")
+	wrongToolbox := filepath.Join(runtimeRoot, "wrong-toolbox")
+	for _, directory := range []string{toolbox, workingDirectory, wrongToolbox} {
+		if err := os.Mkdir(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	discoveryPath := filepath.Join(toolbox, "bash")
+	utilityPath := filepath.Join(toolbox, "grep")
+	wrongDiscoveryPath := filepath.Join(wrongToolbox, "bash")
+	imageDigest := copyStaticExecutableFixture(t, imageSource, discoveryPath)
+	_ = copyStaticExecutableFixture(t, utilitySource, utilityPath)
+	_ = copyStaticExecutableFixture(t, utilitySource, wrongDiscoveryPath)
+	if pinned, err := pinExecutable(discoveryPath, imageDigest, true, true, true); err == nil {
+		_ = pinned.close()
+		t.Fatal("generic executable pinning accepted the reserved discovery basename")
+	}
+	discoveryImage, err := os.Open(discoveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer discoveryImage.Close()
+	if err := commandrunner.VerifyPinnedEntrypoint(
+		t.Context(), discoveryPath, discoveryImage,
+	); err != nil {
+		t.Fatalf("verify production command-runner entrypoint: %v", err)
+	}
+	wrongImage, err := os.Open(wrongDiscoveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrongImage.Close()
+	if err := commandrunner.VerifyPinnedEntrypoint(
+		t.Context(), wrongDiscoveryPath, wrongImage,
+	); err == nil {
+		t.Fatal("semantic entrypoint probe accepted a different static Go image")
+	}
+
+	executor := newContainedTestExecutorConfig(t, Config{
+		ReadOnlyPaths:   []string{toolbox, workingDirectory},
+		ExecutablePaths: []string{utilityPath},
+	})
+	request := func(arguments ...string) ExecutionRequest {
+		return ExecutionRequest{
+			Arm: BaselineArm,
+			Invocation: harness.Invocation{
+				Executable:       discoveryPath,
+				ExecutableSHA256: imageDigest,
+			},
+			Process: harness.ProcessSpec{
+				Environment: map[string]string{
+					"HOME":   workingDirectory,
+					"LC_ALL": "C",
+					"PATH":   toolbox,
+					"PWD":    workingDirectory,
+					"TMPDIR": workingDirectory,
+				},
+				Directory:     workingDirectory,
+				Argv:          append([]string{discoveryPath}, arguments...),
+				Stdin:         []byte{},
+				TimeoutMillis: 30_000,
+			},
+		}
+	}
+	ordinary, ordinaryErr := executor.Prepare(t.Context(), request("-c", "grep"))
+	if ordinary != nil {
+		_ = ordinary.Abort(t.Context())
+	}
+	if ordinaryErr == nil {
+		t.Fatal("ordinary executor role accepted the reserved discovery basename")
+	}
+	run := func(t *testing.T, arguments ...string) harness.RawExecution {
+		t.Helper()
+		prepared, err := executor.prepare(
+			context.Background(), request(arguments...), verifiedCommandRunnerDiscovery,
+		)
+		if err != nil {
+			t.Fatalf("prepare command-runner fixture %q: %v", arguments, err)
+		}
+		raw, err := prepared.Execute(context.Background())
+		if err != nil {
+			t.Fatalf("run command-runner fixture %q: %v", arguments, err)
+		}
+		return raw
+	}
+
+	raw := run(t, "-c", "grep "+commandRunnerUtilityFlag+" print")
+	if raw.ExitCode != 0 || string(raw.Stdout) != commandRunnerUtilityMarker+"\n" ||
+		len(raw.Stderr) != 0 {
+		t.Fatalf("allowlisted Go utility execution: %+v", raw)
+	}
+	raw = run(t, "-lc", "printf forbidden")
+	if raw.ExitCode != 2 || len(raw.Stdout) != 0 ||
+		!strings.Contains(string(raw.Stderr), "expected exactly -c COMMAND") {
+		t.Fatalf("unsupported command-runner argv was not rejected: %+v", raw)
+	}
+	for _, test := range []struct {
+		name       string
+		command    string
+		exitCode   int
+		diagnostic string
+	}{
+		{
+			name:       "unlisted basename",
+			command:    "sh -c 'printf forbidden'",
+			exitCode:   125,
+			diagnostic: "prohibited script runtime",
+		},
+		{
+			name:       "host absolute path",
+			command:    "/bin/sh -c 'printf forbidden'",
+			exitCode:   125,
+			diagnostic: "prohibited script runtime",
+		},
+		{
+			name:       "host absolute native path",
+			command:    "/bin/cat",
+			exitCode:   125,
+			diagnostic: "bare approved role",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			raw := run(t, "-c", test.command)
+			if raw.ExitCode != test.exitCode || len(raw.Stdout) != 0 ||
+				!strings.Contains(string(raw.Stderr), test.diagnostic) {
+				t.Fatalf("unapproved shell was not rejected: %+v", raw)
+			}
+		})
+	}
+
+	prepared, err := executor.prepare(
+		context.Background(),
+		request("-c", "grep "+commandRunnerUtilityFlag+" sleep-tree"),
+		verifiedCommandRunnerDiscovery,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	raw, err = prepared.Execute(cancelCtx)
+	if err != nil {
+		t.Fatalf("cancel command-runner tree: %v", err)
+	}
+	if !raw.Cancelled || raw.TimedOut || time.Since(started) > 3*time.Second {
+		t.Fatalf("command-runner cancellation classification: %+v", raw)
+	}
+	leafPID := commandRunnerLeafPID(t, raw.Stdout)
+	if leafPID <= 1 {
+		t.Fatalf("command-runner leaf received invalid namespace PID %d", leafPID)
+	}
+	if err := harness.ValidateResourceOutcome(raw.Resources); err != nil {
+		t.Fatalf("command-runner cancellation resources: %v", err)
+	}
+	if raw.Resources.PIDsCurrent != 0 || raw.Resources.PIDsPeak < 3 {
+		t.Fatalf("command-runner tree was not fully reaped: %+v", raw.Resources)
+	}
+	if _, err := os.Lstat(executor.containment.pairPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("command-runner arm cgroup survived cancellation: %v", err)
+	}
+	raw = run(t, "-c", "grep "+commandRunnerUtilityFlag+" print")
+	if raw.ExitCode != 0 || string(raw.Stdout) != commandRunnerUtilityMarker+"\n" ||
+		len(raw.Stderr) != 0 {
+		t.Fatalf("command-runner arm was not reusable after cancellation: %+v", raw)
+	}
+}
+
+func privilegedExecutableFixture(t *testing.T, environmentKey string) string {
+	t.Helper()
+	path := os.Getenv(environmentKey)
+	if path == "" {
+		privilegedTestUnavailable(t, "%s is unset", environmentKey)
+	}
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		t.Fatalf("%s is not an absolute canonical path", environmentKey)
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 ||
+		info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("%s is not an executable regular file: %v", environmentKey, err)
+	}
+	return path
+}
+
+func copyStaticExecutableFixture(t *testing.T, source, destination string) string {
+	t.Helper()
+	input, err := os.Open(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer input.Close()
+	if err := validateStaticELF(input); err != nil {
+		t.Fatalf("fixture %s is not a static ELF image: %v", source, err)
+	}
+	digest, err := hashOpenFile(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := input.Seek(0, io.SeekStart); err != nil {
+		t.Fatal(err)
+	}
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o700)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(output, input); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Sync(); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Chmod(0o555); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func commandRunnerLeafPID(t *testing.T, output []byte) int {
+	t.Helper()
+	for _, field := range strings.Fields(string(output)) {
+		value, ok := strings.CutPrefix(field, "leaf-pid=")
+		if !ok {
+			continue
+		}
+		pid, err := strconv.Atoi(value)
+		if err == nil && pid > 0 {
+			return pid
+		}
+	}
+	t.Fatalf("command-runner cancellation output omitted leaf PID: %q", output)
+	return 0
 }
 
 func TestArmCleanupRetriesTransientRmdirWithinDeadline(t *testing.T) {

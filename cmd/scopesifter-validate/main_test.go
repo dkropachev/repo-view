@@ -123,6 +123,30 @@ func TestEnsureManagedRepositoriesReusesRelativeLocalOrigin(t *testing.T) {
 	}
 }
 
+func TestEnsureManagedRepositoriesAcceptsRelativeCloneRoot(t *testing.T) {
+	remote := initializeValidationRepository(t, "relative-clone-root-remote")
+	root := t.TempDir()
+	specPath := filepath.Join(root, "repositories.tsv")
+	if err := os.WriteFile(specPath, []byte("sample\t"+remote+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	relativeCloneRoot, err := filepath.Rel(workingDirectory, filepath.Join(root, "clones"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repositories, _, err := ensureManagedRepositories(specPath, relativeCloneRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repositories) != 1 || !filepath.IsAbs(repositories[0]) {
+		t.Fatalf("repositories = %q, want one absolute path", repositories)
+	}
+}
+
 func TestRepositoryOriginsResolveRelativeURLsFromTheirUseSites(t *testing.T) {
 	root := t.TempDir()
 	repository := filepath.Join(root, "clones", "sample")

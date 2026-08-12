@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -101,6 +102,14 @@ func pinExecutable(
 	opened, err := file.Stat()
 	if err != nil || !opened.Mode().IsRegular() || opened.Mode().Perm()&0o111 == 0 {
 		return nil, errors.New("executable is not an executable regular file")
+	}
+	if path != "/proc/self/exe" {
+		if err := processpolicy.ValidateExecutable(path); err != nil {
+			return nil, fmt.Errorf("executable violates process policy: %w", err)
+		}
+	}
+	if err := processpolicy.ValidateNativeFile(file); err != nil {
+		return nil, err
 	}
 	if before != nil && !os.SameFile(before, opened) {
 		return nil, errors.New("executable changed while opening")

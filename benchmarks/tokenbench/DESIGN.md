@@ -154,8 +154,8 @@ yet.
 
 ## Trusted artifacts and immutable execution image
 
-The fixed artifact-manifest v2 contains a closed set of exact executable roles:
-Codex, scopesifter, static verifier Git, static Bash, and 14 native utilities. It
+The fixed artifact-manifest v4 contains a closed set of exact executable roles:
+Codex, scopesifter, static verifier Git, and 11 native utilities. It
 also contains bounded source/recipe/builder provenance. The manifest is accepted
 only when three commitments agree: authored suite, exact manifest bytes, and an
 unexported digest embedded in the tokenbench executable at link time.
@@ -164,6 +164,33 @@ Linux loading uses traversal-safe `openat2`, rejects symlinks, hard links,
 dynamic ELF interpreters/dependencies, nonnative ABI, oversized files, role
 aliasing, and byte drift. A private loader capability, not an exported manifest
 value, is required for origin preparation.
+
+The command dispatcher is not a bundle artifact. Snapshot construction copies
+the already pinned static Go tokenbench runner image to the closed toolbox and
+pure validation requires that copy's digest to equal the runner/arm-init image.
+Codex CLI v0.144.0 has no configurable default-shell path and recognizes only a
+fixed set of basenames. Its toolbox pathname therefore retains the basename it
+searches first on Linux, but the executable at that path is the Go dispatcher;
+no Bash image is loaded or executed. The dispatcher accepts only the pinned
+non-login `-c COMMAND` form. Its closed, Go-owned grammar is exactly one
+pipeline of literal argv commands. Quotes and backslashes only construct argv
+bytes. Variables, expansion, source/dot/eval, loops, conditions, functions,
+command lists, backgrounding, redirection, builtins, executable paths, and
+script images are rejected. Each stage resolves one approved native utility in
+a closed environment, and delegation or file-mutation options are rejected.
+Evidence commits `tokenbench.command-runner/go-argv-pipeline-v1/v6`; this is not
+a shell or scripting-language compatibility claim.
+
+This discovery constraint was audited against the peeled
+`rust-v0.144.0` source commit
+`767822446c7a594caa19609ca435281a9ec67e0d`: `shell_detect.rs` obtains the Unix
+default from `getpwuid_r`, then searches the fixed Bash/Zsh/sh names and absolute
+fallbacks; the production CLI provides no user-shell override. `SHELL` controls
+child environment policy but not this selection. The pinned discovery pathname
+is therefore narrower than adding a Codex fork, a synthetic passwd database,
+or a private mount over an ambient absolute shell path. It is version-scoped
+and must be deleted as soon as the pinned Codex release no longer requires
+fixed-basename discovery.
 
 The snapshot builder:
 

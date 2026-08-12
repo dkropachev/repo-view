@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 const (
@@ -1549,14 +1550,14 @@ func (r *View) changedFiles(base, head string) ([]string, error) {
 		return r.gitFileList(gitdiffcontract.NameOnlyArguments(base, head)...)
 	}
 	staged := []string{
-		"diff", "--cached", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
+		"diff", "--cached", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--name-only", "-z",
 	}
 	if head != "" {
 		staged = append(staged, head)
 	}
 	commands := [][]string{
 		staged,
-		{"diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z"},
+		{"diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--name-only", "-z"},
 		{"ls-files", "--others", "--exclude-standard", "-z"},
 	}
 	seen := map[string]bool{}
@@ -1782,6 +1783,7 @@ func (r *View) changedPatch(
 		"--no-color",
 		"--no-ext-diff",
 		"--no-textconv",
+		"--ignore-submodules=dirty",
 		"--find-renames",
 	}
 	if head != "" {
@@ -1792,6 +1794,7 @@ func (r *View) changedPatch(
 		"--no-color",
 		"--no-ext-diff",
 		"--no-textconv",
+		"--ignore-submodules=dirty",
 		"--find-renames",
 	}}
 	if base != "" {
@@ -2125,6 +2128,7 @@ func (r *View) changedLines(
 			"--no-color",
 			"--no-ext-diff",
 			"--no-textconv",
+			"--ignore-submodules=dirty",
 			"--unified=0",
 		}
 		// Compare HEAD directly with the working tree so staged and unstaged
@@ -2249,8 +2253,6 @@ func integerRange(start, end int) []int {
 
 func (r *View) gitCommand(args ...string) *exec.Cmd {
 	ctx := r.operationContext()
-	safeArgs := gitdiffcontract.InvocationPrefix()
-	safeArgs = append(safeArgs, args...)
 
 	failedCommand := func(err error) *exec.Cmd {
 		cmd := exec.CommandContext(ctx, "git")
@@ -2263,10 +2265,25 @@ func (r *View) gitCommand(args ...string) *exec.Cmd {
 	if err := r.verifyRootIdentity(); err != nil {
 		return failedCommand(err)
 	}
+	if err := r.validateGitWorktreeConfiguration(ctx); err != nil {
+		return failedCommand(err)
+	}
+	safeArgs := gitdiffcontract.InvocationPrefix()
+	safeArgs = append(safeArgs, args...)
+	if err := processpolicy.ValidateGit(safeArgs...); err != nil {
+		return failedCommand(fmt.Errorf("reject Git invocation: %w", err))
+	}
 
 	var cmd *exec.Cmd
 	if r.pinnedGit == nil {
-		cmd = exec.CommandContext(ctx, "git", safeArgs...)
+		nativeCommand, gitFile, err := processpolicy.NativeCommandContext(ctx, "git", safeArgs...)
+		if err != nil {
+			return failedCommand(fmt.Errorf("pin native Git: %w", err))
+		}
+		cmd = nativeCommand
+		runtime.SetFinalizer(cmd, func(*exec.Cmd) {
+			_ = gitFile.Close()
+		})
 	} else {
 		pinnedCommand, executable, err := r.pinnedGit.commandContext(ctx, safeArgs...)
 		if err != nil {
@@ -2302,6 +2319,30 @@ func (r *View) gitOutputContextLimit(
 	limit int,
 	args ...string,
 ) (output []byte, resultErr error) {
+	if err := r.validateGitWorktreeConfiguration(ctx); err != nil {
+		return nil, err
+	}
+	return r.gitOutputContextLimitRaw(ctx, limit, args...)
+}
+
+func (r *View) validateGitWorktreeConfiguration(ctx context.Context) error {
+	output, err := r.gitOutputContextLimitRaw(
+		ctx, 1<<20, processpolicy.GitRepositoryConfigArguments()...,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect repository Git configuration: %w", err)
+	}
+	if err := processpolicy.ValidateGitWorktreeConfig(output); err != nil {
+		return fmt.Errorf("reject repository Git configuration: %w", err)
+	}
+	return nil
+}
+
+func (r *View) gitOutputContextLimitRaw(
+	ctx context.Context,
+	limit int,
+	args ...string,
+) (output []byte, resultErr error) {
 	if r.changedState != nil {
 		return nil, errors.New("git is disabled in changed-state cache mode")
 	}
@@ -2314,30 +2355,38 @@ func (r *View) gitOutputContextLimit(
 	if err := r.verifyRootIdentity(); err != nil {
 		return nil, err
 	}
-	safeArgs := gitdiffcontract.InvocationPrefix()
-	safeArgs = append(safeArgs, args...)
+	safeArgs := args
+	if !processpolicy.IsGitRepositoryConfigQuery(args) {
+		safeArgs = append(gitdiffcontract.InvocationPrefix(), args...)
+	}
+	if err := processpolicy.ValidateGit(safeArgs...); err != nil {
+		return nil, fmt.Errorf("reject Git invocation: %w", err)
+	}
 	var (
 		cmd       *exec.Cmd
 		pinnedGit *os.File
 		err       error
 	)
 	if r.pinnedGit == nil {
-		cmd = exec.CommandContext(ctx, "git", safeArgs...)
+		cmd, pinnedGit, err = processpolicy.NativeCommandContext(ctx, "git", safeArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("pin native Git: %w", err)
+		}
 	} else {
 		cmd, pinnedGit, err = r.pinnedGit.commandContext(ctx, safeArgs...)
 		if err != nil {
 			return nil, fmt.Errorf("pin git executable for invocation: %w", err)
 		}
-		defer func() {
-			if closeErr := pinnedGit.Close(); closeErr != nil {
-				resultErr = &gitExecutableCloseError{
-					operation: resultErr,
-					close:     fmt.Errorf("close pinned git executable: %w", closeErr),
-				}
-				output = nil
-			}
-		}()
 	}
+	defer func() {
+		if closeErr := pinnedGit.Close(); closeErr != nil {
+			resultErr = &gitExecutableCloseError{
+				operation: resultErr,
+				close:     fmt.Errorf("close pinned git executable: %w", closeErr),
+			}
+			output = nil
+		}
+	}()
 	cmd.Dir = r.root
 	cmd.Env = isolatedGitEnvironment()
 	stdout := &boundedOutputBuffer{limit: limit}

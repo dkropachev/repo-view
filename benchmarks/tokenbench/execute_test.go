@@ -125,13 +125,13 @@ func TestPairExecuteRunsBothArmsAndPreservesSoleDelta(t *testing.T) {
 	if err := run.Validate(); err != nil {
 		t.Fatalf("validate run: %v", err)
 	}
-	if run.SchemaVersion != "tokenbench.run/v3" {
+	if run.SchemaVersion != "tokenbench.run/v5" {
 		t.Fatalf("run schema = %q", run.SchemaVersion)
 	}
 	oldVersion := run
-	oldVersion.SchemaVersion = "tokenbench.run/v2"
+	oldVersion.SchemaVersion = "tokenbench.run/v4"
 	if err := oldVersion.Validate(); err == nil {
-		t.Fatal("run/v2 was accepted as run/v3")
+		t.Fatal("run/v4 was accepted as run/v5")
 	}
 	if run.Baseline.Observation == nil || run.Candidate.Observation == nil {
 		t.Fatalf("missing observations: %+v", run)

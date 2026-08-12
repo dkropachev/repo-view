@@ -21,6 +21,22 @@ type artifactBundleFixture struct {
 	loaded   LoadedSuite
 }
 
+func TestArtifactBundleAuditRejectsFrozenV3(t *testing.T) {
+	t.Parallel()
+	fixture := newArtifactBundleFixture(t)
+	audit := ArtifactBundleAudit{
+		SchemaVersion:  "tokenbench.artifact-bundle-audit/v3",
+		Root:           fixture.root,
+		Manifest:       fixture.manifest,
+		Provenance:     fixture.manifest.Provenance,
+		ManifestSHA256: fixture.digest,
+		RawManifest:    append([]byte(nil), fixture.raw...),
+	}
+	if err := audit.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected artifact bundle audit schema") {
+		t.Fatalf("artifact-bundle-audit/v3 rejection = %v", err)
+	}
+}
+
 func TestLoadArtifactBundleBindsExactStaticRoleSet(t *testing.T) {
 	fixture := newArtifactBundleFixture(t)
 	useArtifactBuildPolicyForTest(t, fixture.digest)
@@ -48,12 +64,28 @@ func TestLoadArtifactBundleBindsExactStaticRoleSet(t *testing.T) {
 func TestDecodeArtifactManifestRejectsUnknownDuplicateAndTrailingData(t *testing.T) {
 	fixture := newArtifactBundleFixture(t)
 	raw := fixture.raw
+	forbiddenUtility := `{"path":"bin/forbidden","sha256":"` + strings.Repeat("f", 64) + `"}`
 	tests := map[string][]byte{
 		"unknown": append(append([]byte(nil), raw[:len(raw)-1]...), []byte(`,"unknown":true}`)...),
+		"frozen schema": []byte(strings.Replace(
+			string(raw),
+			`"schema_version":"tokenbench.artifact-manifest/v4"`,
+			`"schema_version":"tokenbench.artifact-manifest/v3"`,
+			1,
+		)),
+		"forbidden sed role": []byte(strings.Replace(
+			string(raw), `"utilities":{`, `"utilities":{"sed":`+forbiddenUtility+`,`, 1,
+		)),
+		"forbidden awk role": []byte(strings.Replace(
+			string(raw), `"utilities":{`, `"utilities":{"awk":`+forbiddenUtility+`,`, 1,
+		)),
+		"forbidden xargs role": []byte(strings.Replace(
+			string(raw), `"utilities":{`, `"utilities":{"xargs":`+forbiddenUtility+`,`, 1,
+		)),
 		"duplicate": []byte(strings.Replace(
 			string(raw),
-			`"schema_version":"tokenbench.artifact-manifest/v2"`,
-			`"schema_version":"tokenbench.artifact-manifest/v2","schema_version":"tokenbench.artifact-manifest/v2"`,
+			`"schema_version":"tokenbench.artifact-manifest/v4"`,
+			`"schema_version":"tokenbench.artifact-manifest/v4","schema_version":"tokenbench.artifact-manifest/v4"`,
 			1,
 		)),
 		"trailing whitespace": append(append([]byte(nil), raw...), '\n'),
@@ -229,7 +261,7 @@ func TestArtifactRoleSwapBreaksPolicyAndOriginBinding(t *testing.T) {
 	}
 
 	swapped := fixture.manifest
-	swapped.Utilities.Sed, swapped.Utilities.Awk = swapped.Utilities.Awk, swapped.Utilities.Sed
+	swapped.Utilities.Find, swapped.Utilities.Head = swapped.Utilities.Head, swapped.Utilities.Find
 	swappedRaw, err := json.Marshal(swapped)
 	if err != nil {
 		t.Fatal(err)
@@ -304,13 +336,13 @@ func newArtifactBundleFixture(t *testing.T) artifactBundleFixture {
 			BuilderImageDigest: "sha256:" + SHA256([]byte("builder-image")),
 		},
 		Codex: next("codex"), ScopeSifter: next("scopesifter"),
-		StaticGit: next("git"), StaticBash: next("bash"),
+		StaticGit: next("git"),
 		Utilities: ArtifactUtilities{
-			Ripgrep: next("rg"), Sed: next("sed"), Awk: next("awk"),
-			Find: next("find"), Head: next("head"), Tail: next("tail"),
+			Ripgrep: next("rg"),
+			Find:    next("find"), Head: next("head"), Tail: next("tail"),
 			WC: next("wc"), Sort: next("sort"), Cut: next("cut"),
 			Tr: next("tr"), Cat: next("cat"), LS: next("ls"),
-			Grep: next("grep"), Xargs: next("xargs"),
+			Grep: next("grep"),
 		},
 	}
 	raw, err := json.Marshal(manifest)
@@ -370,7 +402,7 @@ func originInputsForArtifacts(t *testing.T, artifacts artifactOriginSet) executi
 			Root: "/source", Revision: strings.Repeat("a", 40), Base: strings.Repeat("b", 40),
 			TreeSHA256: SHA256([]byte("tree")), GitMetadataSHA256: SHA256([]byte("git-metadata")),
 		},
-		artifacts.Codex, artifacts.ScopeSifter, artifacts.Git, artifacts.Bash,
+		artifacts.Codex, artifacts.ScopeSifter, artifacts.Git,
 		artifacts.Utilities,
 		executionsnapshot.FileOrigin{Path: "/runner", SHA256: SHA256([]byte("runner"))},
 	)

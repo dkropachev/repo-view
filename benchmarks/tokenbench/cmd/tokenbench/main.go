@@ -8,10 +8,29 @@ import (
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 )
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(dispatch(
+		context.Background(), os.Args[0], os.Getenv("PATH"), os.Args[1:],
+		os.Stdin, os.Stdout, os.Stderr,
+	))
+}
+
+func dispatch(
+	ctx context.Context,
+	argv0 string,
+	pathEnvironment string,
+	args []string,
+	stdin io.Reader,
+	stdout, stderr io.Writer,
+) int {
+	if commandrunner.Invoked(argv0, pathEnvironment) {
+		return commandrunner.Run(ctx, args, stdin, stdout, stderr)
+	}
+	return run(ctx, args, stdout, stderr)
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {

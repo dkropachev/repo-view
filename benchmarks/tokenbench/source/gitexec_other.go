@@ -7,16 +7,21 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 func pinnedGitExecutionSupported() bool { return false }
 
 func newPinnedGitCommand(
-	context.Context,
-	*os.File,
-	string,
-	[]string,
+	_ context.Context,
+	_ *os.File,
+	_ string,
+	arguments []string,
 ) (*exec.Cmd, error) {
+	if err := processpolicy.ValidateGit(arguments...); err != nil {
+		return nil, err
+	}
 	return nil, errors.New("pinned Git executable invocation is supported only on Linux")
 }
 

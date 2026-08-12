@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/schemas/artifact-manifest-v2.schema.json",
-  "title": "Tokenbench trusted execution-artifact manifest v2",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/schemas/artifact-manifest-v4.schema.json",
+  "title": "Tokenbench trusted execution-artifact manifest v4",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -10,12 +10,11 @@
     "codex",
     "scopesifter",
     "static_git",
-    "static_bash",
     "utilities"
   ],
   "properties": {
     "schema_version": {
-      "const": "tokenbench.artifact-manifest/v2"
+      "const": "tokenbench.artifact-manifest/v4"
     },
     "provenance": {
       "$ref": "#/$defs/provenance"
@@ -29,16 +28,11 @@
     "static_git": {
       "$ref": "#/$defs/artifact"
     },
-    "static_bash": {
-      "$ref": "#/$defs/artifact"
-    },
     "utilities": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "rg",
-        "sed",
-        "awk",
         "find",
         "head",
         "tail",
@@ -48,13 +42,10 @@
         "tr",
         "cat",
         "ls",
-        "grep",
-        "xargs"
+        "grep"
       ],
       "properties": {
         "rg": { "$ref": "#/$defs/artifact" },
-        "sed": { "$ref": "#/$defs/artifact" },
-        "awk": { "$ref": "#/$defs/artifact" },
         "find": { "$ref": "#/$defs/artifact" },
         "head": { "$ref": "#/$defs/artifact" },
         "tail": { "$ref": "#/$defs/artifact" },
@@ -64,8 +55,7 @@
         "tr": { "$ref": "#/$defs/artifact" },
         "cat": { "$ref": "#/$defs/artifact" },
         "ls": { "$ref": "#/$defs/artifact" },
-        "grep": { "$ref": "#/$defs/artifact" },
-        "xargs": { "$ref": "#/$defs/artifact" }
+        "grep": { "$ref": "#/$defs/artifact" }
       }
     }
   },

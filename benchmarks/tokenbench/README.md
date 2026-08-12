@@ -25,8 +25,8 @@ The checked-in implementation provides:
 
 - strict read-only `tokenbench.suite/v2`, load-only code-task
   `tokenbench.suite/v3`, bounded workspace audit types and Linux mount authority,
-  artifact-manifest v2, plan v4, run v3,
-  observation v2, capture v5, signed-root, trust-policy v2, and replay v3
+  artifact-manifest v4, plan v6, run v5,
+  observation v2, capture v7, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
   `0.144.0`, exact executable SHA-256
@@ -35,8 +35,8 @@ The checked-in implementation provides:
   `gpt-5.4@gpt-5.4-2026-03-05`, provider value
   `gpt-5.4-2026-03-05`;
 - immutable source, standalone `.git`, changed-state cache, Codex, scopesifter,
-  Git, Bash, runner, and closed native-tool snapshots backed by fs-verity and a
-  private read-only self-bind mount;
+  Git, a Go-native command runner, and closed native-tool snapshots backed by
+  fs-verity and a private read-only self-bind mount;
 - fresh arm state, randomized counterbalanced order, complete process and
   effective-config parity checks, exact MCP tool-surface checks, raw Codex
   JSONL and Responses-wire capture, and provider usage decoding;
@@ -130,10 +130,10 @@ sorted key IDs for `capture`, `replay`, or both roles.
 ## Building a publishable binary
 
 Publishable execution uses a closed artifact bundle. Its fixed manifest name is
-`tokenbench-artifacts-v2.json`; the exact compact JSON bytes must match
-[`schemas/artifact-manifest-v2.schema.json`](schemas/artifact-manifest-v2.schema.json).
+`tokenbench-artifacts-v4.json`; the exact compact JSON bytes must match
+[`schemas/artifact-manifest-v4.schema.json`](schemas/artifact-manifest-v4.schema.json).
 It names exact, single-link, native static ELF images for Codex, scopesifter,
-verifier Git, Bash, and each allowlisted utility, with reproducible provenance.
+verifier Git, and each allowlisted utility, with reproducible provenance.
 No symlink, dynamic loader, multicall alias, unlisted executable, or digest drift
 is accepted.
 
@@ -141,10 +141,13 @@ The suite and tokenbench binary must independently allow the same manifest
 digest. Build tokenbench itself as a static executable and bind that digest at
 link time:
 
-```sh
-manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v2.json | awk '{print $1}')"
+Compute the manifest digest with `sha256sum
+/absolute/artifacts/tokenbench-artifacts-v4.json`, then substitute its first
+field for `<manifest SHA-256>` below.
+
+```text
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<manifest SHA-256>" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
@@ -179,7 +182,7 @@ every unavailable prerequisite or skipped kernel test into a failure. For a
 local kernel-boundary check, run:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 This command requires a Linux x86-64 host and a privileged Docker-compatible
@@ -201,7 +204,7 @@ benchmarks/tokenbench/
   source/               mutable-origin verification
   study/                separate methodology stage for blinded paired analysis
   schemas/              authored JSON contracts
-  scripts/              fail-closed privileged validation
+  cmd/privileged-linux-tests/  fail-closed privileged validation
   docs/                 operations, methodology, evidence, and adapter guides
 ```
 

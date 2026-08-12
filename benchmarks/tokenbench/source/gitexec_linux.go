@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 const pinnedGitExecutablePath = "/proc/self/fd/3"
@@ -22,6 +24,9 @@ func newPinnedGitCommand(
 ) (*exec.Cmd, error) {
 	if executable == nil {
 		return nil, errors.New("pinned Git executable descriptor is unavailable")
+	}
+	if err := processpolicy.ValidateGit(arguments...); err != nil {
+		return nil, err
 	}
 	command := exec.CommandContext(ctx, pinnedGitExecutablePath, arguments...)
 	command.Args[0] = displayPath

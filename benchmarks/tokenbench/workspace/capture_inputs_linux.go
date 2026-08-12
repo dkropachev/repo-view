@@ -12,6 +12,7 @@ import (
 	"syscall"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -65,6 +66,9 @@ func (pair *PairAuthority) pinCaptureInputs(
 	)
 	if err != nil {
 		return fmt.Errorf("verify retained capture Git executable: %w", err)
+	}
+	if err := processpolicy.ValidateNativeFile(retained[1].File); err != nil {
+		return fmt.Errorf("verify retained capture Git native image: %w", err)
 	}
 	objectsInfo, err := verifyRetainedSnapshotRole(
 		retained[2], snapshot.ManifestKindDirectory, false,

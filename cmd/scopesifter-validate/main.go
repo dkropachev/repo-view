@@ -5,8 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -14,6 +14,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"github.com/yapless/scopesifter/navigator"
 )
 
@@ -104,6 +106,11 @@ func ensureManagedRepositories(specPath, cloneRoot string) ([]string, string, er
 	if err != nil {
 		return nil, "", err
 	}
+	cloneRoot, err = filepath.Abs(cloneRoot)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve clone root: %w", err)
+	}
+	cloneRoot = filepath.Clean(cloneRoot)
 	if err := os.MkdirAll(cloneRoot, 0o755); err != nil {
 		return nil, "", fmt.Errorf("create clone root %s: %w", cloneRoot, err)
 	}
@@ -157,6 +164,9 @@ func readRepositorySpecs(path string) ([]repositorySpec, error) {
 		if _, exists := seen[name]; exists {
 			return nil, fmt.Errorf("%s:%d: duplicate repository name %q", path, lineNumber, name)
 		}
+		if !safeRepositorySource(url) {
+			return nil, fmt.Errorf("%s:%d: repository URL or local path is unsafe", path, lineNumber)
+		}
 		seen[name] = struct{}{}
 		specs = append(specs, repositorySpec{name: name, url: url})
 	}
@@ -183,9 +193,27 @@ func ensureManagedRepository(cloneRoot string, spec repositorySpec) (string, boo
 	}
 	defer os.RemoveAll(stage)
 	stagedRepository := filepath.Join(stage, "repository")
-	command := exec.Command("git", "clone", "--depth", "1", "--no-tags", "--", spec.url, stagedRepository)
-	if output, err := command.CombinedOutput(); err != nil {
-		return "", false, fmt.Errorf("clone %s: %w\n%s", spec.url, err, output)
+	cloneSource := spec.url
+	if localSource, local := localRepositoryPath(spec.url, ""); local {
+		cloneSource = localSource
+	}
+	arguments := gitdiffcontract.InvocationPrefix()
+	arguments = append(arguments, "clone", "--depth", "1", "--no-tags", "--", cloneSource, stagedRepository)
+	if err := processpolicy.ValidateGit(arguments...); err != nil {
+		return "", false, fmt.Errorf("reject managed clone invocation: %w", err)
+	}
+	command, gitFile, err := processpolicy.NativeCommand("git", arguments...)
+	if err != nil {
+		return "", false, fmt.Errorf("pin native Git: %w", err)
+	}
+	command.Env = append(gitdiffcontract.Environment(os.DevNull), "GIT_ALLOW_PROTOCOL=https:file")
+	output, runErr := command.CombinedOutput()
+	closeErr := gitFile.Close()
+	if runErr != nil {
+		return "", false, fmt.Errorf("clone %s: %w\n%s", spec.url, runErr, output)
+	}
+	if closeErr != nil {
+		return "", false, fmt.Errorf("close native Git image: %w", closeErr)
 	}
 	if err := os.Rename(stagedRepository, target); err != nil {
 		if _, statErr := os.Lstat(target); statErr == nil {
@@ -243,12 +271,52 @@ func localRepositoryPath(value, relativeTo string) (string, bool) {
 }
 
 func gitOutput(directory string, arguments ...string) (string, error) {
-	command := exec.Command("git", append([]string{"-C", directory}, arguments...)...)
+	safeArguments := gitdiffcontract.InvocationPrefix()
+	safeArguments = append(safeArguments, "-C", directory)
+	safeArguments = append(safeArguments, arguments...)
+	if err := processpolicy.ValidateGit(safeArguments...); err != nil {
+		return "", fmt.Errorf("reject Git invocation: %w", err)
+	}
+	command, gitFile, err := processpolicy.NativeCommand("git", safeArguments...)
+	if err != nil {
+		return "", fmt.Errorf("pin native Git: %w", err)
+	}
+	command.Env = gitdiffcontract.Environment(os.DevNull)
 	output, err := command.CombinedOutput()
+	closeErr := gitFile.Close()
 	if err != nil {
 		return "", fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
 	}
+	if closeErr != nil {
+		return "", fmt.Errorf("close native Git image: %w", closeErr)
+	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func safeGitHubRepositoryURL(value string) bool {
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Scheme != "https" || parsed.Host != "github.com" ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(parsed.EscapedPath(), "/"), "/")
+	if len(parts) != 2 || !strings.HasSuffix(parts[1], ".git") {
+		return false
+	}
+	repository := strings.TrimSuffix(parts[1], ".git")
+	return repositoryNamePattern.MatchString(strings.ToLower(parts[0])) &&
+		repositoryNamePattern.MatchString(strings.ToLower(repository)) &&
+		parts[0] == strings.ToLower(parts[0]) && repository == strings.ToLower(repository)
+}
+
+func safeRepositorySource(value string) bool {
+	if safeGitHubRepositoryURL(value) {
+		return true
+	}
+	return value != "" && !strings.HasPrefix(value, "-") &&
+		!strings.Contains(value, "::") && !strings.Contains(value, "://") &&
+		(!strings.Contains(value, ":") || filepath.IsAbs(value)) &&
+		filepath.Clean(value) == value
 }
 
 func discoverRepos(repoList, repoRoot string) ([]string, string, error) {

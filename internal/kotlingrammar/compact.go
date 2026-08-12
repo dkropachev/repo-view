@@ -1,8 +1,8 @@
 //go:build ignore
 
 // Command compact moves the two largest generated uint16 table literals into
-// a deterministic binary asset. It is invoked by generate.sh, not built with
-// the grammar package.
+// a deterministic binary asset. The Go grammar generator invokes it as an
+// implementation tool; it is not built with the grammar package.
 package main
 
 import (

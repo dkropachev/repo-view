@@ -66,7 +66,6 @@ func PrepareOrigins(
 		artifacts.Codex,
 		artifacts.ScopeSifter,
 		artifacts.Git,
-		artifacts.Bash,
 		artifacts.Utilities,
 		runner,
 	)

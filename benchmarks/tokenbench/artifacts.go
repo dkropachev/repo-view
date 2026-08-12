@@ -23,9 +23,9 @@ import (
 const (
 	// ArtifactManifestSchemaVersion is the canonical authored execution bundle
 	// schema. The JSON encoding must exactly equal json.Marshal of this model.
-	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v2"
-	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v2"
-	ArtifactManifestFilename      = "tokenbench-artifacts-v2.json"
+	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v4"
+	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v4"
+	ArtifactManifestFilename      = "tokenbench-artifacts-v4.json"
 
 	maximumArtifactManifestBytes = 64 << 10
 	maximumArtifactFileBytes     = int64(256 << 20)
@@ -61,8 +61,6 @@ type ArtifactProvenance struct {
 // not used: unknown or missing roles cannot be represented canonically.
 type ArtifactUtilities struct {
 	Ripgrep ArtifactFile `json:"rg"`
-	Sed     ArtifactFile `json:"sed"`
-	Awk     ArtifactFile `json:"awk"`
 	Find    ArtifactFile `json:"find"`
 	Head    ArtifactFile `json:"head"`
 	Tail    ArtifactFile `json:"tail"`
@@ -73,10 +71,9 @@ type ArtifactUtilities struct {
 	Cat     ArtifactFile `json:"cat"`
 	LS      ArtifactFile `json:"ls"`
 	Grep    ArtifactFile `json:"grep"`
-	Xargs   ArtifactFile `json:"xargs"`
 }
 
-// ArtifactManifest is the canonical strict v2 execution-artifact manifest.
+// ArtifactManifest is the canonical strict v4 execution-artifact manifest.
 // Every executable must be a distinct static ELF image.
 type ArtifactManifest struct {
 	SchemaVersion string             `json:"schema_version"`
@@ -84,11 +81,10 @@ type ArtifactManifest struct {
 	Codex         ArtifactFile       `json:"codex"`
 	ScopeSifter   ArtifactFile       `json:"scopesifter"`
 	StaticGit     ArtifactFile       `json:"static_git"`
-	StaticBash    ArtifactFile       `json:"static_bash"`
 	Utilities     ArtifactUtilities  `json:"utilities"`
 }
 
-// ArtifactBundleAudit is serialized into publishable v4 plans. RawManifest is
+// ArtifactBundleAudit is serialized into publishable v6 plans. RawManifest is
 // the exact authored byte sequence; Manifest and Provenance make review
 // structured without weakening the byte commitment.
 type ArtifactBundleAudit struct {
@@ -110,10 +106,7 @@ func (manifest ArtifactManifest) roles() []artifactRole {
 		{"codex", manifest.Codex},
 		{"scopesifter", manifest.ScopeSifter},
 		{"static Git", manifest.StaticGit},
-		{"static Bash", manifest.StaticBash},
 		{"rg", manifest.Utilities.Ripgrep},
-		{"sed", manifest.Utilities.Sed},
-		{"awk", manifest.Utilities.Awk},
 		{"find", manifest.Utilities.Find},
 		{"head", manifest.Utilities.Head},
 		{"tail", manifest.Utilities.Tail},
@@ -124,7 +117,6 @@ func (manifest ArtifactManifest) roles() []artifactRole {
 		{"cat", manifest.Utilities.Cat},
 		{"ls", manifest.Utilities.LS},
 		{"grep", manifest.Utilities.Grep},
-		{"xargs", manifest.Utilities.Xargs},
 	}
 }
 
@@ -249,7 +241,6 @@ type artifactOriginSet struct {
 	Codex       executionsnapshot.FileOrigin
 	ScopeSifter executionsnapshot.FileOrigin
 	Git         executionsnapshot.FileOrigin
-	Bash        executionsnapshot.FileOrigin
 	Utilities   executionsnapshot.UtilityOrigins
 }
 
@@ -436,13 +427,13 @@ func verifyArtifactFiles(
 	}
 	return artifactOriginSet{
 		Codex: verified["codex"], ScopeSifter: verified["scopesifter"],
-		Git: verified["static Git"], Bash: verified["static Bash"],
+		Git: verified["static Git"],
 		Utilities: executionsnapshot.UtilityOrigins{
-			Ripgrep: verified["rg"], Sed: verified["sed"], Awk: verified["awk"],
-			Find: verified["find"], Head: verified["head"], Tail: verified["tail"],
+			Ripgrep: verified["rg"],
+			Find:    verified["find"], Head: verified["head"], Tail: verified["tail"],
 			WC: verified["wc"], Sort: verified["sort"], Cut: verified["cut"],
 			Tr: verified["tr"], Cat: verified["cat"], LS: verified["ls"],
-			Grep: verified["grep"], Xargs: verified["xargs"],
+			Grep: verified["grep"],
 		},
 	}, nil
 }
@@ -588,14 +579,13 @@ func (audit ArtifactBundleAudit) validateBinding(origins executionsnapshot.Origi
 	}
 	actual := map[string]executionsnapshot.FileOrigin{
 		"codex": origins.Codex, "scopesifter": origins.ScopeSifter,
-		"static Git": origins.Git, "static Bash": origins.Bash,
-		"rg": origins.Utilities.Ripgrep, "sed": origins.Utilities.Sed,
-		"awk": origins.Utilities.Awk, "find": origins.Utilities.Find,
+		"static Git": origins.Git,
+		"rg":         origins.Utilities.Ripgrep, "find": origins.Utilities.Find,
 		"head": origins.Utilities.Head, "tail": origins.Utilities.Tail,
 		"wc": origins.Utilities.WC, "sort": origins.Utilities.Sort,
 		"cut": origins.Utilities.Cut, "tr": origins.Utilities.Tr,
 		"cat": origins.Utilities.Cat, "ls": origins.Utilities.LS,
-		"grep": origins.Utilities.Grep, "xargs": origins.Utilities.Xargs,
+		"grep": origins.Utilities.Grep,
 	}
 	names := make([]string, 0, len(want))
 	for name := range want {

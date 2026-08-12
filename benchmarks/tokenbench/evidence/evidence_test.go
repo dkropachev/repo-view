@@ -35,13 +35,13 @@ func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {
 		capture.Run.Plan.SuiteSHA256 != run.Plan.SuiteSHA256 {
 		t.Fatalf("capture did not round trip: %+v", capture)
 	}
-	if CaptureSchemaVersion != "tokenbench.capture/v5" ||
+	if CaptureSchemaVersion != "tokenbench.capture/v7" ||
 		capture.Manifest.SchemaVersion != CaptureSchemaVersion ||
-		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v5+json" ||
-		capture.Run.SchemaVersion != "tokenbench.run/v3" ||
+		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v7+json" ||
+		capture.Run.SchemaVersion != "tokenbench.run/v5" ||
 		capture.Manifest.Baseline.Observation.MediaType !=
 			"application/vnd.tokenbench.observation.v2+json" {
-		t.Fatalf("capture v5 graph identities = %+v", capture)
+		t.Fatalf("capture v7 graph identities = %+v", capture)
 	}
 	if total := capture.Run.Baseline.Observation.Usage.ProviderTotalTokens; total == nil || *total != 12 ||
 		total == run.Baseline.Observation.Usage.ProviderTotalTokens {
@@ -119,19 +119,29 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldCaptureStatement := capture.Attestation.Statement
-	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v4+json"
+	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v6+json"
 	if err := validateAttestationStatement(oldCaptureStatement); err == nil {
-		t.Fatal("capture.v4 subject media type was accepted as capture.v5")
+		t.Fatal("capture.v6 subject media type was accepted as capture.v7")
 	}
 
 	oldCapture := capture.Manifest
-	oldCapture.SchemaVersion = "tokenbench.capture/v4"
+	oldCapture.SchemaVersion = "tokenbench.capture/v6"
 	oldCaptureRoot := putTestAttestedSubject(
 		t, store, signer, CaptureBundle, captureMediaType, oldCapture, nil,
 	)
 	if _, err := LoadCapture(context.Background(), store, oldCaptureRoot, verifier); err == nil ||
 		!strings.Contains(err.Error(), "unexpected capture schema") {
-		t.Fatalf("capture/v4 rejection = %v", err)
+		t.Fatalf("capture/v6 rejection = %v", err)
+	}
+
+	oldPlanMediaCapture := capture.Manifest
+	oldPlanMediaCapture.Plan.MediaType = "application/vnd.tokenbench.plan.v5+json"
+	oldPlanMediaRoot := putTestAttestedSubject(
+		t, store, signer, CaptureBundle, captureMediaType, oldPlanMediaCapture, nil,
+	)
+	if _, err := LoadCapture(context.Background(), store, oldPlanMediaRoot, verifier); err == nil ||
+		!strings.Contains(err.Error(), "unexpected plan media type") {
+		t.Fatalf("plan.v5 media-type rejection = %v", err)
 	}
 
 	oldCaptureObservation := capture.Manifest

@@ -13,6 +13,10 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+defaults:
+  run:
+    shell: go run -mod=readonly ./internal/cmd/workflow-runner -- {0}
+
 jobs:
   lint:
     name: Lint
@@ -38,7 +42,7 @@ jobs:
           args: --config=.golangci.yml
 
       - name: Check production struct alignment
-        run: golangci-lint run --config=.golangci-fieldalignment.yml
+        run: ci-fieldalignment
 
   test:
     name: Test
@@ -58,27 +62,19 @@ jobs:
           cache: true
 
       - name: Vet
-        run: go vet ./...
+        run: ci-vet
 
       - name: Test
-        run: go test ./... -count=1
+        run: ci-test
 
       - name: Build commands
-        run: go build ./cmd/...
-
-      - name: Validate shell scripts
-        shell: bash
-        run: |
-          while IFS= read -r -d '' script; do
-            bash -n "$script"
-          done < <(git ls-files -z '*.sh' 'scripts/*')
+        run: ci-build
 
       - name: Validate JSON files
-        shell: bash
-        run: |
-          while IFS= read -r -d '' document; do
-            jq empty "$document"
-          done < <(git ls-files -z '*.json')
+        run: ci-json
+
+      - name: Enforce no executable scripts
+        run: ci-no-scripts
 
   privileged-linux:
     name: Privileged Linux kernel boundaries
@@ -100,4 +96,4 @@ jobs:
       - name: Run fail-closed privileged kernel tests
         env:
           TOKENBENCH_PRIVILEGED_IMAGE: golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599
-        run: benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+        run: tokenbench-privileged-linux

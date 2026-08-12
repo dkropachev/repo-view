@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -614,6 +615,9 @@ func (git *captureGitRunner) output(
 	stdin io.Reader,
 	arguments ...string,
 ) ([]byte, error) {
+	if err := processpolicy.ValidateGit(arguments...); err != nil {
+		return nil, fmt.Errorf("reject capture Git invocation: %w", err)
+	}
 	if err := git.verifyDescriptors(); err != nil {
 		return nil, err
 	}

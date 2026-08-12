@@ -69,9 +69,9 @@ The artifact build is a separate reproducible supply-chain step. Build all
 images from the provenance named in the manifest, then place this closed set
 below one canonical absolute directory:
 
-- Codex, scopesifter, static Git, and static Bash;
-- distinct `rg`, `sed`, `awk`, `find`, `head`, `tail`, `wc`, `sort`, `cut`,
-  `tr`, `cat`, `ls`, `grep`, and `xargs` images.
+- Codex, scopesifter, and static Git;
+- distinct `rg`, `find`, `head`, `tail`, `wc`, `sort`, `cut`, `tr`, `cat`,
+  `ls`, and `grep` images.
 
 Every listed role must be a native static ELF regular file with execute
 permission, exactly one filesystem link, a unique relative path, and a unique
@@ -80,9 +80,9 @@ applets, and cross-role byte aliases are rejected. Only listed roles enter the
 immutable snapshot; an extra bundle file grants no executable authority and
 should be excluded from a reproducible bundle.
 
-Write the fixed file `tokenbench-artifacts-v2.json` at the bundle root. Its
+Write the fixed file `tokenbench-artifacts-v4.json` at the bundle root. Its
 shape is defined by
-[`artifact-manifest-v2.schema.json`](../schemas/artifact-manifest-v2.schema.json),
+[`artifact-manifest-v4.schema.json`](../schemas/artifact-manifest-v4.schema.json),
 but schema validation alone is insufficient: the loader requires the exact
 compact bytes produced by Go `json.Marshal(tokenbench.ArtifactManifest)`, with
 no trailing newline. The exported `ArtifactManifest.Validate` method checks the
@@ -100,15 +100,26 @@ bytes. Do not edit or reformat the manifest after computing its digest.
 Build tokenbench at its final canonical path. A normal development build or
 `go run` has no artifact policy and cannot publish a live result.
 
-```sh
-manifest=/absolute/artifacts/tokenbench-artifacts-v2.json
-manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
+Compute the manifest digest with `sha256sum
+/absolute/artifacts/tokenbench-artifacts-v4.json`, then substitute its first
+field for `<manifest SHA-256>` below.
 
+```text
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<manifest SHA-256>" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
+
+Do not add a shell artifact. The resulting static Go tokenbench executable is
+also the command dispatcher: immutable snapshot construction copies its exact
+bytes to the pinned Codex v0.144.0 discovery pathname and commits the same-image
+relationship. The dispatcher accepts only `-c COMMAND`; its Go-owned grammar is
+one pipeline of literal argv stages over the closed native-utility set. It has
+no variables, expansion, source/eval, control flow, functions, command lists,
+backgrounding, redirection, builtins, or script execution. Remove the discovery
+pathname as soon as the pinned Codex release no longer requires fixed-basename
+discovery.
 
 The executable itself becomes the runner/arm-init image in the immutable
 snapshot. It must therefore be a native static ELF executable at one real,
@@ -172,10 +183,10 @@ caller-owned, single-link, non-symlink file with mode `0600` or stricter and no
 newline. Ambient proxy, provider-base-URL, and custom-CA overrides are rejected.
 
 Confirm the Linux prerequisites in [README.md](../README.md#host-prerequisites).
-The privileged test script proves kernel mechanics without making a model call:
+The privileged test lane proves kernel mechanics without making a model call:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 ## 6. Run one explicit repetition

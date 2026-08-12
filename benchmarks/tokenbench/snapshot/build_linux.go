@@ -22,6 +22,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/source"
 	"golang.org/x/sys/unix"
 )
@@ -278,8 +279,11 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		// image commits all bytes it can execute without an untracked loader or
 		// shared-library surface.
 		{"verifier Git", request.Origins.Git, filepath.Join(toolsPath, "verifier-git"), true},
-		{"bash", request.Origins.Bash, filepath.Join(toolboxPath, "bash"), true},
 		{"runner/arm-init", request.Origins.Runner, filepath.Join(toolsPath, "runner-arm-init"), true},
+		// Codex v0.144.0 recognizes only a fixed set of shell basenames and has
+		// no CLI default-shell override. The pinned discovery pathname contains a
+		// second copy of the pinned Go runner image, never a Bash artifact.
+		{"Go command runner", request.Origins.Runner, filepath.Join(toolboxPath, "bash"), true},
 	}
 	for _, item := range toolCopies {
 		if err := copyExecutable(
@@ -316,6 +320,13 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 	}, utilityPathsForRoot(toolboxPath).values()...)
 	if err := validateNativeExecutableABIs(allExecutablePaths); err != nil {
 		return nil, err
+	}
+	if err := verifyCommandRunnerEntrypoint(
+		ctx,
+		filepath.Join(toolboxPath, "bash"),
+		request.Origins.Runner.SHA256,
+	); err != nil {
+		return nil, fmt.Errorf("prove copied Go command-runner entrypoint: %w", err)
 	}
 
 	gitPath := filepath.Join(toolsPath, "verifier-git")
@@ -399,24 +410,26 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		return nil, err
 	}
 	inputs := ExecutionInputs{
-		SchemaVersion:          ExecutionSchemaVersion,
-		SnapshotRoot:           rootPath,
-		SourceRoot:             sourcePath,
-		GitMetadataRoot:        filepath.Join(sourcePath, ".git"),
-		CodexExecutable:        filepath.Join(toolsPath, "codex"),
-		ScopeSifterExecutable:  filepath.Join(toolsPath, "scopesifter"),
-		VerifierGitExecutable:  gitPath,
-		BashExecutable:         filepath.Join(toolboxPath, "bash"),
-		Utilities:              utilityPathsForRoot(toolboxPath),
-		ToolboxRoot:            toolboxPath,
-		RunnerExecutable:       filepath.Join(toolsPath, "runner-arm-init"),
-		ArmInitExecutable:      filepath.Join(toolsPath, "runner-arm-init"),
-		RunnerArmInitSameImage: true,
-		SourceRevision:         verified.Revision,
-		SourceBaseRevision:     verified.Base,
-		SourceTreeSHA256:       verified.TreeSHA256,
-		GitMetadataSHA256:      verified.GitMetadataSHA256,
-		OriginCommitment:       request.Origins.Commitment,
+		SchemaVersion:                ExecutionSchemaVersion,
+		SnapshotRoot:                 rootPath,
+		SourceRoot:                   sourcePath,
+		GitMetadataRoot:              filepath.Join(sourcePath, ".git"),
+		CodexExecutable:              filepath.Join(toolsPath, "codex"),
+		ScopeSifterExecutable:        filepath.Join(toolsPath, "scopesifter"),
+		VerifierGitExecutable:        gitPath,
+		CommandRunnerExecutable:      filepath.Join(toolboxPath, "bash"),
+		Utilities:                    utilityPathsForRoot(toolboxPath),
+		ToolboxRoot:                  toolboxPath,
+		RunnerExecutable:             filepath.Join(toolsPath, "runner-arm-init"),
+		ArmInitExecutable:            filepath.Join(toolsPath, "runner-arm-init"),
+		RunnerArmInitSameImage:       true,
+		CommandRunnerImplementation:  GoCommandRunnerImplementation,
+		CommandRunnerRunnerSameImage: true,
+		SourceRevision:               verified.Revision,
+		SourceBaseRevision:           verified.Base,
+		SourceTreeSHA256:             verified.TreeSHA256,
+		GitMetadataSHA256:            verified.GitMetadataSHA256,
+		OriginCommitment:             request.Origins.Commitment,
 		ChangedState: ChangedStateIdentity{
 			SchemaVersion:     ChangedStateSchemaVersion,
 			Path:              changedPath,
@@ -657,6 +670,55 @@ func copyExecutable(
 	if requireStatic && (!identity.Static || identity.Interpreter != "" ||
 		identity.LoaderSHA256 != "" || len(identity.Needed) != 0) {
 		return errors.New("publishable executable origin is dynamically linked")
+	}
+	return nil
+}
+
+func verifyCommandRunnerEntrypoint(
+	ctx context.Context,
+	path string,
+	expectedSHA256 string,
+) (resultErr error) {
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		before.Mode().Perm()&0o111 == 0 || hasMultipleLinks(before) {
+		return errors.Join(
+			errors.New("command-runner discovery path is not a single-link executable regular file"),
+			err,
+		)
+	}
+	image, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, image.Close()) }()
+	opened, err := image.Stat()
+	if err != nil || !os.SameFile(before, opened) || before.Mode() != opened.Mode() ||
+		before.Size() != opened.Size() || !before.ModTime().Equal(opened.ModTime()) {
+		return errors.Join(errors.New("command-runner discovery path changed while opening"), err)
+	}
+	identity, isELF, err := inspectELF(image)
+	if err != nil {
+		return fmt.Errorf("inspect command-runner discovery image: %w", err)
+	}
+	if !isELF || !identity.Static || identity.Interpreter != "" ||
+		identity.LoaderSHA256 != "" || len(identity.Needed) != 0 {
+		return errors.New("command-runner discovery image is not a static ELF executable")
+	}
+	observedSHA256, err := hashOpenFile(image, opened.Size())
+	if err != nil {
+		return fmt.Errorf("hash command-runner discovery image: %w", err)
+	}
+	if !validSHA256(expectedSHA256) || observedSHA256 != expectedSHA256 {
+		return errors.New("command-runner discovery image digest differs from its runner origin")
+	}
+	if err := commandrunner.VerifyPinnedEntrypoint(ctx, path, image); err != nil {
+		return err
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, after) || opened.Mode() != after.Mode() ||
+		opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
+		return errors.Join(errors.New("command-runner discovery path changed during its probe"), err)
 	}
 	return nil
 }

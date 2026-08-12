@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 type gitExecutableIdentity struct {
@@ -23,6 +25,9 @@ type gitExecutableIdentity struct {
 func newGitExecutableIdentity(
 	executable, expectedSHA256 string,
 ) (gitExecutableIdentity, error) {
+	if err := processpolicy.ValidateExecutable(executable); err != nil {
+		return gitExecutableIdentity{}, fmt.Errorf("git executable violates process policy: %w", err)
+	}
 	if !filepath.IsAbs(executable) || filepath.Clean(executable) != executable {
 		return gitExecutableIdentity{}, errors.New(
 			"git executable must be an absolute canonical path",
@@ -102,6 +107,9 @@ func (identity gitExecutableIdentity) commandContext(
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if err := processpolicy.ValidateGit(arguments...); err != nil {
+		return nil, nil, fmt.Errorf("reject Git invocation: %w", err)
+	}
 	file, err := identity.openVerified()
 	if err != nil {
 		return nil, nil, err
@@ -153,6 +161,9 @@ func (identity gitExecutableIdentity) openVerified() (
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) {
 		return nil, errors.New("pinned git executable changed while opening")
+	}
+	if err := processpolicy.ValidateNativeFile(file); err != nil {
+		return nil, err
 	}
 	hasher := sha256.New()
 	if _, err := io.Copy(hasher, file); err != nil {

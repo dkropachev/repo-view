@@ -292,19 +292,18 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 
 func TestServerUsesPinnedGitAndIgnoresAmbientInterception(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("shell interception fixture is Unix-specific")
+		t.Skip("self-exec interception fixture uses Unix symlink semantics")
 	}
 	fixture := newFixture(t)
-	marker := filepath.Join(t.TempDir(), "ambient-git-ran")
 	fakeDirectory := t.TempDir()
+	marker := filepath.Join(fakeDirectory, "ambient-git-ran")
 	fakeGit := filepath.Join(fakeDirectory, "git")
-	if err := os.WriteFile(
-		fakeGit,
-		[]byte("#!/bin/sh\nprintf intercepted > '"+marker+"'\nexit 99\n"),
-		0o700,
-	); err != nil {
+	testExecutable, err := os.Executable()
+	if err != nil {
 		t.Fatal(err)
 	}
+	copyExecutable(t, testExecutable, fakeGit)
+	assertAmbientGitInterceptor(t, fakeGit, marker)
 	t.Setenv("PATH", fakeDirectory)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), ".git"))
@@ -325,6 +324,21 @@ func TestServerUsesPinnedGitAndIgnoresAmbientInterception(t *testing.T) {
 	if _, err := os.Lstat(marker); !os.IsNotExist(err) {
 		t.Fatalf("ambient git executable ran: %v", err)
 	}
+}
+
+func TestMain(m *testing.M) {
+	executable, executableErr := os.Executable()
+	if executableErr == nil && filepath.Base(executable) == "git" {
+		if err := os.WriteFile(
+			filepath.Join(filepath.Dir(executable), "ambient-git-ran"),
+			[]byte("intercepted"),
+			0o600,
+		); err != nil {
+			os.Exit(98)
+		}
+		os.Exit(99)
+	}
+	os.Exit(m.Run())
 }
 
 func TestServerRejectsPinnedGitDigestDrift(t *testing.T) {
@@ -626,6 +640,22 @@ func copyExecutable(t *testing.T, source, target string) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(target, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertAmbientGitInterceptor(t *testing.T, executable, marker string) {
+	t.Helper()
+	err := exec.Command(executable).Run()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 99 {
+		t.Fatalf("ambient Git interceptor exit = %v, want 99", err)
+	}
+	content, err := os.ReadFile(marker)
+	if err != nil || string(content) != "intercepted" {
+		t.Fatalf("ambient Git interceptor marker = %q, %v", content, err)
+	}
+	if err := os.Remove(marker); err != nil {
 		t.Fatal(err)
 	}
 }

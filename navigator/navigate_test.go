@@ -1,6 +1,7 @@
 package navigator
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -1660,20 +1661,20 @@ func TestChangedUntrackedSnapshotPreservesPatchPathAndMode(t *testing.T) {
 	writeFile(t, root, "seed.go", "package demo\n")
 	runGit(t, root, "add", "seed.go")
 	runGit(t, root, "commit", "-m", "initial")
-	writeFile(t, root, "scripts/new.sh", "#!/bin/sh\necho safe\n")
-	if err := os.Chmod(filepath.Join(root, "scripts/new.sh"), 0o755); err != nil {
+	writeFile(t, root, "scripts/new.bin", "executable data\n")
+	if err := os.Chmod(filepath.Join(root, "scripts/new.bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	response, err := mustView(t, root).Changed(Options{
-		PathGlobs: []string{"scripts/new.sh"}, MaxPatchLines: 100,
+		PathGlobs: []string{"scripts/new.bin"}, MaxPatchLines: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(
 		response.Patch,
-		"diff --git a/scripts/new.sh b/scripts/new.sh",
+		"diff --git a/scripts/new.bin b/scripts/new.bin",
 	) || !strings.Contains(response.Patch, "new file mode 100755") {
 		t.Fatalf("untracked snapshot patch = %q", response.Patch)
 	}
@@ -1990,11 +1991,9 @@ func TestChangedDoesNotExecuteConfiguredFilesystemMonitor(t *testing.T) {
 	runGit(t, root, "add", "found.go")
 	runGit(t, root, "commit", "-m", "initial")
 
-	monitor := filepath.Join(root, "fsmonitor-test")
-	writeFile(t, root, "fsmonitor-test", "#!/bin/sh\n: > \"$0.marker\"\n")
-	if err := os.Chmod(monitor, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	monitor := filepath.Join(t.TempDir(), "fsmonitor-test")
+	copyNavigatorTestExecutable(t, monitor)
+	assertNavigatorFSMonitor(t, monitor)
 	runGit(t, root, "config", "core.fsmonitor", monitor)
 	writeFile(t, root, "found.go", "package demo\n\nfunc after() {}\n")
 
@@ -2008,6 +2007,83 @@ func TestChangedDoesNotExecuteConfiguredFilesystemMonitor(t *testing.T) {
 	}
 	if _, err := os.Lstat(monitor + ".marker"); !os.IsNotExist(err) {
 		t.Fatalf("configured fsmonitor executed: %v", err)
+	}
+}
+
+func TestChangedRejectsCleanFilterBeforeItCanExecute(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "scopesifter@example.test")
+	runGit(t, root, "config", "user.name", "scopesifter test")
+	writeFile(t, root, ".gitattributes", "*.go filter=answer\n")
+	writeFile(t, root, "found.go", "package demo\n\nfunc before() {}\n")
+	runGit(t, root, "add", ".gitattributes", "found.go")
+	runGit(t, root, "commit", "-m", "initial")
+
+	filter := filepath.Join(t.TempDir(), "filter-test")
+	copyNavigatorTestExecutable(t, filter)
+	assertNavigatorFSMonitor(t, filter)
+	runGit(t, root, "config", "filter.answer.clean", filter)
+	writeFile(t, root, "found.go", "package demo\n\nfunc after() {}\n")
+
+	view := mustView(t, root)
+	if _, err := view.Changed(Options{MaxPatchLines: 100}); err == nil ||
+		!strings.Contains(err.Error(), "can delegate execution") {
+		t.Fatalf("configured clean filter was not rejected: %v", err)
+	}
+	if _, err := os.Lstat(filter + ".marker"); !os.IsNotExist(err) {
+		t.Fatalf("configured clean filter executed: %v", err)
+	}
+}
+
+func TestGitDiffDoesNotExecuteInitializedSubmoduleCleanFilter(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "scopesifter@example.test")
+	runGit(t, root, "config", "user.name", "scopesifter test")
+	writeFile(t, root, "root.go", "package root\n")
+
+	submodule := filepath.Join(root, "module")
+	if err := os.Mkdir(submodule, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, submodule, "init")
+	runGit(t, submodule, "config", "user.email", "scopesifter@example.test")
+	runGit(t, submodule, "config", "user.name", "scopesifter test")
+	writeFile(t, submodule, ".gitattributes", "*.go filter=answer\n")
+	writeFile(t, submodule, "child.go", "package child\n\nfunc initial() {}\n")
+	runGit(t, submodule, "add", ".gitattributes", "child.go")
+	runGit(t, submodule, "commit", "-m", "initial")
+	initialCommit := runGitText(t, submodule, "rev-parse", "HEAD")
+
+	runGit(t, root, "add", "root.go")
+	runGit(t, root, "update-index", "--add", "--cacheinfo", "160000,"+initialCommit+",module")
+	writeFile(t, root, ".gitmodules", "[submodule \"module\"]\n\tpath = module\n\turl = ./module\n\tignore = none\n")
+	runGit(t, root, "add", ".gitmodules")
+	runGit(t, root, "commit", "-m", "initial superproject")
+
+	writeFile(t, submodule, "child.go", "package child\n\nfunc committed() {}\n")
+	runGit(t, submodule, "add", "child.go")
+	runGit(t, submodule, "commit", "-m", "advance child")
+	filter := filepath.Join(t.TempDir(), "filter-test")
+	copyNavigatorTestExecutable(t, filter)
+	assertNavigatorFSMonitor(t, filter)
+	runGit(t, submodule, "config", "filter.answer.clean", filter)
+	runGit(t, submodule, "config", "filter.answer.required", "true")
+	writeFile(t, submodule, "child.go", "package child\n\nfunc dirty() {}\n")
+
+	view := mustView(t, root)
+	output, err := view.gitOutput(
+		"diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", "--",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(output, []byte("module\x00")) {
+		t.Fatalf("advanced submodule gitlink was not reported: %q", output)
+	}
+	if _, err := os.Lstat(filter + ".marker"); !os.IsNotExist(err) {
+		t.Fatalf("initialized submodule clean filter executed: %v", err)
 	}
 }
 
@@ -2165,4 +2241,15 @@ func runGit(t *testing.T, root string, args ...string) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
 	}
+}
+
+func runGitText(t *testing.T, root string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, output)
+	}
+	return strings.TrimSpace(string(output))
 }

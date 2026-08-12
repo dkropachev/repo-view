@@ -11,7 +11,7 @@ import (
 
 func TestChangedPinsHeadAcrossRefMovement(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("shell Git wrapper fixture is not portable to Windows")
+		t.Skip("self-exec Git wrapper fixture uses Unix symlink semantics")
 	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -50,30 +50,12 @@ func TestChangedPinsHeadAcrossRefMovement(t *testing.T) {
 	wrapperRoot := t.TempDir()
 	wrapperPath := filepath.Join(wrapperRoot, "git")
 	statePath := filepath.Join(wrapperRoot, "flipped")
-	wrapper := `#!/bin/sh
-real_git=` + shellSingleQuote(realGit) + `
-flip_commit=` + shellSingleQuote(headC) + `
-flip_state=` + shellSingleQuote(statePath) + `
-flip=0
-for argument in "$@"; do
-  case "$argument" in
-    HEAD|'HEAD^{commit}') flip=1 ;;
-  esac
-done
-if [ "$flip" -eq 1 ] && [ ! -e "$flip_state" ]; then
-  "$real_git" "$@"
-  status=$?
-  if [ "$status" -eq 0 ]; then
-    : > "$flip_state"
-    "$real_git" update-ref HEAD "$flip_commit" >/dev/null 2>&1 || exit 97
-  fi
-  exit "$status"
-fi
-exec "$real_git" "$@"
-`
-	if err := os.WriteFile(wrapperPath, []byte(wrapper), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copyNavigatorTestExecutable(t, wrapperPath)
+	writeMovingGitTestConfig(t, wrapperRoot, movingGitTestConfig{
+		RealGit: realGit,
+		Commit:  headC,
+		State:   statePath,
+	})
 	t.Setenv("PATH", wrapperRoot+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	response, err := mustView(t, root).Changed(Options{
@@ -92,10 +74,6 @@ exec "$real_git" "$@"
 	if moved := runRealGit("rev-parse", "HEAD"); moved != headC {
 		t.Fatalf("wrapper did not move HEAD: got %s, want %s", moved, headC)
 	}
-}
-
-func shellSingleQuote(value string) string {
-	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
 }
 
 func TestChangedBaseReadsCommittedHeadSnapshot(t *testing.T) {

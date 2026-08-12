@@ -375,7 +375,7 @@ func TestVerifyRejectsHardLinkedGitMetadata(t *testing.T) {
 
 func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX executable and symlink semantics")
+		t.Skip("test uses Unix executable and symlink semantics")
 	}
 	repository := newRepository(t)
 	realGit, err := exec.LookPath("git")
@@ -392,10 +392,8 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	}
 	replacementPath := t.TempDir()
 	fakeGit := filepath.Join(replacementPath, "git")
-	writeFile(t, fakeGit, "#!/bin/sh\nexit 97\n")
-	if err := os.Chmod(fakeGit, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copySourceTestExecutable(t, fakeGit)
+	assertRejectingSourceTestGit(t, fakeGit)
 	t.Setenv("PATH", initialPath)
 	runner, err := resolveGitRunner()
 	if err != nil {
@@ -422,7 +420,7 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 
 func TestGitRunnerRejectsExecutableMutation(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX executable semantics")
+		t.Skip("test uses Unix executable semantics")
 	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -478,7 +476,7 @@ func TestVerifyRejectsWrongExpectedGitIdentity(t *testing.T) {
 
 func TestVerifyIgnoresPATHAfterExpectedGitIsPinned(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses a POSIX fake executable")
+		t.Skip("test uses Unix executable and symlink semantics")
 	}
 	repository := newRepository(t)
 	digest, err := TreeDigest(context.Background(), repository.root)
@@ -494,13 +492,54 @@ func TestVerifyIgnoresPATHAfterExpectedGitIsPinned(t *testing.T) {
 	)
 	fakeDirectory := t.TempDir()
 	fakeGit := filepath.Join(fakeDirectory, "git")
-	writeFile(t, fakeGit, "#!/bin/sh\nexit 97\n")
-	if err := os.Chmod(fakeGit, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copySourceTestExecutable(t, fakeGit)
 	t.Setenv("PATH", fakeDirectory)
 	if _, err := Verify(context.Background(), expected); err != nil {
 		t.Fatalf("ambient PATH redirected pinned Git: %v", err)
+	}
+}
+
+func TestMain(m *testing.M) {
+	executable, executableErr := os.Executable()
+	if executableErr == nil {
+		switch filepath.Base(executable) {
+		case "git":
+			os.Exit(97)
+		case "fsmonitor-sentinel":
+			if err := os.WriteFile(
+				filepath.Join(".git", "fsmonitor-invoked"),
+				[]byte("invoked\n"),
+				0o600,
+			); err != nil {
+				os.Exit(98)
+			}
+			os.Exit(99)
+		}
+	}
+	os.Exit(m.Run())
+}
+
+func copySourceTestExecutable(t *testing.T, path string) {
+	t.Helper()
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(testExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRejectingSourceTestGit(t *testing.T, path string) {
+	t.Helper()
+	err := exec.Command(path).Run()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 97 {
+		t.Fatalf("hostile Git fixture exit = %v, want 97", err)
 	}
 }
 
@@ -842,8 +881,50 @@ func TestVerifyRejectsUnallowlistedLocalConfiguration(t *testing.T) {
 	_, err = Verify(context.Background(), expectedSource(
 		t, repository.root, repository.head, repository.base, digest,
 	))
-	if err == nil || !strings.Contains(err.Error(), "unsafe local Git configuration") {
+	if err == nil || !strings.Contains(err.Error(), "unsafe repository Git configuration") {
 		t.Fatalf("expected unsafe-config error, got %v", err)
+	}
+}
+
+func TestSourceGitRunnerDisablesMaliciousLocalFilesystemMonitor(t *testing.T) {
+	repository := newRepository(t)
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := filepath.Join(repository.root, ".git", "fsmonitor-sentinel")
+	marker := filepath.Join(repository.root, ".git", "fsmonitor-invoked")
+	copySourceTestExecutable(t, monitor)
+	runGit(t, repository.root, "config", "core.fsmonitor", monitor)
+
+	gitRunner, err := resolveGitRunner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := gitRunner.close(); closeErr != nil {
+			t.Errorf("close Git runner: %v", closeErr)
+		}
+	}()
+	if _, err := gitRunner.output(
+		context.Background(),
+		repository.root,
+		"status", "--porcelain=v1", "--untracked-files=all",
+	); err != nil {
+		t.Fatalf("run isolated Git status: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("local core.fsmonitor was executed: %v", err)
+	}
+
+	_, err = Verify(context.Background(), expectedSource(
+		t, repository.root, repository.head, repository.base, digest,
+	))
+	if err == nil || !strings.Contains(err.Error(), "unsafe repository Git configuration") {
+		t.Fatalf("expected unsafe-config error, got %v", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Verify executed local core.fsmonitor: %v", statErr)
 	}
 }
 

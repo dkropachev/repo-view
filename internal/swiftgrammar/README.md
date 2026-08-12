@@ -6,7 +6,7 @@ commit `8d02b7ff390a17a43ce90c4e987c49315cfc4be6` (2026-08-02).
 The upstream repository deliberately omits `parser.c`, so generation has two
 pinned stages:
 
-1. `tree-sitter-cli@0.23.0` generates an ABI 14 `parser.c` from the tracked
+1. The native `tree-sitter` 0.23.0 executable generates an ABI 14 `parser.c` from the tracked
    `src/grammar.json`.
 2. `github.com/dcosson/treesitter-go/cmd/tsgo-generate@v0.1.0` converts that
    parser to the pure-Go runtime representation.
@@ -31,13 +31,13 @@ outputs have these SHA-256 digests:
 - `language_generated.go`: `4745d5b74c074b322e6bf49330b321ffa9c41b93e851a4cde5a3f1a04d9c1534`
 - `language_tables.bin`: `1c17f16cf9d32b9ac851816c940736d04c0ce16b1242883bd4ed758e8245e50b`
 
-Regenerate from a clean checkout at that commit:
+Regenerate from a clean checkout at that commit through the Make entrypoint:
 
-```bash
-internal/swiftgrammar/generate.sh /path/to/tree-sitter-swift
+```text
+make -f make/grammar.mk generate-swift-grammar GRAMMAR_SOURCE=/path/to/tree-sitter-swift
 ```
 
-The generator normally imports the runtime's internal packages. The script
+The generator normally imports the runtime's internal packages. The Go tool
 deterministically redirects those references to the public facade. It moves
 the two largest numeric literals into `language_tables.bin`, then splits the
 2,089-state generated lexer into small helpers. Splitting is semantic-preserving

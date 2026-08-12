@@ -14,27 +14,30 @@ import (
 	"sort"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 )
 
 const (
-	OriginSchemaVersion    = "tokenbench.origin-inputs/v2"
-	ExecutionSchemaVersion = "tokenbench.execution-inputs/v2"
+	OriginSchemaVersion    = "tokenbench.origin-inputs/v4"
+	ExecutionSchemaVersion = "tokenbench.execution-inputs/v4"
 
-	ManifestKindDirectory = "directory"
-	ManifestKindFile      = "regular-file"
-	FSVerityAlgorithm     = "sha256"
+	ManifestKindDirectory         = "directory"
+	ManifestKindFile              = "regular-file"
+	FSVerityAlgorithm             = "sha256"
+	GoCommandRunnerImplementation = commandrunner.Implementation
 
-	logicalSnapshotRoot = "snapshot-root"
-	logicalSourceRoot   = "source/worktree"
-	logicalGitRoot      = "source/git"
-	logicalToolsRoot    = "tools"
-	logicalToolboxRoot  = "toolbox"
-	logicalCodex        = "tool/codex"
-	logicalScopeSifter  = "tool/scopesifter"
-	logicalGit          = "tool/verifier-git"
-	logicalBash         = "tool/bash"
-	logicalRunnerInit   = "tool/runner-arm-init"
-	logicalChangedCache = "cache/changed-state"
+	logicalSnapshotRoot  = "snapshot-root"
+	logicalSourceRoot    = "source/worktree"
+	logicalGitRoot       = "source/git"
+	logicalToolsRoot     = "tools"
+	logicalToolboxRoot   = "toolbox"
+	logicalCodex         = "tool/codex"
+	logicalScopeSifter   = "tool/scopesifter"
+	logicalGit           = "tool/verifier-git"
+	logicalCommandRunner = "tool/command-runner"
+	logicalRunnerInit    = "tool/runner-arm-init"
+	logicalChangedCache  = "cache/changed-state"
 )
 
 const emptySHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
@@ -56,13 +59,12 @@ type FileOrigin struct {
 	SHA256 string `json:"sha256"`
 }
 
-// UtilityOrigins is the closed executable surface available to shell calls.
+// UtilityOrigins is the closed executable surface available to command-runner
+// calls.
 // Every role must be a distinct static image: multicall and argv[0]-selected
 // applet surfaces are intentionally not representable.
 type UtilityOrigins struct {
 	Ripgrep FileOrigin `json:"ripgrep"`
-	Sed     FileOrigin `json:"sed"`
-	Awk     FileOrigin `json:"awk"`
 	Find    FileOrigin `json:"find"`
 	Head    FileOrigin `json:"head"`
 	Tail    FileOrigin `json:"tail"`
@@ -73,19 +75,18 @@ type UtilityOrigins struct {
 	Cat     FileOrigin `json:"cat"`
 	LS      FileOrigin `json:"ls"`
 	Grep    FileOrigin `json:"grep"`
-	Xargs   FileOrigin `json:"xargs"`
 }
 
 // OriginInputs commits every mutable pathname from which a conformant image
-// was constructed. Runner and ArmInit intentionally name one image; bash and
-// every utility are distinct roles and distinct origin pathnames.
+// was constructed. Runner and ArmInit intentionally name one image. The same
+// pinned Go image also supplies the command runner inside the immutable
+// snapshot; it therefore has no separate mutable artifact origin.
 type OriginInputs struct {
 	SchemaVersion string         `json:"schema_version"`
 	Source        SourceOrigin   `json:"source"`
 	Codex         FileOrigin     `json:"codex"`
 	ScopeSifter   FileOrigin     `json:"scopesifter"`
 	Git           FileOrigin     `json:"git"`
-	Bash          FileOrigin     `json:"bash"`
 	Utilities     UtilityOrigins `json:"utilities"`
 	Runner        FileOrigin     `json:"runner"`
 	ArmInit       FileOrigin     `json:"arm_init"`
@@ -95,8 +96,6 @@ type OriginInputs struct {
 // UtilityPaths mirrors UtilityOrigins after immutable snapshot construction.
 type UtilityPaths struct {
 	Ripgrep string `json:"ripgrep"`
-	Sed     string `json:"sed"`
-	Awk     string `json:"awk"`
 	Find    string `json:"find"`
 	Head    string `json:"head"`
 	Tail    string `json:"tail"`
@@ -107,7 +106,6 @@ type UtilityPaths struct {
 	Cat     string `json:"cat"`
 	LS      string `json:"ls"`
 	Grep    string `json:"grep"`
-	Xargs   string `json:"xargs"`
 }
 
 // ChangedLineSpan is one inclusive, one-based range in the HEAD worktree.
@@ -313,41 +311,43 @@ type ManifestEntry struct { //nolint:govet,nolintlint // Field order defines can
 }
 
 // ExecutionInputs is the common immutable filesystem authority committed by
-// a v4 plan. Both arms use these exact paths and policy lists. The lists are
+// a v6 plan. Both arms use these exact paths and policy lists. The lists are
 // derived by this package and are not accepted as Build input.
 type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines canonical execution JSON.
-	SchemaVersion          string               `json:"schema_version"`
-	SnapshotRoot           string               `json:"snapshot_root"`
-	SourceRoot             string               `json:"source_root"`
-	GitMetadataRoot        string               `json:"git_metadata_root"`
-	CodexExecutable        string               `json:"codex_executable"`
-	ScopeSifterExecutable  string               `json:"scopesifter_executable"`
-	VerifierGitExecutable  string               `json:"verifier_git_executable"`
-	BashExecutable         string               `json:"bash_executable"`
-	Utilities              UtilityPaths         `json:"utilities"`
-	ToolboxRoot            string               `json:"toolbox_root"`
-	RunnerExecutable       string               `json:"runner_executable"`
-	ArmInitExecutable      string               `json:"arm_init_executable"`
-	RunnerArmInitSameImage bool                 `json:"runner_arm_init_same_image"`
-	SourceRevision         string               `json:"source_revision"`
-	SourceBaseRevision     string               `json:"source_base_revision"`
-	SourceTreeSHA256       string               `json:"source_tree_sha256"`
-	GitMetadataSHA256      string               `json:"git_metadata_sha256"`
-	OriginCommitment       string               `json:"origin_commitment"`
-	ChangedState           ChangedStateIdentity `json:"changed_state"`
-	ChangedStateCache      ChangedStateCache    `json:"changed_state_cache"`
-	PathIsolation          MountIdentity        `json:"path_isolation"`
-	Manifest               []ManifestEntry      `json:"manifest"`
-	ManifestSHA256         string               `json:"manifest_sha256"`
-	ReadOnlyPaths          []string             `json:"read_only_paths"`
-	ExecutablePaths        []string             `json:"executable_paths"`
-	Commitment             string               `json:"commitment"`
+	SchemaVersion                string               `json:"schema_version"`
+	SnapshotRoot                 string               `json:"snapshot_root"`
+	SourceRoot                   string               `json:"source_root"`
+	GitMetadataRoot              string               `json:"git_metadata_root"`
+	CodexExecutable              string               `json:"codex_executable"`
+	ScopeSifterExecutable        string               `json:"scopesifter_executable"`
+	VerifierGitExecutable        string               `json:"verifier_git_executable"`
+	CommandRunnerExecutable      string               `json:"command_runner_executable"`
+	Utilities                    UtilityPaths         `json:"utilities"`
+	ToolboxRoot                  string               `json:"toolbox_root"`
+	RunnerExecutable             string               `json:"runner_executable"`
+	ArmInitExecutable            string               `json:"arm_init_executable"`
+	RunnerArmInitSameImage       bool                 `json:"runner_arm_init_same_image"`
+	CommandRunnerImplementation  string               `json:"command_runner_implementation"`
+	CommandRunnerRunnerSameImage bool                 `json:"command_runner_runner_same_image"`
+	SourceRevision               string               `json:"source_revision"`
+	SourceBaseRevision           string               `json:"source_base_revision"`
+	SourceTreeSHA256             string               `json:"source_tree_sha256"`
+	GitMetadataSHA256            string               `json:"git_metadata_sha256"`
+	OriginCommitment             string               `json:"origin_commitment"`
+	ChangedState                 ChangedStateIdentity `json:"changed_state"`
+	ChangedStateCache            ChangedStateCache    `json:"changed_state_cache"`
+	PathIsolation                MountIdentity        `json:"path_isolation"`
+	Manifest                     []ManifestEntry      `json:"manifest"`
+	ManifestSHA256               string               `json:"manifest_sha256"`
+	ReadOnlyPaths                []string             `json:"read_only_paths"`
+	ExecutablePaths              []string             `json:"executable_paths"`
+	Commitment                   string               `json:"commitment"`
 }
 
 // NewOriginInputs validates and commits the explicit code-owned origin roles.
 func NewOriginInputs(
 	source SourceOrigin,
-	codex, scopeSifter, git, bash FileOrigin,
+	codex, scopeSifter, git FileOrigin,
 	utilities UtilityOrigins,
 	runnerArmInit FileOrigin,
 ) (OriginInputs, error) {
@@ -357,7 +357,6 @@ func NewOriginInputs(
 		Codex:         codex,
 		ScopeSifter:   scopeSifter,
 		Git:           git,
-		Bash:          bash,
 		Utilities:     utilities,
 		Runner:        runnerArmInit,
 		ArmInit:       runnerArmInit,
@@ -396,7 +395,6 @@ func (inputs OriginInputs) Validate() error {
 		{"Codex", inputs.Codex},
 		{"scopesifter", inputs.ScopeSifter},
 		{"Git", inputs.Git},
-		{"bash", inputs.Bash},
 		{"runner", inputs.Runner},
 		{"arm-init", inputs.ArmInit},
 	} {
@@ -411,7 +409,6 @@ func (inputs OriginInputs) Validate() error {
 		inputs.Codex,
 		inputs.ScopeSifter,
 		inputs.Git,
-		inputs.Bash,
 		inputs.Runner,
 	}
 	for name, file := range inputs.Utilities.named() {
@@ -459,16 +456,16 @@ func (inputs ExecutionInputs) Validate() error {
 		return errors.New("execution snapshot root must be absolute, canonical, and non-root")
 	}
 	wantPaths := struct {
-		source, metadata, codex, scopeSifter, verifierGit, bash, runner, cache string
+		source, metadata, codex, scopeSifter, verifierGit, commandRunner, runner, cache string
 	}{
-		source:      filepath.Join(inputs.SnapshotRoot, "source"),
-		metadata:    filepath.Join(inputs.SnapshotRoot, "source", ".git"),
-		codex:       filepath.Join(inputs.SnapshotRoot, "tools", "codex"),
-		scopeSifter: filepath.Join(inputs.SnapshotRoot, "tools", "scopesifter"),
-		verifierGit: filepath.Join(inputs.SnapshotRoot, "tools", "verifier-git"),
-		bash:        filepath.Join(inputs.SnapshotRoot, "toolbox", "bash"),
-		runner:      filepath.Join(inputs.SnapshotRoot, "tools", "runner-arm-init"),
-		cache:       filepath.Join(inputs.SnapshotRoot, "cache", "changed-state.json"),
+		source:        filepath.Join(inputs.SnapshotRoot, "source"),
+		metadata:      filepath.Join(inputs.SnapshotRoot, "source", ".git"),
+		codex:         filepath.Join(inputs.SnapshotRoot, "tools", "codex"),
+		scopeSifter:   filepath.Join(inputs.SnapshotRoot, "tools", "scopesifter"),
+		verifierGit:   filepath.Join(inputs.SnapshotRoot, "tools", "verifier-git"),
+		commandRunner: filepath.Join(inputs.SnapshotRoot, "toolbox", "bash"),
+		runner:        filepath.Join(inputs.SnapshotRoot, "tools", "runner-arm-init"),
+		cache:         filepath.Join(inputs.SnapshotRoot, "cache", "changed-state.json"),
 	}
 	switch {
 	case inputs.SourceRoot != wantPaths.source:
@@ -481,13 +478,16 @@ func (inputs ExecutionInputs) Validate() error {
 		return errors.New("execution scopesifter path is not code-owned")
 	case inputs.VerifierGitExecutable != wantPaths.verifierGit:
 		return errors.New("execution verifier Git path is not code-owned")
-	case inputs.BashExecutable != wantPaths.bash ||
-		inputs.ToolboxRoot != filepath.Dir(wantPaths.bash):
-		return errors.New("execution bash/toolbox path is not code-owned")
+	case inputs.CommandRunnerExecutable != wantPaths.commandRunner ||
+		inputs.ToolboxRoot != filepath.Dir(wantPaths.commandRunner):
+		return errors.New("execution command-runner/toolbox path is not code-owned")
 	case inputs.RunnerExecutable != wantPaths.runner ||
-		inputs.ArmInitExecutable != wantPaths.runner ||
-		!inputs.RunnerArmInitSameImage:
+		inputs.ArmInitExecutable != wantPaths.runner || !inputs.RunnerArmInitSameImage:
 		return errors.New("execution runner/arm-init identity is not the exact shared image")
+	case !inputs.CommandRunnerRunnerSameImage:
+		return errors.New("execution command-runner/runner same-image assertion is missing")
+	case inputs.CommandRunnerImplementation != GoCommandRunnerImplementation:
+		return errors.New("execution command-runner implementation identity is not code-owned")
 	case !validGitObjectID(inputs.SourceRevision):
 		return errors.New("execution source revision is invalid")
 	case !validGitObjectID(inputs.SourceBaseRevision):
@@ -503,7 +503,7 @@ func (inputs ExecutionInputs) Validate() error {
 	wantExecutable := []string{
 		inputs.CodexExecutable,
 		inputs.ScopeSifterExecutable,
-		inputs.BashExecutable,
+		inputs.CommandRunnerExecutable,
 	}
 	wantUtilities := utilityPathsForRoot(inputs.ToolboxRoot)
 	if !reflect.DeepEqual(inputs.Utilities, wantUtilities) {
@@ -554,7 +554,7 @@ func (inputs ExecutionInputs) Validate() error {
 		inputs.CodexExecutable,
 		inputs.ScopeSifterExecutable,
 		inputs.VerifierGitExecutable,
-		inputs.BashExecutable,
+		inputs.CommandRunnerExecutable,
 		inputs.RunnerExecutable,
 	}, inputs.Utilities.values()...)
 	for _, path := range executablePaths {
@@ -565,6 +565,9 @@ func (inputs ExecutionInputs) Validate() error {
 			entry.Mode&0o111 == 0 {
 			return fmt.Errorf("publishable executable %q is not a static image in the manifest", path)
 		}
+	}
+	if byPath[inputs.CommandRunnerExecutable].SHA256 != byPath[inputs.RunnerExecutable].SHA256 {
+		return errors.New("execution command runner is not the pinned Go runner image")
 	}
 	if err := validateExecutableManifestABIs(byPath, inputs.RunnerExecutable, executablePaths); err != nil {
 		return err
@@ -636,7 +639,7 @@ func ValidateBinding(origins OriginInputs, execution ExecutionInputs) error {
 		{"Codex", origins.Codex, execution.CodexExecutable},
 		{"scopesifter", origins.ScopeSifter, execution.ScopeSifterExecutable},
 		{"verifier Git", origins.Git, execution.VerifierGitExecutable},
-		{"bash", origins.Bash, execution.BashExecutable},
+		{"command runner", origins.Runner, execution.CommandRunnerExecutable},
 		{"runner/arm-init", origins.Runner, execution.RunnerExecutable},
 	}
 	for _, role := range roles {
@@ -774,7 +777,7 @@ func logicalOriginForPath(root, path string) (string, bool) {
 	case "tools/runner-arm-init":
 		return logicalRunnerInit, true
 	case "toolbox/bash":
-		return logicalBash, true
+		return logicalCommandRunner, true
 	case "cache/changed-state.json":
 		return logicalChangedCache, true
 	}
@@ -795,48 +798,47 @@ func logicalOriginForPath(root, path string) (string, bool) {
 const ChangedStateSchemaVersion = "tokenbench.changed-state-cache/v1"
 
 var utilityLogicalNames = map[string]struct{}{
-	"rg": {}, "sed": {}, "awk": {}, "find": {}, "head": {}, "tail": {},
+	"rg": {}, "find": {}, "head": {}, "tail": {},
 	"wc": {}, "sort": {}, "cut": {}, "tr": {}, "cat": {}, "ls": {},
-	"grep": {}, "xargs": {},
+	"grep": {},
 }
 
 func (origins UtilityOrigins) named() map[string]FileOrigin {
 	return map[string]FileOrigin{
-		"rg": origins.Ripgrep, "sed": origins.Sed, "awk": origins.Awk,
+		"rg":   origins.Ripgrep,
 		"find": origins.Find, "head": origins.Head, "tail": origins.Tail,
 		"wc": origins.WC, "sort": origins.Sort, "cut": origins.Cut,
 		"tr": origins.Tr, "cat": origins.Cat, "ls": origins.LS,
-		"grep": origins.Grep, "xargs": origins.Xargs,
+		"grep": origins.Grep,
 	}
 }
 
 func (paths UtilityPaths) values() []string {
 	return []string{
-		paths.Ripgrep, paths.Sed, paths.Awk, paths.Find, paths.Head,
+		paths.Ripgrep, paths.Find, paths.Head,
 		paths.Tail, paths.WC, paths.Sort, paths.Cut, paths.Tr, paths.Cat,
-		paths.LS, paths.Grep, paths.Xargs,
+		paths.LS, paths.Grep,
 	}
 }
 
 func (paths UtilityPaths) named() map[string]string {
 	return map[string]string{
-		"rg": paths.Ripgrep, "sed": paths.Sed, "awk": paths.Awk,
+		"rg":   paths.Ripgrep,
 		"find": paths.Find, "head": paths.Head, "tail": paths.Tail,
 		"wc": paths.WC, "sort": paths.Sort, "cut": paths.Cut,
 		"tr": paths.Tr, "cat": paths.Cat, "ls": paths.LS,
-		"grep": paths.Grep, "xargs": paths.Xargs,
+		"grep": paths.Grep,
 	}
 }
 
 func utilityPathsForRoot(root string) UtilityPaths {
 	return UtilityPaths{
-		Ripgrep: filepath.Join(root, "rg"), Sed: filepath.Join(root, "sed"),
-		Awk: filepath.Join(root, "awk"), Find: filepath.Join(root, "find"),
+		Ripgrep: filepath.Join(root, "rg"), Find: filepath.Join(root, "find"),
 		Head: filepath.Join(root, "head"), Tail: filepath.Join(root, "tail"),
 		WC: filepath.Join(root, "wc"), Sort: filepath.Join(root, "sort"),
 		Cut: filepath.Join(root, "cut"), Tr: filepath.Join(root, "tr"),
 		Cat: filepath.Join(root, "cat"), LS: filepath.Join(root, "ls"),
-		Grep: filepath.Join(root, "grep"), Xargs: filepath.Join(root, "xargs"),
+		Grep: filepath.Join(root, "grep"),
 	}
 }
 

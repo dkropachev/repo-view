@@ -5,6 +5,7 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -208,11 +209,8 @@ func TestCgroupCleanupKillsSetsidDescendant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pid, err := escapedPID(raw)
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertProcessGone(t, pid)
+	assertContainedTreeReaped(t, executor, raw, 2)
+	assertContainedArmReusable(t, executor)
 }
 
 func TestCgroupCleanupKillsDescendantOnTimeoutAndCancellation(t *testing.T) {
@@ -257,11 +255,8 @@ func TestCgroupCleanupKillsDescendantOnTimeoutAndCancellation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			executor := newContainedTestExecutor(t, nil)
 			raw := test.run(t, executor)
-			pid, err := escapedPID(raw)
-			if err != nil {
-				t.Fatal(err)
-			}
-			assertProcessGone(t, pid)
+			assertContainedTreeReaped(t, executor, raw, 2)
+			assertContainedArmReusable(t, executor)
 		})
 	}
 }
@@ -288,12 +283,8 @@ func (session *cleanupOrderingSession) Finish(
 	_ ExecutionRequest,
 	raw harness.RawExecution,
 ) ([]harness.Artifact, error) {
-	pid, err := escapedPID(raw)
-	if err != nil {
+	if err := validateContainedTreeReaped(raw, 2); err != nil {
 		return nil, err
-	}
-	if processExists(pid) {
-		return nil, errors.New("lifecycle Finish ran before descendant cleanup")
 	}
 	session.lifecycle.finishObservedEmpty = true
 	return []harness.Artifact{}, nil
@@ -556,6 +547,9 @@ func newContainedTestExecutorConfig(t *testing.T, config Config) *Executor {
 			err,
 		)
 	}
+	if !executor.pidNamespace {
+		t.Fatal("contained executor omitted its PID namespace reaper boundary")
+	}
 	t.Cleanup(func() {
 		if err := executor.Close(context.Background()); err != nil {
 			t.Errorf("Executor.Close(): %v", err)
@@ -564,20 +558,267 @@ func newContainedTestExecutorConfig(t *testing.T, config Config) *Executor {
 	return executor
 }
 
-func assertProcessGone(t *testing.T, pid int) {
+func assertContainedTreeReaped(
+	t *testing.T,
+	executor *Executor,
+	raw harness.RawExecution,
+	minimumPeak uint64,
+) {
 	t.Helper()
-	end := time.Now().Add(2 * time.Second)
-	for processExists(pid) && time.Now().Before(end) {
-		time.Sleep(2 * time.Millisecond)
+	if err := validateContainedTreeReaped(raw, minimumPeak); err != nil {
+		t.Fatal(err)
 	}
-	if processExists(pid) {
-		t.Fatalf("escaped descendant PID %d survived cgroup cleanup", pid)
+	if executor == nil || executor.containment == nil {
+		t.Fatal("contained tree assertion requires a cgroup-backed executor")
+	}
+	if _, err := os.Lstat(executor.containment.pairPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("cleaned arm cgroup still exists: %v", err)
 	}
 }
 
-func processExists(pid int) bool {
-	_, err := os.Stat(filepath.Join("/proc", strconv.Itoa(pid)))
-	return err == nil
+func validateContainedTreeReaped(raw harness.RawExecution, minimumPeak uint64) error {
+	pid, err := escapedPID(raw)
+	if err != nil {
+		return err
+	}
+	// This is the PID reported inside the arm namespace. PID 1 is the target;
+	// a larger value proves it created the detached descendant under test.
+	if pid <= 1 {
+		return fmt.Errorf("detached descendant received invalid namespace PID %d", pid)
+	}
+	if err := harness.ValidateResourceOutcome(raw.Resources); err != nil {
+		return fmt.Errorf("validate cleaned tree resources: %w", err)
+	}
+	if raw.Resources.PIDsCurrent != 0 || raw.Resources.PIDsPeak < minimumPeak {
+		return fmt.Errorf(
+			"contained tree was not fully reaped: current=%d peak=%d want_peak_at_least=%d",
+			raw.Resources.PIDsCurrent,
+			raw.Resources.PIDsPeak,
+			minimumPeak,
+		)
+	}
+	return nil
+}
+
+func assertContainedArmReusable(t *testing.T, executor *Executor) {
+	t.Helper()
+	raw, err := runPrepared(context.Background(), executor, helperRequest(t, "echo"))
+	if err != nil {
+		t.Fatalf("reuse executor after descendant cleanup: %v", err)
+	}
+	if raw.ExitCode != 0 || string(raw.Stdout) != "value\nprompt bytes" || len(raw.Stderr) != 0 {
+		t.Fatalf("reused arm execution: %+v", raw)
+	}
+}
+
+func TestInitializeArmCgroupCapturesZeroResourcesBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	var events []string
+	directory, keys, err := initializeArmCgroup(
+		parent,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				events = append(events, "capture")
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods"}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				events = append(events, "configure-and-verify")
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(events, ","); got != "capture,configure-and-verify" {
+		t.Fatalf("arm initialization order = %q", got)
+	}
+	if len(keys.CPUStat) != 1 || keys.CPUStat[0] != "nr_periods" {
+		t.Fatalf("captured resource keys = %+v", keys)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Remove(pairCgroupName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitializeArmCgroupAllowsElapsedPeriodBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configured := false
+	directory, _, err := initializeArmCgroup(
+		parent,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods", Value: 1}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				configured = true
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatalf("fresh elapsed CFS period rejected: %v", err)
+	}
+	if !configured {
+		t.Fatal("limits were not configured after accepting the elapsed period")
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Remove(pairCgroupName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitializeArmCgroupRejectsNonzeroUsageBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configured := false
+	_, _, err = initializeArmCgroup(
+		parent,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{
+						{Name: "nr_periods", Value: 1},
+						{Name: "usage_usec", Value: 1},
+					},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				configured = true
+				return nil
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "counter usage_usec started at 1") {
+		t.Fatalf("initialization error = %v", err)
+	}
+	if configured {
+		t.Fatal("limits were configured before strict usage validation")
+	}
+	if _, statErr := parent.Stat(pairCgroupName); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed initialization retained arm directory: %v", statErr)
+	}
+}
+
+func TestInitializeArmCgroupCleansUpConfigureFailure(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configureErr := errors.New("configure and verify limits")
+	_, _, err = initializeArmCgroup(
+		parent,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods"}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				return configureErr
+			},
+		},
+	)
+	if !errors.Is(err, configureErr) {
+		t.Fatalf("initialization error = %v, want %v", err, configureErr)
+	}
+	if _, statErr := parent.Stat(pairCgroupName); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("configure failure retained arm directory: %v", statErr)
+	}
+}
+
+func TestConfigureArmLimitsVerifiesReadback(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	for _, write := range armLimitValues() {
+		content := strings.Repeat("x", len(write.value))
+		if write.name == "cpu.max" {
+			content += "x"
+		}
+		if err := os.WriteFile(filepath.Join(rootPath, write.name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	err = configureArmLimits(root)
+	if err == nil || !strings.Contains(err.Error(), "arm cgroup cpu.max readback") {
+		t.Fatalf("configureArmLimits error = %v, want cpu.max readback rejection", err)
+	}
+}
+
+func TestCgroupRootEmptyWaitsForPIDsController(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	for name, content := range map[string]string{
+		"cgroup.events": "populated 0\nfrozen 0\n",
+		"cgroup.procs":  "",
+		"pids.current":  "1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rootPath, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	empty, err := cgroupRootEmpty(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatal("cgroup was declared empty before pids.current reached zero")
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "pids.current"), []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty, err = cgroupRootEmpty(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatal("cgroup was not declared empty after every emptiness signal reached zero")
+	}
 }
 
 func assertCgroupValue(t *testing.T, root *os.Root, name, want string) {
