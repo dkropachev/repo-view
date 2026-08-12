@@ -535,6 +535,7 @@ func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
 	manifest := read("go.mod")
 	notices := read("THIRD_PARTY_NOTICES.md")
 	workflow := read(filepath.Join(".github", "workflows", "release.yml"))
+	releaseMakefile := read(filepath.Join("make", "release.mk"))
 
 	for _, module := range []string{
 		"github.com/dcosson/treesitter-go",
@@ -593,10 +594,14 @@ func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
 			t.Errorf("third-party notices lack %q", marker)
 		}
 	}
-	if !strings.Contains(workflow, "cp THIRD_PARTY_NOTICES.md build/") ||
-		strings.Count(workflow, `"$binary" THIRD_PARTY_NOTICES.md`) != 2 ||
-		!strings.Contains(workflow, "release archive lacks THIRD_PARTY_NOTICES.md") {
-		t.Fatal("release workflow does not package and verify notices in both archive formats")
+	if !strings.Contains(workflow, "make -f make/release.mk release-artifacts") ||
+		!strings.Contains(workflow, "make -f make/release.mk release-publish") ||
+		!strings.Contains(releaseMakefile, "go run ./internal/cmd/release-artifacts -mode build") ||
+		!strings.Contains(releaseMakefile, "go run ./internal/cmd/release-artifacts -mode publish") {
+		t.Fatal("release workflow does not delegate build and publication to the Go release tool")
+	}
+	if strings.Contains(workflow, "shell: bash") {
+		t.Fatal("release workflow must not use Bash")
 	}
 }
 
