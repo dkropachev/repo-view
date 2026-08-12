@@ -42,6 +42,9 @@ func configuredPrivilegedSuites() []privilegedSuite {
 			names: []string{
 				"TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath",
 				"TestArmCleanupRetriesTransientRmdirWithinDeadline",
+				"TestCgroupCleanupKillsSetsidDescendant",
+				"TestCgroupCleanupKillsDescendantOnTimeoutAndCancellation",
+				"TestCgroupCleanupPrecedesLifecycleFinish",
 				"TestPrivilegedGoCommandRunnerDiscoveryPath",
 				"TestLandlockBlocksCgroupEscapeAndAllowsOnlyPinnedWritableRoots",
 				"TestLandlockFullPolicyDeniesHostReadsExecutablesAndLoaderBypass",

@@ -5,6 +5,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -254,7 +255,23 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 		t.Fatalf("command-runner cancellation classification: %+v", raw)
 	}
 	leafPID := commandRunnerLeafPID(t, raw.Stdout)
-	assertProcessGone(t, leafPID)
+	if leafPID <= 1 {
+		t.Fatalf("command-runner leaf received invalid namespace PID %d", leafPID)
+	}
+	if err := harness.ValidateResourceOutcome(raw.Resources); err != nil {
+		t.Fatalf("command-runner cancellation resources: %v", err)
+	}
+	if raw.Resources.PIDsCurrent != 0 || raw.Resources.PIDsPeak < 3 {
+		t.Fatalf("command-runner tree was not fully reaped: %+v", raw.Resources)
+	}
+	if _, err := os.Lstat(executor.containment.pairPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("command-runner arm cgroup survived cancellation: %v", err)
+	}
+	raw = run(t, "-c", "grep "+commandRunnerUtilityFlag+" print")
+	if raw.ExitCode != 0 || string(raw.Stdout) != commandRunnerUtilityMarker+"\n" ||
+		len(raw.Stderr) != 0 {
+		t.Fatalf("command-runner arm was not reusable after cancellation: %+v", raw)
+	}
 }
 
 func privilegedExecutableFixture(t *testing.T, environmentKey string) string {

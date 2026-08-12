@@ -229,7 +229,13 @@ func newExecutor(config Config, construction constructionMode) (_ *Executor, res
 	var commonSlot *os.File
 	var devNullRule *os.File
 	landlockVersion := 0
-	pidNamespace := construction == conformantCodexConstruction
+	// Every cgroup-contained arm needs its own PID namespace. When namespace init
+	// exits, kernel namespace teardown terminates and releases its remaining
+	// descendants, so a detached child cannot remain a zombie charged to the arm
+	// merely because an outer host or container PID 1 does not reap adopted
+	// processes. Publishable construction already required this boundary;
+	// generic contained execution must provide the same cleanup invariant.
+	pidNamespace := containment != nil
 	exactNetworkBoundary := false
 	if containment != nil {
 		requireStatic := construction == conformantCodexConstruction &&
