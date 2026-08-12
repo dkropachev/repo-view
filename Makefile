@@ -1,4 +1,5 @@
 include make/grammar.mk
+include make/launcher.mk
 include make/release.mk
 include make/tokenbench.mk
 
