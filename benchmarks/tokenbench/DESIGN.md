@@ -103,11 +103,33 @@ writable path list, environment, arm field, evaluator identity, or gold object.
 The v2 loader still accepts only v2 read-only suites, and the v3 loader does not
 produce execution authority.
 
-The `workspace` package currently defines bounded input and outcome audit
-records for the planned runner-owned overlay. Their path strings and
-self-commitments are evidence values only. No constructor yet proves a mount,
-creates an overlay, grants write access, captures a patch, or returns the private
-`PairAuthority` required by the future code runner.
+The `workspace` package defines bounded input and outcome audit records and a
+Linux-only live mount authority. `workspace.Prepare` accepts only a live,
+reverified immutable snapshot whose visible revision equals its base and whose
+changed-state cache is empty. It borrows an existing empty mode-`0700`
+mountpoint without creating, renaming, or removing it, attaches a byte-bounded
+and model-inode-bounded detached tmpfs, and retains the exact mount namespace,
+containing mount, mountpoint descriptor, mount, inode, snapshot, and policy
+identities. The fixed construction allowance is consumed by code-retained
+anonymous inodes before an arm is exposed, leaving exactly `MaximumEntries`
+inodes shared by writable worktree changes and the model-visible cache. Audit
+path strings alone never recreate this authority.
+
+Each `PairAuthority.BeginArm` creates the same fixed layout and a fresh detached
+OverlayFS over the immutable source. The model-visible worktree and cache paths
+are stable across arms; upper, work, and capture directories remain private
+runner state. A whiteout hides `.git`, cache and capture start empty, and the
+merged tree is hashed and compared with the committed source manifest before a
+future runner may launch a child. Both arm and pair cleanup reject descendant
+mounts, use retained mount IDs and normal unmounts only, remove claimed content
+descriptor-relatively within finite bounds, and report success only after the
+exact mounts and descriptors are released and the borrowed directory descriptor
+is again empty. Cleanup follows that exact mount and borrowed inode across
+caller relocation; it never mutates a replacement pathname. The borrowed
+mountpoint itself remains caller-owned. If a just-created private directory
+cannot be assigned an exact inode claim, construction failure closes the whole
+pair by normally unmounting its code-owned tmpfs. No code runner or
+workspace-result capture is wired to this authority yet.
 
 ## Trusted artifacts and immutable execution image
 

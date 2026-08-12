@@ -26,12 +26,30 @@ const (
 	maximumPatchBytes   = 256 << 20
 	maximumChangedFiles = 100_000
 	maximumPathBytes    = 4_096
+	// This temporary capacity constructs the tmpfs root, fixed private layout,
+	// OverlayFS work metadata, and the code-owned .git whiteout. Before an arm
+	// becomes visible, code pins every unused infrastructure inode so exactly
+	// MaximumEntries remain shared by worktree changes and CacheRoot.
+	workspaceInfrastructureInodes = 64
+
+	mountPolicyDocument = "tokenbench.workspace-mount-policy/v1\n" +
+		"root=borrowed-empty-mountpoint,detached-tmpfs,nosuid,nodev,noexec,noatime,bounded-bytes,exact-shared-worktree-cache-inode-budget,code-pinned-infrastructure\n" +
+		"arm=detached-overlay,nosuid,nodev,noatime,index-off,nfs-export-off,redirect-off,metacopy-off,xino-off\n" +
+		"mount-inputs=retained-descriptors-via-proc-self-fd\n" +
+		"layout=worktree,upper,work,cache,capture\n" +
+		"model-root-mode=0700\n" +
+		"git=opaque-whiteout\n" +
+		"cleanup=retained-mount-id,normal-unmount-only,descriptor-relative-owned-layout"
 )
 
 var violationCodePattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
 
-// Limits bounds one fresh arm workspace. These values are committed before
-// execution and must be the same for both arms.
+var requiredMountPolicySHA256 = digest([]byte(mountPolicyDocument))
+
+// Limits bounds one fresh arm workspace. MaximumEntries is both the merged-tree
+// scan bound and the exact shared writable-inode budget for OverlayFS changes
+// plus CacheRoot. These values are committed before execution and must be the
+// same for both arms.
 type Limits struct {
 	MaximumUpperBytes   int64 `json:"maximum_upper_bytes"`
 	MaximumEntries      int   `json:"maximum_entries"`
@@ -41,8 +59,8 @@ type Limits struct {
 }
 
 // Inputs records the exact common workspace identity. Exported paths are audit
-// data only; a future private PairAuthority must prove and retain their live
-// filesystem identities before they can be used.
+// data only; only the private live state retained by PairAuthority can
+// authorize their use.
 type Inputs struct {
 	SchemaVersion      string `json:"schema_version"`
 	ModelRoot          string `json:"model_root"`
@@ -122,8 +140,8 @@ func (inputs Inputs) Validate() error {
 		return errors.New("snapshot_commitment must be a lowercase SHA-256 digest")
 	case !validSHA256(inputs.ChangedStateSHA256):
 		return errors.New("changed_state_sha256 must be a lowercase SHA-256 digest")
-	case !validSHA256(inputs.MountPolicySHA256):
-		return errors.New("mount_policy_sha256 must be a lowercase SHA-256 digest")
+	case inputs.MountPolicySHA256 != requiredMountPolicySHA256:
+		return errors.New("mount_policy_sha256 must identify the code-owned workspace policy")
 	case limitsErr != nil:
 		return limitsErr
 	case inputs.Commitment != inputs.ComputeCommitment():

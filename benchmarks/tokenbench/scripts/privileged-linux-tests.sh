@@ -36,6 +36,7 @@ host_main() {
       "${host_binary_directory}/runner.test" \
       "${host_binary_directory}/source.test" \
       "${host_binary_directory}/snapshot.test" \
+      "${host_binary_directory}/workspace.test" \
       "${host_binary_directory}/tokenbench-command.test"
     rmdir -- "${host_binary_directory}" 2>/dev/null || true
   }
@@ -52,6 +53,9 @@ host_main() {
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
       -o "${host_binary_directory}/source.test" \
       ./benchmarks/tokenbench/source
+    CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
+      -o "${host_binary_directory}/workspace.test" \
+      ./benchmarks/tokenbench/workspace
     CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go test -mod=readonly -c \
       -o "${host_binary_directory}/tokenbench-command.test" \
       ./benchmarks/tokenbench/cmd/tokenbench
@@ -172,6 +176,33 @@ run_source_tests() {
     TestPrivilegedTreeDigestRejectsMountedGitlink
 }
 
+run_workspace_tests() {
+	local expression='^(TestPrivilegedWorkspaceMountLifecycle|TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout|TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts|TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach|TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup|TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair|TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot)$'
+  local output
+  if ! output="$(
+    env \
+      "${required_environment}=1" \
+      /tokenbench-tests/workspace.test \
+      -test.run="${expression}" \
+      -test.v \
+      -test.count=1 \
+      -test.timeout=2m 2>&1
+  )"; then
+    printf '%s\n' "${output}" >&2
+    fail "workspace privileged test binary failed"
+  fi
+  printf '%s\n' "${output}"
+	assert_passed_tests \
+		"${output}" \
+		TestPrivilegedWorkspaceMountLifecycle \
+		TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout \
+		TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts \
+		TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach \
+		TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup \
+		TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair \
+		TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot
+}
+
 run_command_tests() {
   local expression='^TestPhysicalPathSeparationRejectsBindMountAliases$'
   local output
@@ -272,6 +303,7 @@ container_main() {
   run_command_tests
   run_source_tests
   run_snapshot_tests "${fsverity_root}"
+  run_workspace_tests
 }
 
 if [[ "${TOKENBENCH_PRIVILEGED_CONTAINER:-}" == "1" ]]; then

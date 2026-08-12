@@ -172,7 +172,7 @@ func validInputs() Inputs {
 		BaseTreeSHA256:     digest([]byte("base")),
 		SnapshotCommitment: digest([]byte("snapshot")),
 		ChangedStateSHA256: digest([]byte("changed")),
-		Limits:             validLimits(), MountPolicySHA256: digest([]byte("mount-policy")),
+		Limits:             validLimits(), MountPolicySHA256: requiredMountPolicySHA256,
 	}
 	inputs.Commitment = inputs.ComputeCommitment()
 	return inputs
