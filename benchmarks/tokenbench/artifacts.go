@@ -87,7 +87,7 @@ type ArtifactManifest struct {
 	Utilities     ArtifactUtilities  `json:"utilities"`
 }
 
-// ArtifactBundleAudit is serialized into publishable v4 plans. RawManifest is
+// ArtifactBundleAudit is serialized into publishable v5 plans. RawManifest is
 // the exact authored byte sequence; Manifest and Provenance make review
 // structured without weakening the byte commitment.
 type ArtifactBundleAudit struct {

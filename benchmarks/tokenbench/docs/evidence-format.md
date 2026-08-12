@@ -60,15 +60,15 @@ The root reference file emitted by the CLI is itself the exact compact canonical
 JSON encoding of the attestation `ObjectRef`; it is not an alias or filename
 lookup.
 
-## Capture v5 graph
+## Capture v6 graph
 
 The signed capture subject media type is
-`application/vnd.tokenbench.capture.v5+json`:
+`application/vnd.tokenbench.capture.v6+json`:
 
 ```text
 signed capture root
-  -> capture v5 subject
-       -> plan v4
+  -> capture v6 subject
+       -> plan v5
             -> exact suite/prompt commitments
             -> sole-delta invocations and rendered processes
             -> trusted artifact manifest/provenance
@@ -85,7 +85,7 @@ signed capture root
 ```
 
 The plan is bounded to 64 MiB before either arm starts and uses
-`application/vnd.tokenbench.plan.v4+json`. It is marked publishable only when it
+`application/vnd.tokenbench.plan.v5+json`. It is marked publishable only when it
 contains the trusted artifact audit and immutable origin/execution inputs
 created by live private authority. `DecodePlan` strictly validates all
 commitments but never recreates that authority.
@@ -102,7 +102,7 @@ Authorization headers and upstream credentials are excluded.
 Normalized observations use
 `application/vnd.tokenbench.observation.v2+json`. Observation v2 adds the
 optional `usage.provider_total_tokens` counter; omission and a present zero are
-different. Capture loading reconstructs `tokenbench.run/v3` and rejects the old
+different. Capture loading reconstructs `tokenbench.run/v4` and rejects the old
 observation v1 media type rather than reinterpreting historical bytes.
 
 Complete traces use
@@ -160,7 +160,7 @@ replay recursively authenticates both lineages and validates the observations
 again.
 
 Replay v3 also requires observation v2 objects and rejects replay v2 manifests
-and observation v1 references. Capture v4 and replay v2 remain historical wire
+and observation v1 references. Capture v5 and replay v2 remain historical wire
 formats; current code does not relabel or rewrite them.
 
 ## Token accounting
@@ -177,7 +177,7 @@ Missing is distinct from zero. Codex JSONL usage, provider body usage, provider
 header/model state, and raw trace must agree. Tokenbench does not add cached
 input twice or create a discounted “effective token” total. Pricing, exchange
 rates, and cost formulas are separate versioned derived inputs and are not part
-of capture v5 or replay v3.
+of capture v6 or replay v3.
 
 ## Publication authority and signing order
 

@@ -316,7 +316,7 @@ type ManifestEntry struct { //nolint:govet,nolintlint // Field order defines can
 }
 
 // ExecutionInputs is the common immutable filesystem authority committed by
-// a v4 plan. Both arms use these exact paths and policy lists. The lists are
+// a v5 plan. Both arms use these exact paths and policy lists. The lists are
 // derived by this package and are not accepted as Build input.
 type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines canonical execution JSON.
 	SchemaVersion                string               `json:"schema_version"`

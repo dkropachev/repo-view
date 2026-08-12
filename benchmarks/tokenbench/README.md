@@ -25,8 +25,8 @@ The checked-in implementation provides:
 
 - strict read-only `tokenbench.suite/v2`, load-only code-task
   `tokenbench.suite/v3`, bounded workspace audit types and Linux mount authority,
-  artifact-manifest v3, plan v4, run v3,
-  observation v2, capture v5, signed-root, trust-policy v2, and replay v3
+  artifact-manifest v3, plan v5, run v4,
+  observation v2, capture v6, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
   `0.144.0`, exact executable SHA-256

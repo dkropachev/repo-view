@@ -374,6 +374,19 @@ func TestResolvedPlanDetectsTampering(t *testing.T) {
 	}
 }
 
+func TestDecodePlanRejectsFrozenV4(t *testing.T) {
+	t.Parallel()
+	plan := mustPlan(t)
+	plan.SchemaVersion = "tokenbench.plan/v4"
+	raw, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := DecodePlan(raw); err == nil || !strings.Contains(err.Error(), "unexpected plan schema") {
+		t.Fatalf("plan/v4 rejection = %v", err)
+	}
+}
+
 func TestResolvedPlanRejectsSharedHiddenCommonArguments(t *testing.T) {
 	t.Parallel()
 	plan := mustPlan(t)

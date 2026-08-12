@@ -35,13 +35,13 @@ func TestCapturePublicationIsDeterministicAndRecursive(t *testing.T) {
 		capture.Run.Plan.SuiteSHA256 != run.Plan.SuiteSHA256 {
 		t.Fatalf("capture did not round trip: %+v", capture)
 	}
-	if CaptureSchemaVersion != "tokenbench.capture/v5" ||
+	if CaptureSchemaVersion != "tokenbench.capture/v6" ||
 		capture.Manifest.SchemaVersion != CaptureSchemaVersion ||
-		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v5+json" ||
-		capture.Run.SchemaVersion != "tokenbench.run/v3" ||
+		capture.Subject.MediaType != "application/vnd.tokenbench.capture.v6+json" ||
+		capture.Run.SchemaVersion != "tokenbench.run/v4" ||
 		capture.Manifest.Baseline.Observation.MediaType !=
 			"application/vnd.tokenbench.observation.v2+json" {
-		t.Fatalf("capture v5 graph identities = %+v", capture)
+		t.Fatalf("capture v6 graph identities = %+v", capture)
 	}
 	if total := capture.Run.Baseline.Observation.Usage.ProviderTotalTokens; total == nil || *total != 12 ||
 		total == run.Baseline.Observation.Usage.ProviderTotalTokens {
@@ -119,19 +119,19 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldCaptureStatement := capture.Attestation.Statement
-	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v4+json"
+	oldCaptureStatement.Subject.MediaType = "application/vnd.tokenbench.capture.v5+json"
 	if err := validateAttestationStatement(oldCaptureStatement); err == nil {
-		t.Fatal("capture.v4 subject media type was accepted as capture.v5")
+		t.Fatal("capture.v5 subject media type was accepted as capture.v6")
 	}
 
 	oldCapture := capture.Manifest
-	oldCapture.SchemaVersion = "tokenbench.capture/v4"
+	oldCapture.SchemaVersion = "tokenbench.capture/v5"
 	oldCaptureRoot := putTestAttestedSubject(
 		t, store, signer, CaptureBundle, captureMediaType, oldCapture, nil,
 	)
 	if _, err := LoadCapture(context.Background(), store, oldCaptureRoot, verifier); err == nil ||
 		!strings.Contains(err.Error(), "unexpected capture schema") {
-		t.Fatalf("capture/v4 rejection = %v", err)
+		t.Fatalf("capture/v5 rejection = %v", err)
 	}
 
 	oldCaptureObservation := capture.Manifest
