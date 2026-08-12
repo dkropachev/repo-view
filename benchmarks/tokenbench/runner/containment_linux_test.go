@@ -591,7 +591,6 @@ func TestInitializeArmCgroupCapturesZeroResourcesBeforeConfiguringLimits(t *test
 	var events []string
 	directory, keys, err := initializeArmCgroup(
 		parent,
-		pairCgroupName,
 		cgroupResourceCounterKeys{},
 		armCgroupInitializationOperations{
 			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
@@ -634,7 +633,6 @@ func TestInitializeArmCgroupRejectsNonzeroResourcesBeforeConfiguringLimits(t *te
 	configured := false
 	_, _, err = initializeArmCgroup(
 		parent,
-		pairCgroupName,
 		cgroupResourceCounterKeys{},
 		armCgroupInitializationOperations{
 			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
@@ -670,7 +668,6 @@ func TestInitializeArmCgroupCleansUpConfigureFailure(t *testing.T) {
 	configureErr := errors.New("configure and verify limits")
 	_, _, err = initializeArmCgroup(
 		parent,
-		pairCgroupName,
 		cgroupResourceCounterKeys{},
 		armCgroupInitializationOperations{
 			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {

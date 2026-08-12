@@ -151,11 +151,11 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 			},
 		}
 	}
-	run := func(testingT *testing.T, arguments ...string) harness.RawExecution {
-		testingT.Helper()
+	run := func(t *testing.T, arguments ...string) harness.RawExecution {
+		t.Helper()
 		raw, err := runPrepared(context.Background(), executor, request(arguments...))
 		if err != nil {
-			testingT.Fatalf("run command-runner fixture %q: %v", arguments, err)
+			t.Fatalf("run command-runner fixture %q: %v", arguments, err)
 		}
 		return raw
 	}

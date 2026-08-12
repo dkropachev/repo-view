@@ -759,7 +759,6 @@ func (manager *cgroupManager) newArm() (*armCgroup, error) {
 	}
 	directory, keys, err := initializeArmCgroup(
 		manager.root,
-		pairCgroupName,
 		manager.resourceKeys,
 		armCgroupInitializationOperations{
 			captureResources:         captureCgroupResourceOutcome,
@@ -776,10 +775,10 @@ func (manager *cgroupManager) newArm() (*armCgroup, error) {
 
 func initializeArmCgroup(
 	parent *os.Root,
-	name string,
 	previousKeys cgroupResourceCounterKeys,
 	operations armCgroupInitializationOperations,
 ) (*os.File, cgroupResourceCounterKeys, error) {
+	name := pairCgroupName
 	if err := parent.Mkdir(name, 0o700); err != nil {
 		return nil, cgroupResourceCounterKeys{}, fmt.Errorf("create arm cgroup: %w", err)
 	}
