@@ -111,11 +111,11 @@ golangci-lint run --config=.golangci-fieldalignment.yml
 git diff --check
 ```
 
-Also validate tracked shell and JSON files and compile platform-specific files
-for their supported GOOS/GOARCH combinations. Kernel-boundary changes require:
+Also validate tracked JSON files and compile platform-specific files for their
+supported GOOS/GOARCH combinations. Kernel-boundary changes require:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 Live model calls are never a unit-test prerequisite and should not run in

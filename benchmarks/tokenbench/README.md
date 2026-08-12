@@ -179,7 +179,7 @@ every unavailable prerequisite or skipped kernel test into a failure. For a
 local kernel-boundary check, run:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 This command requires a Linux x86-64 host and a privileged Docker-compatible
@@ -201,7 +201,7 @@ benchmarks/tokenbench/
   source/               mutable-origin verification
   study/                separate methodology stage for blinded paired analysis
   schemas/              authored JSON contracts
-  scripts/              fail-closed privileged validation
+  cmd/privileged-linux-tests/  fail-closed privileged validation
   docs/                 operations, methodology, evidence, and adapter guides
 ```
 

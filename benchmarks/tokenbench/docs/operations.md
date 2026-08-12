@@ -172,10 +172,10 @@ caller-owned, single-link, non-symlink file with mode `0600` or stricter and no
 newline. Ambient proxy, provider-base-URL, and custom-CA overrides are rejected.
 
 Confirm the Linux prerequisites in [README.md](../README.md#host-prerequisites).
-The privileged test script proves kernel mechanics without making a model call:
+The privileged test lane proves kernel mechanics without making a model call:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 ## 6. Run one explicit repetition

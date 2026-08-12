@@ -186,7 +186,7 @@ fs-verity, cgroups, BPF, Landlock, seccomp, PID namespaces, capabilities, or
 cleanup also require the fail-closed privileged lane:
 
 ```sh
-benchmarks/tokenbench/scripts/privileged-linux-tests.sh
+make -f make/tokenbench.mk tokenbench-privileged-linux
 ```
 
 Do not merge a staged pull request until every required GitHub check is green.
