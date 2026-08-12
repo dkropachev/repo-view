@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"io"
 	"os"
@@ -412,113 +411,6 @@ func TestCompiledOptionCapSurvivesUnsetEnvironment(t *testing.T) {
 		"--limit 3 exceeds SCOPESIFTER_LIMIT_CAP 2",
 	) {
 		t.Fatalf("error = %v, output = %s", err, output)
-	}
-}
-
-func TestCodexWrapperRejectsInvalidNavigationConfigurationBeforeBuild(t *testing.T) {
-	bash, err := exec.LookPath("bash")
-	if err != nil {
-		t.Skip("bash is required to test the Bash wrapper")
-	}
-	script := filepath.Join("..", "..", "scripts", "codex-with-scopesifter")
-	if _, err := os.Stat(script); err != nil {
-		t.Fatal(err)
-	}
-
-	mechanical := []string{
-		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=1",
-		"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1",
-		"SCOPESIFTER_REQUIRED_ROOT=/tmp",
-		"SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-	}
-	tests := []struct {
-		name        string
-		environment []string
-		want        string
-	}{
-		{
-			name:        "zero result limit",
-			environment: []string{"SCOPESIFTER_CHANGED_LIMIT=0"},
-			want:        "changed_limit must be a positive integer",
-		},
-		{
-			name:        "zero code line cap",
-			environment: []string{"SCOPESIFTER_CHANGED_MAX_CODE_LINES=0"},
-			want:        "changed_max_code_lines must be a positive integer",
-		},
-		{
-			name:        "zero patch line cap",
-			environment: []string{"SCOPESIFTER_CHANGED_MAX_PATCH_LINES=0"},
-			want:        "changed_max_patch_lines must be a positive integer",
-		},
-		{
-			name: "changed context above cap",
-			environment: []string{
-				"SCOPESIFTER_CHANGED_CONTEXT=21",
-				"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=20",
-			},
-			want: "changed_context 21 exceeds navigation_context_cap 20",
-		},
-		{
-			name: "zero batched context cap",
-			environment: []string{
-				"SCOPESIFTER_CHANGED_CONTEXT=0",
-				"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=0",
-				"SCOPESIFTER_NAVIGATION_POLICY=batched",
-				"SCOPESIFTER_NAVIGATION_COMMAND_CAP=1",
-			},
-			want: "SCOPESIFTER_NAVIGATION_CONTEXT_CAP must be positive",
-		},
-		{
-			name: "mechanical return mismatch",
-			environment: append(append([]string{}, mechanical...),
-				"SCOPESIFTER_CHANGED_RETURN=context",
-				"SCOPESIFTER_CHANGED_CONTEXT=4",
-				"SCOPESIFTER_REQUIRED_CHANGED_RETURN=locations",
-				"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=4",
-			),
-			want: "SCOPESIFTER_REQUIRED_CHANGED_RETURN must match SCOPESIFTER_CHANGED_RETURN",
-		},
-		{
-			name: "mechanical context mismatch",
-			environment: append(append([]string{}, mechanical...),
-				"SCOPESIFTER_CHANGED_RETURN=context",
-				"SCOPESIFTER_CHANGED_CONTEXT=4",
-				"SCOPESIFTER_REQUIRED_CHANGED_RETURN=context",
-				"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=5",
-			),
-			want: "SCOPESIFTER_REQUIRED_CHANGED_CONTEXT must match SCOPESIFTER_CHANGED_CONTEXT",
-		},
-		{
-			name: "zero mechanical context with code return",
-			environment: append(append([]string{}, mechanical...),
-				"SCOPESIFTER_CHANGED_RETURN=context",
-				"SCOPESIFTER_CHANGED_CONTEXT=0",
-				"SCOPESIFTER_REQUIRED_CHANGED_RETURN=context",
-				"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=0",
-			),
-			want: "mechanically enforced changed context must be positive unless return is locations",
-		},
-	}
-
-	baseEnvironment := make([]string, 0, len(os.Environ()))
-	for _, variable := range os.Environ() {
-		if !strings.HasPrefix(variable, "SCOPESIFTER_") {
-			baseEnvironment = append(baseEnvironment, variable)
-		}
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			command := exec.Command(bash, script, "exec")
-			command.Env = append(append([]string{}, baseEnvironment...), test.environment...)
-			output, commandErr := command.CombinedOutput()
-			var exitError *exec.ExitError
-			if !errors.As(commandErr, &exitError) || exitError.ExitCode() != 2 ||
-				!strings.Contains(string(output), test.want) {
-				t.Fatalf("error = %v, output = %q, want exit 2 containing %q",
-					commandErr, output, test.want)
-			}
-		})
 	}
 }
 

@@ -114,19 +114,21 @@ Multiple includes are ORed; any matching exclude wins.
 
 ## Codex Integration
 
-Use the wrapper to inject `scopesifter` into PATH and add navigation instructions
-for one Codex invocation. It does not modify Codex config, Codex source, or the
-target repository.
+Build the typed launcher, then use it to inject `scopesifter` into PATH and add
+navigation instructions for one Codex invocation. It does not modify Codex
+config, Codex source, or the target repository. The root Makefile exposes the
+target from `make/launcher.mk`.
 
-```bash
-scripts/codex-with-scopesifter exec \
+```console
+$ make scopesifter-codex
+$ bin/scopesifter-codex exec \
   -C /path/to/repository \
   -s read-only \
   --json \
   "Explain this branch compared with main."
 ```
 
-The wrapper defaults to a bounded navigation profile:
+The launcher defaults to a bounded navigation profile:
 
 ```text
 SCOPESIFTER_CHANGED_RETURN=context
@@ -140,7 +142,7 @@ SCOPESIFTER_ANSWER_GUARD=on
 
 Each value can be overridden for one invocation. `SCOPESIFTER_ANSWER_GUARD`
 accepts `on|off`; reasoning accepts `inherit|low|medium|high|xhigh|ultra`.
-The wrapper compiles the advertised navigation ceilings into every child
+The launcher compiles the advertised navigation ceilings into every child
 `scopesifter` binary: result limit `20`, context `20`, embedded code `60`, and
 changed patch `300`. Environment values are fallback-only, so a command cannot
 disable these ceilings with `env -u`. A command that requests more exits with
@@ -152,12 +154,12 @@ When both `SCOPESIFTER_NAVIGATION_COMMAND_CAP` and
 `SCOPESIFTER_NAVIGATION_BUDGET_FILE` are set in a writable integration, JSON
 responses include `navigation_budget` with `used`, `limit`, and `remaining`,
 and scopesifter invocations after the limit are rejected. For read-only capped
-Codex runs, the wrapper requires `--json`, tees live events to an ignored local
-transcript, and compiles its path and cap into scopesifter. Each scopesifter CLI
-invocation is counted from started and completed navigation events, so the
-model cannot bypass the cumulative budget by unsetting environment variables.
-Total Codex tool calls are measured separately. The transcript is removed when
-the wrapper exits.
+Codex runs, the launcher requires `--json`, mirrors live events to an ignored
+local transcript, and compiles its path and cap into scopesifter. Each
+scopesifter CLI invocation is counted from started and completed navigation
+events, so the model cannot bypass the cumulative budget by unsetting
+environment variables. Total Codex tool calls are measured separately. The
+transcript is removed when the launcher exits.
 
 Reproducible comparisons belong in
 [`tokenbench`](benchmarks/tokenbench/README.md), whose evidence and parity
