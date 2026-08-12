@@ -174,19 +174,30 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 		!strings.Contains(string(raw.Stderr), "expected exactly -c COMMAND") {
 		t.Fatalf("unsupported command-runner argv was not rejected: %+v", raw)
 	}
-	for name, command := range map[string]string{
-		"unlisted basename":  "sh -c 'printf forbidden'",
-		"host absolute path": "/bin/sh -c 'printf forbidden'",
+	for _, test := range []struct {
+		name       string
+		command    string
+		exitCode   int
+		diagnostic string
+	}{
+		{
+			name:       "unlisted basename",
+			command:    "sh -c 'printf forbidden'",
+			exitCode:   127,
+			diagnostic: "executable file not found",
+		},
+		{
+			name:       "host absolute path",
+			command:    "/bin/sh -c 'printf forbidden'",
+			exitCode:   125,
+			diagnostic: "permission denied",
+		},
 	} {
-		t.Run(name, func(t *testing.T) {
-			raw := run(t, "-c", command)
-			if raw.ExitCode != 127 || len(raw.Stdout) != 0 ||
-				strings.Contains(string(raw.Stdout), "forbidden") {
+		t.Run(test.name, func(t *testing.T) {
+			raw := run(t, "-c", test.command)
+			if raw.ExitCode != test.exitCode || len(raw.Stdout) != 0 ||
+				!strings.Contains(string(raw.Stderr), test.diagnostic) {
 				t.Fatalf("unapproved shell was not rejected: %+v", raw)
-			}
-			if name == "host absolute path" &&
-				!strings.Contains(string(raw.Stderr), "permission denied") {
-				t.Fatalf("host shell rejection omitted Landlock denial: %+v", raw)
 			}
 		})
 	}

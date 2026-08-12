@@ -580,6 +580,43 @@ func processExists(pid int) bool {
 	return err == nil
 }
 
+func TestCgroupRootEmptyWaitsForPIDsController(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	for name, content := range map[string]string{
+		"cgroup.events": "populated 0\nfrozen 0\n",
+		"cgroup.procs":  "",
+		"pids.current":  "1\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rootPath, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	empty, err := cgroupRootEmpty(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatal("cgroup was declared empty before pids.current reached zero")
+	}
+	if err := os.WriteFile(filepath.Join(rootPath, "pids.current"), []byte("0\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	empty, err = cgroupRootEmpty(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatal("cgroup was not declared empty after every emptiness signal reached zero")
+	}
+}
+
 func assertCgroupValue(t *testing.T, root *os.Root, name, want string) {
 	t.Helper()
 	value, err := root.ReadFile(name)

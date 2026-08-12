@@ -1127,7 +1127,18 @@ func cgroupRootEmpty(root *os.Root) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read cgroup processes: %w", err)
 	}
-	return len(processes) == 0, nil
+	if len(processes) != 0 {
+		return false, nil
+	}
+	pidsCurrent, err := readCgroupScalar(root, "pids.current")
+	if err != nil {
+		return false, fmt.Errorf("read current cgroup process count: %w", err)
+	}
+	// cgroup.events and cgroup.procs can both report an empty subtree before
+	// the pids controller publishes its final decrement. Resource capture must
+	// wait for that decrement too, otherwise an immediately following read can
+	// produce a nonzero pids.current and an invalid ResourceOutcome.
+	return pidsCurrent == 0, nil
 }
 
 func (manager *cgroupManager) close() error {
