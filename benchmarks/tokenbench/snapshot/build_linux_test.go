@@ -72,6 +72,131 @@ func TestFSVerityMerkleBlockSizeIsPageCompatible(t *testing.T) {
 	}
 }
 
+func TestRetainPinnedPathsIgnoresRelocatedPathReplacements(t *testing.T) {
+	parent := t.TempDir()
+	snapshotPath := filepath.Join(parent, "snapshot")
+	movedPath := filepath.Join(parent, "moved")
+	sourcePath := filepath.Join(snapshotPath, "source")
+	gitPath := filepath.Join(snapshotPath, "git")
+	objectsPath := filepath.Join(snapshotPath, "objects")
+	for _, path := range []string{sourcePath, objectsPath} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gitPath, []byte("authentic"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	paths := []string{sourcePath, gitPath, objectsPath}
+	pins := make([]inodePin, len(paths))
+	for index, path := range paths {
+		file, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = file.Close() })
+		info, err := file.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		kind := ManifestKindDirectory
+		if index == 1 {
+			kind = ManifestKindFile
+		}
+		pins[index] = inodePin{
+			file: file, info: info,
+			entry: ManifestEntry{SnapshotPath: path, Kind: kind},
+		}
+	}
+	if err := os.Rename(snapshotPath, movedPath); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{sourcePath, objectsPath} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(gitPath, []byte("replacement"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	replacementInfo := make([]os.FileInfo, len(paths))
+	for index, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		replacementInfo[index] = info
+	}
+
+	retained, err := retainPinnedPaths(pins, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = closeRetainedPaths(retained) })
+	for index, value := range retained {
+		info, err := value.File.Stat()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(pins[index].info, info) || os.SameFile(replacementInfo[index], info) {
+			t.Fatalf("retained role %d selected a replacement pathname", index)
+		}
+		flags, err := unix.FcntlInt(value.File.Fd(), unix.F_GETFD, 0)
+		if err != nil || flags&unix.FD_CLOEXEC == 0 {
+			t.Fatalf("retained role %d is not close-on-exec: flags=%d err=%v", index, flags, err)
+		}
+		if value.Entry.SnapshotPath != paths[index] {
+			t.Fatalf("retained role %d entry = %#v", index, value.Entry)
+		}
+	}
+}
+
+func TestRetainPinnedPathsClosesPartialDuplicates(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pin")
+	if err := os.WriteFile(path, []byte("pin"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = file.Close() })
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins := []inodePin{
+		{file: file, info: info, entry: ManifestEntry{SnapshotPath: "/first"}},
+		{file: file, info: info, entry: ManifestEntry{SnapshotPath: "/second"}},
+	}
+	var created *os.File
+	calls := 0
+	_, err = retainPinnedPathsWith(
+		pins,
+		[]string{"/first", "/second"},
+		func(pin inodePin, retainedPath string) (*os.File, error) {
+			calls++
+			if calls == 2 {
+				return nil, errors.New("injected duplicate failure")
+			}
+			created, err = duplicateRetainedPath(pin, retainedPath)
+			return created, err
+		},
+	)
+	if err == nil {
+		t.Fatal("partial retained path construction succeeded")
+	}
+	if created == nil {
+		t.Fatal("partial retained path construction created no first duplicate")
+	}
+	if _, statErr := created.Stat(); statErr == nil {
+		t.Fatal("partial retained path construction leaked its first duplicate")
+	}
+}
+
 func TestCopyRegularFileRejectsHardLinkOrigin(t *testing.T) {
 	directory := t.TempDir()
 	origin := filepath.Join(directory, "origin")

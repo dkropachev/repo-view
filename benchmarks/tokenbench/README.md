@@ -55,8 +55,11 @@ identity, cleanup, or capture proof is unavailable. It has no best-effort
 publication mode. Study-level blinded quality evaluation and statistical
 reporting are kept separate from raw capture and replay. Code-task quality has
 a sealed objective-outcome boundary, a separate v3 authoring loader, and a live
-Linux authority for fresh bounded writable workspaces, but no code runner or
-result capture is connected to them yet.
+Linux authority for fresh bounded writable workspaces. That authority now
+freezes an arm read-only and derives a bounded, deterministic, round-tripped
+binary patch or a closed no-change/invalid/limit outcome using pinned Git
+inputs. No code runner, signed workspace evidence edge, or objective evaluator
+is connected to it yet.
 
 ## Commands
 

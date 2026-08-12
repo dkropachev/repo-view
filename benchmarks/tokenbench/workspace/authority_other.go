@@ -49,6 +49,10 @@ func (*ArmAuthority) Reverify(context.Context) error {
 	return errors.New("writable workspace authority requires Linux")
 }
 
+func (*ArmAuthority) Capture(context.Context) (Outcome, error) {
+	return Outcome{}, errors.New("writable workspace capture requires Linux")
+}
+
 func (*ArmAuthority) Close() error { return nil }
 
 func (*ArmAuthority) Closed() bool { return false }

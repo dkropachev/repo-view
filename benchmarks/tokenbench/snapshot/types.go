@@ -1062,13 +1062,7 @@ func cloneInputs(inputs ExecutionInputs) ExecutionInputs {
 	clone := inputs
 	clone.Manifest = make([]ManifestEntry, len(inputs.Manifest))
 	for index, entry := range inputs.Manifest {
-		clone.Manifest[index] = entry
-		if entry.ELF != nil {
-			identity := *entry.ELF
-			identity.Needed = make([]string, len(entry.ELF.Needed))
-			copy(identity.Needed, entry.ELF.Needed)
-			clone.Manifest[index].ELF = &identity
-		}
+		clone.Manifest[index] = cloneManifestEntry(entry)
 	}
 	clone.ReadOnlyPaths = append([]string(nil), inputs.ReadOnlyPaths...)
 	clone.ExecutablePaths = append([]string(nil), inputs.ExecutablePaths...)
@@ -1087,6 +1081,17 @@ func cloneInputs(inputs ExecutionInputs) ExecutionInputs {
 			len(file.Lines),
 		)
 		copy(clone.ChangedStateCache.ChangedFiles[index].Lines, file.Lines)
+	}
+	return clone
+}
+
+func cloneManifestEntry(entry ManifestEntry) ManifestEntry {
+	clone := entry
+	if entry.ELF != nil {
+		identity := *entry.ELF
+		identity.Needed = make([]string, len(entry.ELF.Needed))
+		copy(identity.Needed, entry.ELF.Needed)
+		clone.ELF = &identity
 	}
 	return clone
 }

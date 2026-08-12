@@ -1,9 +1,18 @@
 package workspace
 
 import (
+	"strconv"
 	"strings"
 	"testing"
 )
+
+func TestMountPolicyCommitsInfrastructureInodeAllowance(t *testing.T) {
+	t.Parallel()
+	want := "infrastructure-inodes=" + strconv.Itoa(workspaceInfrastructureInodes) + "\n"
+	if !strings.Contains(mountPolicyDocument, want) {
+		t.Fatalf("workspace mount policy omits %q", want)
+	}
+}
 
 func TestInputsValidateCommitmentAndDisjointPaths(t *testing.T) {
 	t.Parallel()

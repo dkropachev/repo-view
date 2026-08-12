@@ -27,14 +27,17 @@ const (
 	maximumChangedFiles = 100_000
 	maximumPathBytes    = 4_096
 	// This temporary capacity constructs the tmpfs root, fixed private layout,
-	// OverlayFS work metadata, and the code-owned .git whiteout. Before an arm
-	// becomes visible, code pins every unused infrastructure inode so exactly
+	// OverlayFS work metadata, the code-owned .git whiteout, and the fixed Git
+	// scratch layout needed to capture even an empty tree. Before an arm becomes
+	// visible, code pins every unused infrastructure inode so exactly
 	// MaximumEntries remain shared by worktree changes and CacheRoot.
-	workspaceInfrastructureInodes = 64
+	workspaceInfrastructureInodes = 128
 
 	mountPolicyDocument = "tokenbench.workspace-mount-policy/v1\n" +
 		"root=borrowed-empty-mountpoint,detached-tmpfs,nosuid,nodev,noexec,noatime,bounded-bytes,exact-shared-worktree-cache-inode-budget,code-pinned-infrastructure\n" +
+		"infrastructure-inodes=128\n" +
 		"arm=detached-overlay,nosuid,nodev,noatime,index-off,nfs-export-off,redirect-off,metacopy-off,xino-off\n" +
+		"capture=read-only-freeze-before-private-infrastructure-reserve-release\n" +
 		"mount-inputs=retained-descriptors-via-proc-self-fd\n" +
 		"layout=worktree,upper,work,cache,capture\n" +
 		"model-root-mode=0700\n" +

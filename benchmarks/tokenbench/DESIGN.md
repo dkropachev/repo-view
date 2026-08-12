@@ -110,10 +110,12 @@ changed-state cache is empty. It borrows an existing empty mode-`0700`
 mountpoint without creating, renaming, or removing it, attaches a byte-bounded
 and model-inode-bounded detached tmpfs, and retains the exact mount namespace,
 containing mount, mountpoint descriptor, mount, inode, snapshot, and policy
-identities. The fixed construction allowance is consumed by code-retained
-anonymous inodes before an arm is exposed, leaving exactly `MaximumEntries`
-inodes shared by writable worktree changes and the model-visible cache. Audit
-path strings alone never recreate this authority.
+identities. Under the snapshot-authority lock it duplicates the already-pinned
+source root, verifier Git, and Git object-store inodes; workspace code never
+reopens those audit paths. The fixed construction and minimum capture allowance
+is consumed by code-retained anonymous inodes before an arm is exposed, leaving
+exactly `MaximumEntries` inodes shared by writable worktree changes and the
+model-visible cache. Audit path strings alone never recreate this authority.
 
 Each `PairAuthority.BeginArm` creates the same fixed layout and a fresh detached
 OverlayFS over the immutable source. The model-visible worktree and cache paths
@@ -128,8 +130,27 @@ is again empty. Cleanup follows that exact mount and borrowed inode across
 caller relocation; it never mutates a replacement pathname. The borrowed
 mountpoint itself remains caller-owned. If a just-created private directory
 cannot be assigned an exact inode claim, construction failure closes the whole
-pair by normally unmounting its code-owned tmpfs. No code runner or
-workspace-result capture is wired to this authority yet.
+pair by normally unmounting its code-owned tmpfs.
+
+After a future runner has synchronously proved the arm cgroup empty, the live
+arm authority can capture exactly once. Capture syncs the merged filesystem,
+changes the retained overlay mount from writable to read-only without changing
+its identity or other mount options, and rejects symlinks, hard links, special
+files, extended attributes, noncanonical modes, unrepresentable empty
+directories, and every configured tree-entry, per-file, change-count, and patch
+limit. The writable upper is independently bounded by its physical tmpfs; bytes
+from the immutable lower do not consume that budget. Only after the read-only
+transition does capture release the anonymous
+infrastructure inode reserve, so private capture scratch cannot consume the
+model-and-cache budget during execution. It invokes only the fs-verity-pinned
+verifier Git and source object store
+through retained descriptors, writes into private bounded tmpfs scratch, emits
+a deterministic binary-capable full-index patch, and proves that applying the
+patch to a fresh base index produces the exact scanned result tree. The
+one-shot outcome distinguishes captured, no-change, invalid-tree, and
+limit-exceeded states; capture integrity failures remain errors. No code runner,
+signed workspace/CAS edge, or objective evaluator is wired to this authority
+yet.
 
 ## Trusted artifacts and immutable execution image
 
