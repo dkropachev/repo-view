@@ -8,7 +8,7 @@ import (
 )
 
 func signaledProcessExitStatus(err *exec.ExitError) int {
-	status, ok := err.ProcessState.Sys().(syscall.WaitStatus)
+	status, ok := err.Sys().(syscall.WaitStatus)
 	if !ok || !status.Signaled() {
 		return 1
 	}

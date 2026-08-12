@@ -25,10 +25,10 @@ const (
 )
 
 type privilegedSuite struct {
+	environment map[string]string
 	binary      string
 	timeout     string
 	names       []string
-	environment map[string]string
 	delegated   bool
 }
 

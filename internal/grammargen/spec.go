@@ -14,6 +14,7 @@ type filePin struct {
 }
 
 type grammarSpec struct {
+	generatedParser   *filePin
 	name              string
 	upstreamName      string
 	packageName       string
@@ -23,13 +24,12 @@ type grammarSpec struct {
 	dirtyMessage      string
 	tableMagic        string
 	tableReplacement  string
-	dirtyPaths        []string
-	pins              []filePin
-	corpusPins        []filePin
-	generatedParser   *filePin
 	rawGoDigest       string
 	finalGoDigest     string
 	tableDigest       string
+	dirtyPaths        []string
+	pins              []filePin
+	corpusPins        []filePin
 	correctABIVersion bool
 	splitLexer        bool
 }

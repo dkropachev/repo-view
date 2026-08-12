@@ -130,7 +130,8 @@ func TestCommandBuildsAndRunsCodexWithFailClosedEnvironment(t *testing.T) {
 			baseEnvironment = append(baseEnvironment, variable)
 		}
 	}
-	command.Env = append(baseEnvironment,
+	command.Env = append([]string(nil), baseEnvironment...)
+	command.Env = append(command.Env,
 		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"SCOPESIFTER_CODEX_TEST_HELPER=1",
 		"SCOPESIFTER_CACHE_DIR="+filepath.Join(temporary, "cache"),

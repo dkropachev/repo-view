@@ -96,6 +96,7 @@ func TestLoadConfigRejectsInvalidConfiguration(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			_, err := loadConfig("/source", test.environment, test.arguments)
 			if test.want == "" {
 				if err != nil {

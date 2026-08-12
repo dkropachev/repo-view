@@ -197,11 +197,7 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 	binaryPath := filepath.Join(workRoot, binaryName)
 	command := exec.Command("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=true", "-ldflags=-s -w", "-o", binaryPath, "./cmd/scopesifter")
 	command.Dir = root
-	command.Env = replaceEnvironment(os.Environ(), map[string]string{
-		"CGO_ENABLED": "0",
-		"GOOS":        item.goos,
-		"GOARCH":      item.goarch,
-	})
+	command.Env = releaseBuildEnvironment(os.Environ(), item)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
@@ -246,14 +242,14 @@ func writeTarGzip(path, binaryName string, binary, notice []byte) (returnErr err
 	if err != nil {
 		return fmt.Errorf("create gzip writer: %w", err)
 	}
-	compressed.Header.ModTime = time.Unix(0, 0).UTC()
-	compressed.Header.OS = 255
+	compressed.ModTime = time.Unix(0, 0).UTC()
+	compressed.OS = 255
 	archive := tar.NewWriter(compressed)
 	for _, entry := range []struct {
 		name string
-		mode int64
 		data []byte
-	}{{binaryName, 0o755, binary}, {noticeName, 0o644, notice}} {
+		mode int64
+	}{{binaryName, binary, 0o755}, {noticeName, notice, 0o644}} {
 		header := &tar.Header{
 			Name:       entry.name,
 			Mode:       entry.mode,
@@ -293,9 +289,9 @@ func writeZip(path, binaryName string, binary, notice []byte) (returnErr error) 
 	archive := zip.NewWriter(file)
 	for _, entry := range []struct {
 		name string
-		mode fs.FileMode
 		data []byte
-	}{{binaryName, 0o755, binary}, {noticeName, 0o644, notice}} {
+		mode fs.FileMode
+	}{{binaryName, binary, 0o755}, {noticeName, notice, 0o644}} {
 		header := &zip.FileHeader{Name: entry.name, Method: zip.Deflate}
 		header.SetMode(entry.mode)
 		header.Modified = archiveTime
@@ -385,17 +381,25 @@ func validateArtifactSet(dist, version, commit string, notice []byte) error {
 	return nil
 }
 
-func validateTarGzip(path string, notice []byte, commit string) error {
+func validateTarGzip(path string, notice []byte, commit string) (returnErr error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open tar archive: %w", err)
 	}
-	defer file.Close()
+	defer func() {
+		if err := file.Close(); returnErr == nil && err != nil {
+			returnErr = fmt.Errorf("close tar archive: %w", err)
+		}
+	}()
 	compressed, err := gzip.NewReader(file)
 	if err != nil {
 		return fmt.Errorf("open gzip stream: %w", err)
 	}
-	defer compressed.Close()
+	defer func() {
+		if err := compressed.Close(); returnErr == nil && err != nil {
+			returnErr = fmt.Errorf("close gzip stream: %w", err)
+		}
+	}()
 	names := make(map[string]struct{}, 2)
 	archive := tar.NewReader(compressed)
 	for {
@@ -420,12 +424,16 @@ func validateTarGzip(path string, notice []byte, commit string) error {
 	return validateArchiveNames(names, "scopesifter")
 }
 
-func validateZip(path string, notice []byte, commit string) error {
+func validateZip(path string, notice []byte, commit string) (returnErr error) {
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		return fmt.Errorf("open zip archive: %w", err)
 	}
-	defer archive.Close()
+	defer func() {
+		if err := archive.Close(); returnErr == nil && err != nil {
+			returnErr = fmt.Errorf("close zip archive: %w", err)
+		}
+	}()
 	names := make(map[string]struct{}, len(archive.File))
 	for _, entry := range archive.File {
 		if !entry.Mode().IsRegular() {
@@ -512,35 +520,44 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 		if err != nil {
 			return fmt.Errorf("parse ELF: %w", err)
 		}
-		defer file.Close()
 		want := elf.EM_X86_64
 		if expected.goarch == "arm64" {
 			want = elf.EM_AARCH64
 		}
-		if file.Machine != want {
-			return fmt.Errorf("ELF machine = %s, want %s", file.Machine, want)
+		machine := file.Machine
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close ELF: %w", err)
+		}
+		if machine != want {
+			return fmt.Errorf("ELF machine = %s, want %s", machine, want)
 		}
 	case "darwin":
 		file, err := macho.NewFile(reader)
 		if err != nil {
 			return fmt.Errorf("parse Mach-O: %w", err)
 		}
-		defer file.Close()
 		want := macho.CpuAmd64
 		if expected.goarch == "arm64" {
 			want = macho.CpuArm64
 		}
-		if file.Cpu != want {
-			return fmt.Errorf("Mach-O CPU = %s, want %s", file.Cpu, want)
+		cpu := file.Cpu
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close Mach-O: %w", err)
+		}
+		if cpu != want {
+			return fmt.Errorf("Mach-O CPU = %s, want %s", cpu, want)
 		}
 	case "windows":
 		file, err := pe.NewFile(reader)
 		if err != nil {
 			return fmt.Errorf("parse PE: %w", err)
 		}
-		defer file.Close()
-		if expected.goarch != "amd64" || file.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
-			return fmt.Errorf("PE machine = %#x, want AMD64", file.Machine)
+		machine := file.Machine
+		if err := file.Close(); err != nil {
+			return fmt.Errorf("close PE: %w", err)
+		}
+		if expected.goarch != "amd64" || machine != pe.IMAGE_FILE_MACHINE_AMD64 {
+			return fmt.Errorf("PE machine = %#x, want AMD64", machine)
 		}
 	default:
 		return fmt.Errorf("unsupported operating system %q", expected.goos)
@@ -550,7 +567,7 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 		return fmt.Errorf("read Go build information: %w", err)
 	}
 	if info.Main.Path != "github.com/yapless/scopesifter" {
-		return fmt.Errorf("Go main module = %q, want github.com/yapless/scopesifter", info.Main.Path)
+		return fmt.Errorf("go main module = %q, want github.com/yapless/scopesifter", info.Main.Path)
 	}
 	settings := make(map[string]string, len(info.Settings))
 	for _, setting := range info.Settings {
@@ -701,9 +718,9 @@ func validIdentifiers(value string, rejectNumericLeadingZero bool) bool {
 			if character < '0' || character > '9' {
 				numeric = false
 			}
-			if !((character >= 'a' && character <= 'z') ||
-				(character >= 'A' && character <= 'Z') ||
-				(character >= '0' && character <= '9') || character == '-') {
+			if (character < 'a' || character > 'z') &&
+				(character < 'A' || character > 'Z') &&
+				(character < '0' || character > '9') && character != '-' {
 				return false
 			}
 		}
@@ -757,4 +774,33 @@ func replaceEnvironment(environment []string, replacements map[string]string) []
 		result = append(result, key+"="+replacements[key])
 	}
 	return result
+}
+
+func releaseBuildEnvironment(environment []string, item target) []string {
+	clean := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		if strings.HasPrefix(name, "GO") || name == "CGO_ENABLED" ||
+			name == "CC" || name == "CXX" || name == "PKG_CONFIG" ||
+			strings.HasPrefix(name, "CGO_") {
+			continue
+		}
+		clean = append(clean, entry)
+	}
+	return replaceEnvironment(clean, map[string]string{
+		"CGO_ENABLED":  "0",
+		"GO111MODULE":  "on",
+		"GOAMD64":      "v1",
+		"GOARCH":       item.goarch,
+		"GOARM64":      "v8.0",
+		"GOENV":        "off",
+		"GOEXPERIMENT": "",
+		"GOFLAGS":      "-mod=readonly -trimpath -buildvcs=true",
+		"GOOS":         item.goos,
+		"GOTOOLCHAIN":  "local",
+		"GOWORK":       "off",
+	})
 }

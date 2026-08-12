@@ -448,11 +448,8 @@ func standaloneShellBody(command string) (string, bool) {
 	for _, prefix := range []string{
 		"/usr/bin/zsh -lc ",
 		"/bin/zsh -lc ",
-		"/usr/bin/ba" + "sh -lc ",
-		"/bin/ba" + "sh -lc ",
 		"/bin/sh -lc ",
 		"zsh -lc ",
-		"ba" + "sh -lc ",
 		"sh -lc ",
 	} {
 		if !strings.HasPrefix(command, prefix) {

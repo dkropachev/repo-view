@@ -244,6 +244,7 @@ func TestRunPropagatesBuildAndCodexExitStatus(t *testing.T) {
 		{"not executable", map[string]error{"codex": os.ErrPermission}, 126, 2},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			root := t.TempDir()
 			executor := &recordingExecutor{errors: test.errors}
 			status := run(root, []string{"exec"}, []string{

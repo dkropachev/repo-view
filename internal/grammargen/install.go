@@ -13,10 +13,10 @@ type artifact struct {
 }
 
 type preparedArtifact struct {
-	artifact
 	temporaryPath string
 	backupPath    string
-	installed     bool
+	artifact
+	installed bool
 }
 
 func installArtifacts(artifacts []artifact) (returnErr error) {

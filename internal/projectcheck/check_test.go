@@ -28,11 +28,25 @@ func TestValidateNoBashRejectsExtensionlessEntryAndWorkflow(t *testing.T) {
 	t.Parallel()
 	root := newRepository(t)
 	writeTracked(t, root, "scripts/tool", "#!/bin/bash\n")
-	writeTracked(t, root, "workflow.yml", "shell: bash\n")
+	writeTracked(t, root, ".github/workflows/workflow.yml", "shell: BASH\n")
 	err := ValidateNoBash(root)
-	if err == nil || !strings.Contains(err.Error(), "Bash shebang: scripts/tool") ||
-		!strings.Contains(err.Error(), `Bash marker "shell: bash" in workflow.yml`) {
+	if err == nil || !strings.Contains(err.Error(), "bash shebang: scripts/tool") ||
+		!strings.Contains(err.Error(), "bash workflow shell in .github/workflows/workflow.yml") {
 		t.Fatalf("Bash policy error = %v", err)
+	}
+}
+
+func TestValidateNoBashRejectsMakeWorkflowAndGoExecution(t *testing.T) {
+	t.Parallel()
+	root := newRepository(t)
+	writeTracked(t, root, "Makefile", "run:\n\tBASH -c true\n")
+	writeTracked(t, root, ".github/workflows/ci.yaml", "steps:\n  - run: /bin/Bash -c true\n")
+	writeTracked(t, root, "runner_test.go", "package runner\nimport x \"os/exec\"\nfunc run() { _ = x.Command(\"ba\" + \"sh\", \"-c\", \"true\") }\n")
+	err := ValidateNoBash(root)
+	if err == nil || !strings.Contains(err.Error(), "bash Make recipe in Makefile") ||
+		!strings.Contains(err.Error(), "bash workflow command in .github/workflows/ci.yaml") ||
+		!strings.Contains(err.Error(), "bash process execution in runner_test.go") {
+		t.Fatalf("Bash execution policy error = %v", err)
 	}
 }
 

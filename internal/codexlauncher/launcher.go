@@ -52,13 +52,13 @@ type Streams struct {
 }
 
 type process struct {
-	name        string
-	arguments   []string
-	directory   string
-	environment []string
 	stdin       io.Reader
 	stdout      io.Writer
 	stderr      io.Writer
+	name        string
+	directory   string
+	arguments   []string
+	environment []string
 }
 
 type executor interface {

@@ -217,7 +217,7 @@ func TestAnalyzeDoesNotCountExecutableSuffixAsScopeSifter(t *testing.T) {
 }
 
 func TestAnalyzeDoesNotCountAssignmentValueAsScopeSifter(t *testing.T) {
-	const command = `/bin/bash -lc 'X=/usr/bin/scopesifter find Symbol --json'`
+	const command = `/bin/sh -lc 'X=/usr/bin/scopesifter find Symbol --json'`
 	transcript := strings.Join([]string{
 		`{"type":"item.started","item":{"id":"c1","type":"command_execution","command":"` + command + `"}}`,
 		`{"type":"item.completed","item":{"id":"c1","type":"command_execution","command":"` + command + `","aggregated_output":"","exit_code":0,"status":"completed"}}`,

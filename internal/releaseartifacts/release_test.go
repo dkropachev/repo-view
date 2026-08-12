@@ -149,6 +149,36 @@ func TestReplaceEnvironment(t *testing.T) {
 	}
 }
 
+func TestReleaseBuildEnvironmentRejectsAmbientGoConfiguration(t *testing.T) {
+	t.Parallel()
+	got := releaseBuildEnvironment([]string{
+		"PATH=/tools",
+		"GOWORK=/malicious/workspace",
+		"GOFLAGS=-tags=ambient",
+		"GOAMD64=v4",
+		"GOEXPERIMENT=arenas",
+		"CGO_CFLAGS=-Dambient",
+		"CC=/untrusted/compiler",
+	}, target{goos: "linux", goarch: "amd64"})
+	want := []string{
+		"PATH=/tools",
+		"CGO_ENABLED=0",
+		"GO111MODULE=on",
+		"GOAMD64=v1",
+		"GOARCH=amd64",
+		"GOARM64=v8.0",
+		"GOENV=off",
+		"GOEXPERIMENT=",
+		"GOFLAGS=-mod=readonly -trimpath -buildvcs=true",
+		"GOOS=linux",
+		"GOTOOLCHAIN=local",
+		"GOWORK=off",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("releaseBuildEnvironment() = %#v, want %#v", got, want)
+	}
+}
+
 func newReleaseRepository(t *testing.T, tag string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
