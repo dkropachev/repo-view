@@ -371,7 +371,7 @@ func TestExternalAdapterOutputLimit(t *testing.T) {
 
 func TestExternalAdapterBoundsDescendantPipeWait(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test helper uses a POSIX shell descendant")
+		t.Skip("test helper uses a Unix sleep descendant")
 	}
 	adapter := helperAdapter(t, "pipe-holder")
 	started := time.Now()

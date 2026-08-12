@@ -35,7 +35,7 @@ func TestCaptureGitBuildsDeterministicBinaryPatchAndRoundTrips(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(filepath.Join(fixture.worktreePath, "script.sh"), 0o644); err != nil {
+	if err := os.Chmod(filepath.Join(fixture.worktreePath, "executable.bin"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	oddPath := filepath.Join(fixture.worktreePath, "tab\tline\nname.txt")
@@ -401,10 +401,10 @@ func newCaptureGitFixture(t *testing.T, objectFormat string) *captureGitFixture 
 		"README":         []byte("base\n"),
 		"binary.bin":     {0, 1, 2, 0, 3},
 		"deleted.txt":    []byte("delete me\n"),
-		"script.sh":      []byte("#!/bin/sh\nexit 0\n"),
+		"executable.bin": []byte("executable data\n"),
 	} {
 		mode := os.FileMode(0o644)
-		if path == "script.sh" {
+		if path == "executable.bin" {
 			mode = 0o755
 		}
 		if err := os.WriteFile(filepath.Join(repository, path), content, mode); err != nil {
@@ -437,7 +437,7 @@ func newCaptureGitFixture(t *testing.T, objectFormat string) *captureGitFixture 
 		"README":         0o644,
 		"binary.bin":     0o644,
 		"deleted.txt":    0o644,
-		"script.sh":      0o755,
+		"executable.bin": 0o755,
 	} {
 		content, err := os.ReadFile(filepath.Join(repository, path))
 		if err != nil {

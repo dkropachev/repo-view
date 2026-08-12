@@ -73,8 +73,8 @@ jobs:
       - name: Validate JSON files
         run: make ci-json
 
-      - name: Enforce no Bash automation
-        run: make ci-no-bash
+      - name: Enforce no executable scripts
+        run: make ci-no-scripts
 
   privileged-linux:
     name: Privileged Linux kernel boundaries

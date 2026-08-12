@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	mode := flag.String("mode", "", "validation mode: json or no-bash")
+	mode := flag.String("mode", "", "validation mode: json or no-scripts")
 	root := flag.String("root", ".", "repository root")
 	flag.Parse()
 	if flag.NArg() != 0 {
@@ -26,8 +26,8 @@ func main() {
 	switch *mode {
 	case "json":
 		err = projectcheck.ValidateJSON(absRoot)
-	case "no-bash":
-		err = projectcheck.ValidateNoBash(absRoot)
+	case "no-scripts":
+		err = projectcheck.ValidateNoScripts(absRoot)
 	default:
 		err = fmt.Errorf("unsupported mode %q", *mode)
 	}

@@ -1660,20 +1660,20 @@ func TestChangedUntrackedSnapshotPreservesPatchPathAndMode(t *testing.T) {
 	writeFile(t, root, "seed.go", "package demo\n")
 	runGit(t, root, "add", "seed.go")
 	runGit(t, root, "commit", "-m", "initial")
-	writeFile(t, root, "scripts/new.sh", "#!/bin/sh\necho safe\n")
-	if err := os.Chmod(filepath.Join(root, "scripts/new.sh"), 0o755); err != nil {
+	writeFile(t, root, "scripts/new.bin", "executable data\n")
+	if err := os.Chmod(filepath.Join(root, "scripts/new.bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
 	response, err := mustView(t, root).Changed(Options{
-		PathGlobs: []string{"scripts/new.sh"}, MaxPatchLines: 100,
+		PathGlobs: []string{"scripts/new.bin"}, MaxPatchLines: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(
 		response.Patch,
-		"diff --git a/scripts/new.sh b/scripts/new.sh",
+		"diff --git a/scripts/new.bin b/scripts/new.bin",
 	) || !strings.Contains(response.Patch, "new file mode 100755") {
 		t.Fatalf("untracked snapshot patch = %q", response.Patch)
 	}
@@ -1990,11 +1990,9 @@ func TestChangedDoesNotExecuteConfiguredFilesystemMonitor(t *testing.T) {
 	runGit(t, root, "add", "found.go")
 	runGit(t, root, "commit", "-m", "initial")
 
-	monitor := filepath.Join(root, "fsmonitor-test")
-	writeFile(t, root, "fsmonitor-test", "#!/bin/sh\n: > \"$0.marker\"\n")
-	if err := os.Chmod(monitor, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	monitor := filepath.Join(t.TempDir(), "fsmonitor-test")
+	copyNavigatorTestExecutable(t, monitor)
+	assertNavigatorFSMonitor(t, monitor)
 	runGit(t, root, "config", "core.fsmonitor", monitor)
 	writeFile(t, root, "found.go", "package demo\n\nfunc after() {}\n")
 

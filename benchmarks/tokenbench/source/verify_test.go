@@ -375,7 +375,7 @@ func TestVerifyRejectsHardLinkedGitMetadata(t *testing.T) {
 
 func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX executable and symlink semantics")
+		t.Skip("test uses Unix executable and symlink semantics")
 	}
 	repository := newRepository(t)
 	realGit, err := exec.LookPath("git")
@@ -392,10 +392,8 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 	}
 	replacementPath := t.TempDir()
 	fakeGit := filepath.Join(replacementPath, "git")
-	writeFile(t, fakeGit, "#!/bin/sh\nexit 97\n")
-	if err := os.Chmod(fakeGit, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copySourceTestExecutable(t, fakeGit)
+	assertRejectingSourceTestGit(t, fakeGit)
 	t.Setenv("PATH", initialPath)
 	runner, err := resolveGitRunner()
 	if err != nil {
@@ -422,7 +420,7 @@ func TestGitRunnerIgnoresPATHChangesAfterResolution(t *testing.T) {
 
 func TestGitRunnerRejectsExecutableMutation(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses POSIX executable semantics")
+		t.Skip("test uses Unix executable semantics")
 	}
 	realGit, err := exec.LookPath("git")
 	if err != nil {
@@ -478,7 +476,7 @@ func TestVerifyRejectsWrongExpectedGitIdentity(t *testing.T) {
 
 func TestVerifyIgnoresPATHAfterExpectedGitIsPinned(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("test uses a POSIX fake executable")
+		t.Skip("test uses Unix executable and symlink semantics")
 	}
 	repository := newRepository(t)
 	digest, err := TreeDigest(context.Background(), repository.root)
@@ -494,13 +492,42 @@ func TestVerifyIgnoresPATHAfterExpectedGitIsPinned(t *testing.T) {
 	)
 	fakeDirectory := t.TempDir()
 	fakeGit := filepath.Join(fakeDirectory, "git")
-	writeFile(t, fakeGit, "#!/bin/sh\nexit 97\n")
-	if err := os.Chmod(fakeGit, 0o700); err != nil {
-		t.Fatal(err)
-	}
+	copySourceTestExecutable(t, fakeGit)
 	t.Setenv("PATH", fakeDirectory)
 	if _, err := Verify(context.Background(), expected); err != nil {
 		t.Fatalf("ambient PATH redirected pinned Git: %v", err)
+	}
+}
+
+func TestMain(m *testing.M) {
+	executable, executableErr := os.Executable()
+	if executableErr == nil && filepath.Base(executable) == "git" {
+		os.Exit(97)
+	}
+	os.Exit(m.Run())
+}
+
+func copySourceTestExecutable(t *testing.T, path string) {
+	t.Helper()
+	testExecutable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := os.ReadFile(testExecutable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, content, 0o700); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertRejectingSourceTestGit(t *testing.T, path string) {
+	t.Helper()
+	err := exec.Command(path).Run()
+	var exitError *exec.ExitError
+	if !errors.As(err, &exitError) || exitError.ExitCode() != 97 {
+		t.Fatalf("hostile Git fixture exit = %v, want 97", err)
 	}
 }
 

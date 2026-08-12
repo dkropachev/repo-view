@@ -56,15 +56,9 @@ func Target() { println("unchanged") }
 
 	fakeBin := t.TempDir()
 	marker := filepath.Join(fakeBin, "git-ran")
-	writeCacheTestFile(
-		t,
-		fakeBin,
-		"git",
-		"#!/bin/sh\n: > "+marker+"\nexit 99\n",
-	)
-	if err := os.Chmod(filepath.Join(fakeBin, "git"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fakeGit := filepath.Join(fakeBin, "git")
+	copyNavigatorTestExecutable(t, fakeGit)
+	assertNavigatorGitInterceptor(t, fakeGit, marker)
 	t.Setenv("PATH", fakeBin)
 
 	for path, wantPatch := range patches {

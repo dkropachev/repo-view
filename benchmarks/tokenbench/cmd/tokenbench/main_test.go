@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -364,6 +365,17 @@ func TestCredentialErrorsNeverContainCredentialBytes(t *testing.T) {
 }
 
 func TestCredentialDescriptorIsCanonicalClosedAndNotInherited(t *testing.T) {
+	const helperEnvironment = "TOKENBENCH_TEST_CLOSED_DESCRIPTOR"
+	if rawDescriptor := os.Getenv(helperEnvironment); rawDescriptor != "" {
+		descriptor, err := strconv.Atoi(rawDescriptor)
+		if err != nil || descriptor < 0 {
+			t.Fatalf("invalid helper descriptor %q", rawDescriptor)
+		}
+		if _, err := os.Stat(fmt.Sprintf("/proc/self/fd/%d", descriptor)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("closed credential descriptor reached child: %v", err)
+		}
+		return
+	}
 	for _, raw := range []string{"+3", "03", "2", "256", "3x"} {
 		var descriptor secretDescriptor
 		if err := descriptor.Set(raw); err == nil {
@@ -403,10 +415,10 @@ func TestCredentialDescriptorIsCanonicalClosedAndNotInherited(t *testing.T) {
 		t.Fatal("credential descriptor remained open after its single read")
 	}
 	command := exec.Command(
-		"/bin/sh",
-		"-c",
-		fmt.Sprintf("test ! -e /proc/self/fd/%d", descriptor),
+		os.Args[0],
+		"-test.run=^TestCredentialDescriptorIsCanonicalClosedAndNotInherited$",
 	)
+	command.Env = append(os.Environ(), helperEnvironment+"="+strconv.Itoa(descriptor))
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("closed credential descriptor reached child: %v: %s", err, output)
 	}

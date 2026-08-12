@@ -3,7 +3,7 @@ include make/launcher.mk
 include make/release.mk
 include make/tokenbench.mk
 
-.PHONY: ci-vet ci-test ci-build ci-json ci-no-bash ci-lint ci-fieldalignment
+.PHONY: ci-vet ci-test ci-build ci-json ci-no-scripts ci-lint ci-fieldalignment
 
 ci-vet:
 	go vet ./...
@@ -17,8 +17,8 @@ ci-build:
 ci-json:
 	go run -mod=readonly ./internal/cmd/project-check -mode json
 
-ci-no-bash:
-	go run -mod=readonly ./internal/cmd/project-check -mode no-bash
+ci-no-scripts:
+	go run -mod=readonly ./internal/cmd/project-check -mode no-scripts
 
 ci-lint:
 	golangci-lint run --config=.golangci.yml
