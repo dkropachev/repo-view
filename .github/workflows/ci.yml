@@ -38,7 +38,7 @@ jobs:
           args: --config=.golangci.yml
 
       - name: Check production struct alignment
-        run: golangci-lint run --config=.golangci-fieldalignment.yml
+        run: make ci-fieldalignment
 
   test:
     name: Test
@@ -58,27 +58,19 @@ jobs:
           cache: true
 
       - name: Vet
-        run: go vet ./...
+        run: make ci-vet
 
       - name: Test
-        run: go test ./... -count=1
+        run: make ci-test
 
       - name: Build commands
-        run: go build ./cmd/...
-
-      - name: Validate shell scripts
-        shell: bash
-        run: |
-          while IFS= read -r -d '' script; do
-            bash -n "$script"
-          done < <(git ls-files -z '*.sh' 'scripts/*')
+        run: make ci-build
 
       - name: Validate JSON files
-        shell: bash
-        run: |
-          while IFS= read -r -d '' document; do
-            jq empty "$document"
-          done < <(git ls-files -z '*.json')
+        run: make ci-json
+
+      - name: Enforce no Bash automation
+        run: make ci-no-bash
 
   privileged-linux:
     name: Privileged Linux kernel boundaries
@@ -100,4 +92,4 @@ jobs:
       - name: Run fail-closed privileged kernel tests
         env:
           TOKENBENCH_PRIVILEGED_IMAGE: golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599
-        run: make -f make/tokenbench.mk tokenbench-privileged-linux
+        run: make tokenbench-privileged-linux

@@ -3,6 +3,7 @@ package releaseartifacts
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -15,21 +16,26 @@ func TestVersionFromRef(t *testing.T) {
 		name    string
 		ref     string
 		want    string
-		wantErr string
+		wantErr bool
 	}{
 		{name: "semantic version", ref: "v1.2.3", want: "1.2.3"},
-		{name: "slash sanitized", ref: "v1/release", want: "1-release"},
-		{name: "missing prefix", ref: "1.2.3", wantErr: "must start with v"},
-		{name: "empty", ref: "v", wantErr: "version is empty"},
-		{name: "unsafe", ref: "v1 2", wantErr: "unsafe character"},
+		{name: "prerelease and build", ref: "v1.2.3-rc.1+build.5", want: "1.2.3-rc.1+build.5"},
+		{name: "missing prefix", ref: "1.2.3", wantErr: true},
+		{name: "empty", ref: "v", wantErr: true},
+		{name: "slash", ref: "v1/release", wantErr: true},
+		{name: "missing patch", ref: "v1.2", wantErr: true},
+		{name: "leading zero", ref: "v01.2.3", wantErr: true},
+		{name: "numeric prerelease leading zero", ref: "v1.2.3-01", wantErr: true},
+		{name: "double build separator", ref: "v1.2.3+a+b", wantErr: true},
+		{name: "empty identifier", ref: "v1.2.3-rc..1", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			got, err := versionFromRef(test.ref)
-			if test.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
-					t.Fatalf("versionFromRef(%q) error = %v, want containing %q", test.ref, err, test.wantErr)
+			if test.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "canonical v-prefixed semantic version") {
+					t.Fatalf("versionFromRef(%q) error = %v", test.ref, err)
 				}
 				return
 			}
@@ -43,73 +49,27 @@ func TestVersionFromRef(t *testing.T) {
 	}
 }
 
-func TestArchivesAreDeterministicAndClosed(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	binary := []byte("deterministic-binary\x00")
-	notice := []byte("notice\n")
-	tests := []struct {
-		name     string
-		write    func(string, string, []byte, []byte) error
-		validate func(string) error
-		ext      string
-		binary   string
-	}{
-		{name: "tar gzip", write: writeTarGzip, validate: func(path string) error { return validateTarGzip(path, notice) }, ext: ".tar.gz", binary: "scopesifter"},
-		{name: "zip", write: writeZip, validate: func(path string) error { return validateZip(path, notice) }, ext: ".zip", binary: "scopesifter.exe"},
+func TestBuildIsDeterministicClosedAndBoundToTag(t *testing.T) {
+	root, commit := newReleaseRepository(t, "v1.2.3")
+	if err := Build(root, "v1.2.3"); err != nil {
+		t.Fatalf("first Build: %v", err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			first := filepath.Join(root, strings.ReplaceAll(test.name, " ", "-")+"-first"+test.ext)
-			second := filepath.Join(root, strings.ReplaceAll(test.name, " ", "-")+"-second"+test.ext)
-			if err := test.write(first, test.binary, binary, notice); err != nil {
-				t.Fatal(err)
-			}
-			if err := test.write(second, test.binary, binary, notice); err != nil {
-				t.Fatal(err)
-			}
-			firstBytes, err := os.ReadFile(first)
-			if err != nil {
-				t.Fatal(err)
-			}
-			secondBytes, err := os.ReadFile(second)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !bytes.Equal(firstBytes, secondBytes) {
-				t.Fatal("repeated archive builds differ")
-			}
-			if err := test.validate(first); err != nil {
-				t.Fatalf("validate archive: %v", err)
-			}
-		})
-	}
-}
-
-func TestValidateArtifactSetAndChecksums(t *testing.T) {
-	t.Parallel()
-	dist := t.TempDir()
-	const version = "1.2.3"
-	for _, item := range targets {
-		base := "scopesifter_" + version + "_" + item.goos + "_" + item.goarch
-		if item.goos == "windows" {
-			if err := writeZip(filepath.Join(dist, base+".zip"), "scopesifter.exe", []byte(item.goarch), []byte("notice")); err != nil {
-				t.Fatal(err)
-			}
-			continue
-		}
-		if err := writeTarGzip(filepath.Join(dist, base+".tar.gz"), "scopesifter", []byte(item.goarch), []byte("notice")); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := writeChecksums(dist); err != nil {
+	first := filepath.Join(t.TempDir(), "dist")
+	copyTree(t, filepath.Join(root, "dist"), first)
+	if err := os.RemoveAll(filepath.Join(root, "dist")); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateArtifactSet(dist, version, []byte("notice")); err != nil {
-		t.Fatalf("validate artifact set: %v", err)
+	if err := Build(root, "v1.2.3"); err != nil {
+		t.Fatalf("second Build: %v", err)
 	}
-	archive := filepath.Join(dist, "scopesifter_1.2.3_linux_amd64.tar.gz")
+	second := filepath.Join(root, "dist")
+	assertTreesEqual(t, first, second)
+
+	notice := []byte("notice\n")
+	if err := validateArtifactSet(second, "1.2.3", commit, notice); err != nil {
+		t.Fatalf("validate built artifact set: %v", err)
+	}
+	archive := filepath.Join(second, "scopesifter_1.2.3_linux_amd64.tar.gz")
 	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -120,26 +80,60 @@ func TestValidateArtifactSetAndChecksums(t *testing.T) {
 	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateArtifactSet(dist, version, []byte("notice")); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+	if err := validateArtifactSet(second, "1.2.3", commit, notice); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("corrupt artifact error = %v, want checksum mismatch", err)
 	}
 }
 
-func TestBuildRefusesExistingDestinationBeforeExecutingBuild(t *testing.T) {
-	t.Parallel()
-	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module example.invalid/test\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(root, noticeName), []byte("notice\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+func TestBuildRefusesExistingDestination(t *testing.T) {
+	root, _ := newReleaseRepository(t, "v1.0.0")
 	if err := os.Mkdir(filepath.Join(root, "dist"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	err := Build(root, "v1.0.0")
 	if err == nil || !strings.Contains(err.Error(), "destination already exists") {
 		t.Fatalf("Build error = %v, want existing destination refusal", err)
+	}
+}
+
+func TestReleaseCheckoutRequiresMatchingTagAndCleanTrackedTree(t *testing.T) {
+	root, _ := newReleaseRepository(t, "v1.0.0")
+	if _, err := validateReleaseCheckout(root, "v2.0.0"); err == nil || !strings.Contains(err.Error(), "resolve release tag") {
+		t.Fatalf("missing tag error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, noticeName), []byte("changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := validateReleaseCheckout(root, "v1.0.0"); err == nil || !strings.Contains(err.Error(), "tracked modifications") {
+		t.Fatalf("dirty checkout error = %v", err)
+	}
+}
+
+func TestValidateArtifactSetRejectsSymlink(t *testing.T) {
+	dist := t.TempDir()
+	target := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(target, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	name := "scopesifter_1.2.3_linux_amd64.tar.gz"
+	if err := os.Symlink(target, filepath.Join(dist, name)); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateArtifactSet(dist, "1.2.3", strings.Repeat("a", 40), []byte("notice")); err == nil {
+		t.Fatal("symlinked artifact unexpectedly validated")
+	}
+}
+
+func TestReleaseCreateArguments(t *testing.T) {
+	t.Parallel()
+	got := releaseCreateArguments("v1.2.3", "/repo/dist", []string{"SHA256SUMS", "scopesifter_1.2.3_linux_amd64.tar.gz"})
+	want := []string{
+		"release", "create", "v1.2.3",
+		"/repo/dist/SHA256SUMS", "/repo/dist/scopesifter_1.2.3_linux_amd64.tar.gz",
+		"--generate-notes", "--title", "ScopeSifter v1.2.3", "--verify-tag",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("releaseCreateArguments() = %#v, want %#v", got, want)
 	}
 }
 
@@ -152,5 +146,94 @@ func TestReplaceEnvironment(t *testing.T) {
 	want := []string{"PATH=/bin", "UNRELATED=value", "CGO_ENABLED=0", "GOARCH=amd64", "GOOS=linux"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("replaceEnvironment() = %#v, want %#v", got, want)
+	}
+}
+
+func newReleaseRepository(t *testing.T, tag string) (string, string) {
+	t.Helper()
+	root := t.TempDir()
+	write := func(path, content string) {
+		t.Helper()
+		fullPath := filepath.Join(root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("go.mod", "module github.com/yapless/scopesifter\n\ngo 1.26\n")
+	write(noticeName, "notice\n")
+	write("cmd/scopesifter/main.go", "package main\nfunc main() {}\n")
+	gitRun(t, root, "init", "-q", "-b", "main")
+	gitRun(t, root, "config", "user.name", "Release Test")
+	gitRun(t, root, "config", "user.email", "release@example.invalid")
+	gitRun(t, root, "add", ".")
+	gitRun(t, root, "commit", "-q", "-m", "release fixture")
+	gitRun(t, root, "tag", tag)
+	commit, err := gitOutput(root, "rev-parse", "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return root, commit
+}
+
+func gitRun(t *testing.T, root string, arguments ...string) {
+	t.Helper()
+	command := exec.Command("git", arguments...)
+	command.Dir = root
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("git %s: %v: %s", strings.Join(arguments, " "), err, output)
+	}
+}
+
+func copyTree(t *testing.T, source, destination string) {
+	t.Helper()
+	if err := os.Mkdir(destination, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(destination, entry.Name()), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertTreesEqual(t *testing.T, first, second string) {
+	t.Helper()
+	firstEntries, err := os.ReadDir(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEntries, err := os.ReadDir(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstEntries) != len(secondEntries) {
+		t.Fatalf("artifact counts differ: %d and %d", len(firstEntries), len(secondEntries))
+	}
+	for index, entry := range firstEntries {
+		if entry.Name() != secondEntries[index].Name() {
+			t.Fatalf("artifact names differ: %s and %s", entry.Name(), secondEntries[index].Name())
+		}
+		firstData, err := os.ReadFile(filepath.Join(first, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		secondData, err := os.ReadFile(filepath.Join(second, entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(firstData, secondData) {
+			t.Fatalf("artifact differs across builds: %s", entry.Name())
+		}
 	}
 }

@@ -16,9 +16,6 @@ jobs:
     name: Release
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    defaults:
-      run:
-        shell: sh
 
     steps:
       - name: Check out repository
@@ -33,12 +30,12 @@ jobs:
           cache: true
 
       - name: Test
-        run: go test ./... -count=1
+        run: make ci-test
 
       - name: Build release archives
-        run: make -f make/release.mk release-artifacts
+        run: make release-artifacts
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: make -f make/release.mk release-publish
+        run: make release-publish

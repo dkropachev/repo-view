@@ -1,7 +1,7 @@
 .PHONY: release-artifacts release-publish
 
 release-artifacts:
-	go run ./internal/cmd/release-artifacts -mode build
+	go run -mod=readonly ./internal/cmd/release-artifacts -mode build
 
 release-publish:
-	go run ./internal/cmd/release-artifacts -mode publish
+	go run -mod=readonly ./internal/cmd/release-artifacts -mode publish

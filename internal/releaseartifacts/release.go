@@ -9,6 +9,10 @@ import (
 	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
+	"debug/buildinfo"
+	"debug/elf"
+	"debug/macho"
+	"debug/pe"
 	"errors"
 	"fmt"
 	"io"
@@ -53,6 +57,10 @@ func Build(root, refName string) error {
 	if err := requireRegularFile(filepath.Join(root, "go.mod")); err != nil {
 		return fmt.Errorf("validate repository root: %w", err)
 	}
+	commit, err := validateReleaseCheckout(root, refName)
+	if err != nil {
+		return err
+	}
 	noticePath := filepath.Join(root, noticeName)
 	if err := requireRegularFile(noticePath); err != nil {
 		return fmt.Errorf("validate third-party notice: %w", err)
@@ -68,7 +76,7 @@ func Build(root, refName string) error {
 		return fmt.Errorf("inspect release destination: %w", err)
 	}
 
-	workRoot, err := os.MkdirTemp(root, ".release-artifacts-")
+	workRoot, err := os.MkdirTemp("", "scopesifter-release-artifacts-")
 	if err != nil {
 		return fmt.Errorf("create release staging directory: %w", err)
 	}
@@ -79,18 +87,49 @@ func Build(root, refName string) error {
 	}
 
 	for _, item := range targets {
-		if err := buildTarget(root, workRoot, stagedDist, noticePath, version, item); err != nil {
+		if err := buildTarget(root, workRoot, stagedDist, noticePath, version, commit, item); err != nil {
 			return err
 		}
 	}
 	if err := writeChecksums(stagedDist); err != nil {
 		return err
 	}
-	if err := validateArtifactSet(stagedDist, version, notice); err != nil {
+	if err := validateArtifactSet(stagedDist, version, commit, notice); err != nil {
 		return err
 	}
-	if err := os.Rename(stagedDist, destination); err != nil {
+	publishRoot, err := os.MkdirTemp(root, ".release-publish-")
+	if err != nil {
+		return fmt.Errorf("create release publication directory: %w", err)
+	}
+	defer os.RemoveAll(publishRoot)
+	if err := copyArtifactDirectory(stagedDist, publishRoot); err != nil {
+		return err
+	}
+	if err := os.Chmod(publishRoot, 0o755); err != nil {
+		return fmt.Errorf("set release destination mode: %w", err)
+	}
+	if err := os.Rename(publishRoot, destination); err != nil {
 		return fmt.Errorf("publish staged release artifacts: %w", err)
+	}
+	return nil
+}
+
+func copyArtifactDirectory(source, destination string) error {
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return fmt.Errorf("read validated artifact directory: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			return fmt.Errorf("unexpected directory in validated artifacts: %s", entry.Name())
+		}
+		data, err := os.ReadFile(filepath.Join(source, entry.Name()))
+		if err != nil {
+			return fmt.Errorf("read validated artifact %s: %w", entry.Name(), err)
+		}
+		if err := os.WriteFile(filepath.Join(destination, entry.Name()), data, 0o644); err != nil {
+			return fmt.Errorf("copy validated artifact %s: %w", entry.Name(), err)
+		}
 	}
 	return nil
 }
@@ -106,27 +145,27 @@ func Publish(root, refName string) error {
 	if err != nil {
 		return err
 	}
+	commit, err := validateReleaseCheckout(root, refName)
+	if err != nil {
+		return err
+	}
 	dist := filepath.Join(root, "dist")
 	notice, err := os.ReadFile(filepath.Join(root, noticeName))
 	if err != nil {
 		return fmt.Errorf("read third-party notice: %w", err)
 	}
-	if err := validateArtifactSet(dist, version, notice); err != nil {
+	if err := validateArtifactSet(dist, version, commit, notice); err != nil {
 		return fmt.Errorf("refuse unvalidated release artifacts: %w", err)
 	}
 	entries, err := os.ReadDir(dist)
 	if err != nil {
 		return fmt.Errorf("read release artifacts: %w", err)
 	}
-	args := []string{"release", "create", refName}
+	names := make([]string, 0, len(entries))
 	for _, entry := range entries {
-		args = append(args, filepath.Join(dist, entry.Name()))
+		names = append(names, entry.Name())
 	}
-	args = append(args,
-		"--generate-notes",
-		"--title", "ScopeSifter "+refName,
-		"--verify-tag",
-	)
+	args := releaseCreateArguments(refName, dist, names)
 	command := exec.Command("gh", args...)
 	command.Dir = root
 	command.Stdin = os.Stdin
@@ -138,13 +177,25 @@ func Publish(root, refName string) error {
 	return nil
 }
 
-func buildTarget(root, workRoot, dist, noticePath, version string, item target) error {
+func releaseCreateArguments(refName, dist string, names []string) []string {
+	args := []string{"release", "create", refName}
+	for _, name := range names {
+		args = append(args, filepath.Join(dist, name))
+	}
+	return append(args,
+		"--generate-notes",
+		"--title", "ScopeSifter "+refName,
+		"--verify-tag",
+	)
+}
+
+func buildTarget(root, workRoot, dist, noticePath, version, commit string, item target) error {
 	binaryName := "scopesifter"
 	if item.goos == "windows" {
 		binaryName += ".exe"
 	}
 	binaryPath := filepath.Join(workRoot, binaryName)
-	command := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", binaryPath, "./cmd/scopesifter")
+	command := exec.Command("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=true", "-ldflags=-s -w", "-o", binaryPath, "./cmd/scopesifter")
 	command.Dir = root
 	command.Env = replaceEnvironment(os.Environ(), map[string]string{
 		"CGO_ENABLED": "0",
@@ -159,6 +210,9 @@ func buildTarget(root, workRoot, dist, noticePath, version string, item target) 
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
 		return fmt.Errorf("read %s/%s binary: %w", item.goos, item.goarch, err)
+	}
+	if err := validateExecutable(binary, item, commit); err != nil {
+		return fmt.Errorf("validate built %s/%s binary: %w", item.goos, item.goarch, err)
 	}
 	notice, err := os.ReadFile(noticePath)
 	if err != nil {
@@ -283,7 +337,7 @@ func writeChecksums(dist string) error {
 	return nil
 }
 
-func validateArtifactSet(dist, version string, notice []byte) error {
+func validateArtifactSet(dist, version, commit string, notice []byte) error {
 	entries, err := os.ReadDir(dist)
 	if err != nil {
 		return fmt.Errorf("read dist directory: %w", err)
@@ -303,6 +357,9 @@ func validateArtifactSet(dist, version string, notice []byte) error {
 		if _, ok := want[entry.Name()]; !ok {
 			return fmt.Errorf("unexpected release artifact: %s", entry.Name())
 		}
+		if err := requireRegularFile(filepath.Join(dist, entry.Name())); err != nil {
+			return fmt.Errorf("release artifact %s is unsafe: %w", entry.Name(), err)
+		}
 		want[entry.Name()] = true
 	}
 	for name, found := range want {
@@ -316,11 +373,11 @@ func validateArtifactSet(dist, version string, notice []byte) error {
 	for name := range want {
 		switch {
 		case strings.HasSuffix(name, ".tar.gz"):
-			if err := validateTarGzip(filepath.Join(dist, name), notice); err != nil {
+			if err := validateTarGzip(filepath.Join(dist, name), notice, commit); err != nil {
 				return err
 			}
 		case strings.HasSuffix(name, ".zip"):
-			if err := validateZip(filepath.Join(dist, name), notice); err != nil {
+			if err := validateZip(filepath.Join(dist, name), notice, commit); err != nil {
 				return err
 			}
 		}
@@ -328,7 +385,7 @@ func validateArtifactSet(dist, version string, notice []byte) error {
 	return nil
 }
 
-func validateTarGzip(path string, notice []byte) error {
+func validateTarGzip(path string, notice []byte, commit string) error {
 	file, err := os.Open(path)
 	if err != nil {
 		return fmt.Errorf("open tar archive: %w", err)
@@ -356,14 +413,14 @@ func validateTarGzip(path string, notice []byte) error {
 			return fmt.Errorf("duplicate tar entry: %s", header.Name)
 		}
 		names[header.Name] = struct{}{}
-		if err := validateArchiveEntry(header.Name, fs.FileMode(header.Mode), header.Size, archive, notice); err != nil {
+		if err := validateArchiveEntry(header.Name, fs.FileMode(header.Mode), header.Size, archive, notice, targetFromArchivePath(path), commit); err != nil {
 			return fmt.Errorf("validate tar entry: %w", err)
 		}
 	}
 	return validateArchiveNames(names, "scopesifter")
 }
 
-func validateZip(path string, notice []byte) error {
+func validateZip(path string, notice []byte, commit string) error {
 	archive, err := zip.OpenReader(path)
 	if err != nil {
 		return fmt.Errorf("open zip archive: %w", err)
@@ -382,7 +439,7 @@ func validateZip(path string, notice []byte) error {
 		if err != nil {
 			return fmt.Errorf("open zip entry %s: %w", entry.Name, err)
 		}
-		entryErr := validateArchiveEntry(entry.Name, entry.Mode(), int64(entry.UncompressedSize64), reader, notice)
+		entryErr := validateArchiveEntry(entry.Name, entry.Mode(), int64(entry.UncompressedSize64), reader, notice, targetFromArchivePath(path), commit)
 		closeErr := reader.Close()
 		if entryErr != nil {
 			return fmt.Errorf("validate zip entry: %w", entryErr)
@@ -394,7 +451,7 @@ func validateZip(path string, notice []byte) error {
 	return validateArchiveNames(names, "scopesifter.exe")
 }
 
-func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.Reader, notice []byte) error {
+func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.Reader, notice []byte, expected target, commit string) error {
 	switch name {
 	case noticeName:
 		if mode.Perm() != 0o644 {
@@ -417,11 +474,93 @@ func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.R
 		if size <= 0 {
 			return fmt.Errorf("%s is empty", name)
 		}
-		if _, err := io.Copy(io.Discard, reader); err != nil {
+		binary, err := io.ReadAll(io.LimitReader(reader, size+1))
+		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
+		}
+		if int64(len(binary)) != size {
+			return fmt.Errorf("%s content length = %d, want %d", name, len(binary), size)
+		}
+		if err := validateExecutable(binary, expected, commit); err != nil {
+			return fmt.Errorf("validate %s target: %w", name, err)
 		}
 	default:
 		return fmt.Errorf("unexpected archive entry: %s", name)
+	}
+	return nil
+}
+
+func targetFromArchivePath(path string) target {
+	name := filepath.Base(path)
+	for _, item := range targets {
+		marker := "_" + item.goos + "_" + item.goarch
+		if strings.Contains(name, marker+".") {
+			return item
+		}
+	}
+	return target{}
+}
+
+func validateExecutable(binary []byte, expected target, commit string) error {
+	if expected.goos == "" || expected.goarch == "" {
+		return errors.New("archive filename does not identify a supported target")
+	}
+	reader := bytes.NewReader(binary)
+	switch expected.goos {
+	case "linux":
+		file, err := elf.NewFile(reader)
+		if err != nil {
+			return fmt.Errorf("parse ELF: %w", err)
+		}
+		defer file.Close()
+		want := elf.EM_X86_64
+		if expected.goarch == "arm64" {
+			want = elf.EM_AARCH64
+		}
+		if file.Machine != want {
+			return fmt.Errorf("ELF machine = %s, want %s", file.Machine, want)
+		}
+	case "darwin":
+		file, err := macho.NewFile(reader)
+		if err != nil {
+			return fmt.Errorf("parse Mach-O: %w", err)
+		}
+		defer file.Close()
+		want := macho.CpuAmd64
+		if expected.goarch == "arm64" {
+			want = macho.CpuArm64
+		}
+		if file.Cpu != want {
+			return fmt.Errorf("Mach-O CPU = %s, want %s", file.Cpu, want)
+		}
+	case "windows":
+		file, err := pe.NewFile(reader)
+		if err != nil {
+			return fmt.Errorf("parse PE: %w", err)
+		}
+		defer file.Close()
+		if expected.goarch != "amd64" || file.Machine != pe.IMAGE_FILE_MACHINE_AMD64 {
+			return fmt.Errorf("PE machine = %#x, want AMD64", file.Machine)
+		}
+	default:
+		return fmt.Errorf("unsupported operating system %q", expected.goos)
+	}
+	info, err := buildinfo.Read(bytes.NewReader(binary))
+	if err != nil {
+		return fmt.Errorf("read Go build information: %w", err)
+	}
+	if info.Main.Path != "github.com/yapless/scopesifter" {
+		return fmt.Errorf("Go main module = %q, want github.com/yapless/scopesifter", info.Main.Path)
+	}
+	settings := make(map[string]string, len(info.Settings))
+	for _, setting := range info.Settings {
+		settings[setting.Key] = setting.Value
+	}
+	if settings["vcs.revision"] != commit {
+		return fmt.Errorf("embedded VCS revision = %q, want %q", settings["vcs.revision"], commit)
+	}
+	if settings["vcs.modified"] != "false" {
+		return fmt.Errorf("embedded VCS modified state = %q, want false", settings["vcs.modified"])
 	}
 	return nil
 }
@@ -475,23 +614,116 @@ func verifyChecksums(dist string) error {
 }
 
 func versionFromRef(refName string) (string, error) {
-	if !strings.HasPrefix(refName, "v") {
-		return "", fmt.Errorf("release ref must start with v: %q", refName)
+	if len(refName) < 2 || refName[0] != 'v' || !validSemanticVersion(refName[1:]) {
+		return "", fmt.Errorf("release ref must be a canonical v-prefixed semantic version: %q", refName)
 	}
-	version := strings.ReplaceAll(strings.TrimPrefix(refName, "v"), "/", "-")
-	if version == "" {
-		return "", errors.New("release version is empty")
+	return refName[1:], nil
+}
+
+func validSemanticVersion(version string) bool {
+	coreAndPre, build, hasBuild := strings.Cut(version, "+")
+	if hasBuild && (!validIdentifiers(build, false) || strings.Contains(build, "+")) {
+		return false
 	}
-	for _, character := range version {
-		if (character >= 'a' && character <= 'z') ||
-			(character >= 'A' && character <= 'Z') ||
-			(character >= '0' && character <= '9') ||
-			strings.ContainsRune("._-", character) {
-			continue
+	core, prerelease, hasPrerelease := strings.Cut(coreAndPre, "-")
+	if hasPrerelease && !validIdentifiers(prerelease, true) {
+		return false
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if !validNumericIdentifier(part, false) {
+			return false
 		}
-		return "", fmt.Errorf("release version contains unsafe character %q", character)
 	}
-	return version, nil
+	return true
+}
+
+func validateReleaseCheckout(root, refName string) (string, error) {
+	head, err := gitOutput(root, "rev-parse", "--verify", "HEAD^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve release checkout HEAD: %w", err)
+	}
+	tag, err := gitOutput(root, "rev-parse", "--verify", "refs/tags/"+refName+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("resolve release tag %s: %w", refName, err)
+	}
+	if head != tag {
+		return "", fmt.Errorf("release checkout HEAD %s does not match tag %s at %s", head, refName, tag)
+	}
+	if !validObjectID(head) {
+		return "", fmt.Errorf("release commit has invalid object ID %q", head)
+	}
+	status, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=no")
+	if err != nil {
+		return "", fmt.Errorf("inspect release checkout state: %w", err)
+	}
+	if status != "" {
+		return "", errors.New("release checkout has tracked modifications")
+	}
+	return head, nil
+}
+
+func gitOutput(root string, arguments ...string) (string, error) {
+	command := exec.Command("git", arguments...)
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+func validObjectID(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if !strings.ContainsRune("0123456789abcdef", character) {
+			return false
+		}
+	}
+	return true
+}
+
+func validIdentifiers(value string, rejectNumericLeadingZero bool) bool {
+	if value == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, character := range identifier {
+			if character < '0' || character > '9' {
+				numeric = false
+			}
+			if !((character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') || character == '-') {
+				return false
+			}
+		}
+		if rejectNumericLeadingZero && numeric && !validNumericIdentifier(identifier, false) {
+			return false
+		}
+	}
+	return true
+}
+
+func validNumericIdentifier(value string, allowLeadingZero bool) bool {
+	if value == "" || (!allowLeadingZero && len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func requireRegularFile(path string) error {

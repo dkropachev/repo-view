@@ -6,13 +6,13 @@ export GRAMMAR_LANGUAGE
 export GRAMMAR_SOURCE
 
 generate-grammar:
-	go run ./internal/cmd/grammar-generator -repo .
+	go run -mod=readonly ./internal/cmd/grammar-generator -repo .
 
 generate-csharp-grammar:
-	go run ./internal/cmd/grammar-generator -language csharp -repo .
+	go run -mod=readonly ./internal/cmd/grammar-generator -language csharp -repo .
 
 generate-kotlin-grammar:
-	go run ./internal/cmd/grammar-generator -language kotlin -repo .
+	go run -mod=readonly ./internal/cmd/grammar-generator -language kotlin -repo .
 
 generate-swift-grammar:
-	go run ./internal/cmd/grammar-generator -language swift -repo .
+	go run -mod=readonly ./internal/cmd/grammar-generator -language swift -repo .

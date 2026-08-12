@@ -594,10 +594,10 @@ func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
 			t.Errorf("third-party notices lack %q", marker)
 		}
 	}
-	if !strings.Contains(workflow, "make -f make/release.mk release-artifacts") ||
-		!strings.Contains(workflow, "make -f make/release.mk release-publish") ||
-		!strings.Contains(releaseMakefile, "go run ./internal/cmd/release-artifacts -mode build") ||
-		!strings.Contains(releaseMakefile, "go run ./internal/cmd/release-artifacts -mode publish") {
+	if !strings.Contains(workflow, "make release-artifacts") ||
+		!strings.Contains(workflow, "make release-publish") ||
+		!strings.Contains(releaseMakefile, "go run -mod=readonly ./internal/cmd/release-artifacts -mode build") ||
+		!strings.Contains(releaseMakefile, "go run -mod=readonly ./internal/cmd/release-artifacts -mode publish") {
 		t.Fatal("release workflow does not delegate build and publication to the Go release tool")
 	}
 	if strings.Contains(workflow, "shell: bash") {
