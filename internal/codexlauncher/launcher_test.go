@@ -63,6 +63,10 @@ func TestRunPreservesBuildAndCodexContract(t *testing.T) {
 		"CGO_ENABLED=1",
 		"GOROOT=/untrusted/go",
 		"GOFLAGS=-mod=mod",
+		"GOPROXY=direct",
+		"GOVCS=*:all",
+		"GO_UNREVIEWED_DELEGATOR=/tmp/tool",
+		"CC=/tmp/compiler-wrapper",
 		"SCOPESIFTER_CACHE_DIR=" + cache,
 		"SCOPESIFTER_BIN_DIR=" + binDir,
 		"SCOPESIFTER_CHANGED_RETURN=scope",
@@ -130,9 +134,10 @@ func TestRunPreservesBuildAndCodexContract(t *testing.T) {
 		}
 	}
 	buildEnv := environmentMap(build.environment)
-	for _, removed := range sanitizedGoVariables {
-		if _, present := buildEnv[removed]; present {
-			t.Errorf("build environment retains %s", removed)
+	for name := range buildEnv {
+		_, fixed := fixedGoVariables[name]
+		if launcherGoEnvironmentVariableControlled(name) && name != "PWD" && !fixed {
+			t.Errorf("build environment retains uncontrolled %s", name)
 		}
 	}
 	for name, wanted := range fixedGoVariables {
@@ -417,6 +422,60 @@ func TestDeveloperInstructionsCoverAllPolicies(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestOSExecutorRejectsExecutablesOutsideLauncherRoles(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"bash", "python3", "unreviewed-native-tool"} {
+		err := (osExecutor{}).run(process{name: name})
+		if err == nil || !strings.Contains(err.Error(), "executable") {
+			t.Fatalf("OS executor accepted %q: %v", name, err)
+		}
+	}
+}
+
+func TestValidateLauncherProcessesRejectRoleConfusion(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	buildEnvironment := launcherBuildEnvironment([]string{"PATH=/usr/bin"}, root)
+	validBuild := process{
+		name: "go", directory: root, environment: buildEnvironment,
+		arguments: []string{
+			"build", "-ldflags", strings.Join([]string{
+				"-X main.enforcedLimitCap=20",
+				"-X main.enforcedContextCap=20",
+				"-X main.enforcedMaxCodeLinesCap=60",
+				"-X main.enforcedMaxPatchLinesCap=300",
+			}, " "),
+			"-o", filepath.Join(root, "bin", "scopesifter"), "./cmd/scopesifter",
+		},
+	}
+	if err := validateLauncherBuildProcess(validBuild); err != nil {
+		t.Fatalf("generated build process rejected: %v", err)
+	}
+	for _, mutate := range []func(*process){
+		func(value *process) { value.arguments = []string{"run", "/tmp/tool.go"} },
+		func(value *process) { value.arguments[2] = "-extld=/tmp/tool" },
+		func(value *process) {
+			value.arguments[2] += " -linkmode=external -extld=/bin/bash"
+		},
+		func(value *process) { value.environment = append(value.environment, "GOFLAGS=-toolexec=/tmp/tool") },
+		func(value *process) { value.environment = append(value.environment, "GO_UNREVIEWED=/tmp/tool") },
+		func(value *process) { value.environment = append(value.environment, "CC=/tmp/compiler-wrapper") },
+	} {
+		candidate := validBuild
+		candidate.arguments = append([]string(nil), validBuild.arguments...)
+		candidate.environment = append([]string(nil), validBuild.environment...)
+		mutate(&candidate)
+		if err := validateLauncherBuildProcess(candidate); err == nil {
+			t.Fatalf("role-confused Go process accepted: %#v", candidate)
+		}
+	}
+	if err := validateLauncherCodexProcess(process{
+		name: "codex", arguments: []string{"exec", "prompt"}, environment: []string{"PATH=/usr/bin"},
+	}); err == nil {
+		t.Fatal("Codex process without generated instruction prefix accepted")
 	}
 }
 

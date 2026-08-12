@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	OriginSchemaVersion    = "tokenbench.origin-inputs/v3"
-	ExecutionSchemaVersion = "tokenbench.execution-inputs/v3"
+	OriginSchemaVersion    = "tokenbench.origin-inputs/v4"
+	ExecutionSchemaVersion = "tokenbench.execution-inputs/v4"
 
 	ManifestKindDirectory         = "directory"
 	ManifestKindFile              = "regular-file"
@@ -59,13 +59,12 @@ type FileOrigin struct {
 	SHA256 string `json:"sha256"`
 }
 
-// UtilityOrigins is the closed executable surface available to shell calls.
+// UtilityOrigins is the closed executable surface available to command-runner
+// calls.
 // Every role must be a distinct static image: multicall and argv[0]-selected
 // applet surfaces are intentionally not representable.
 type UtilityOrigins struct {
 	Ripgrep FileOrigin `json:"ripgrep"`
-	Sed     FileOrigin `json:"sed"`
-	Awk     FileOrigin `json:"awk"`
 	Find    FileOrigin `json:"find"`
 	Head    FileOrigin `json:"head"`
 	Tail    FileOrigin `json:"tail"`
@@ -76,7 +75,6 @@ type UtilityOrigins struct {
 	Cat     FileOrigin `json:"cat"`
 	LS      FileOrigin `json:"ls"`
 	Grep    FileOrigin `json:"grep"`
-	Xargs   FileOrigin `json:"xargs"`
 }
 
 // OriginInputs commits every mutable pathname from which a conformant image
@@ -98,8 +96,6 @@ type OriginInputs struct {
 // UtilityPaths mirrors UtilityOrigins after immutable snapshot construction.
 type UtilityPaths struct {
 	Ripgrep string `json:"ripgrep"`
-	Sed     string `json:"sed"`
-	Awk     string `json:"awk"`
 	Find    string `json:"find"`
 	Head    string `json:"head"`
 	Tail    string `json:"tail"`
@@ -110,7 +106,6 @@ type UtilityPaths struct {
 	Cat     string `json:"cat"`
 	LS      string `json:"ls"`
 	Grep    string `json:"grep"`
-	Xargs   string `json:"xargs"`
 }
 
 // ChangedLineSpan is one inclusive, one-based range in the HEAD worktree.
@@ -316,7 +311,7 @@ type ManifestEntry struct { //nolint:govet,nolintlint // Field order defines can
 }
 
 // ExecutionInputs is the common immutable filesystem authority committed by
-// a v5 plan. Both arms use these exact paths and policy lists. The lists are
+// a v6 plan. Both arms use these exact paths and policy lists. The lists are
 // derived by this package and are not accepted as Build input.
 type ExecutionInputs struct { //nolint:govet,nolintlint // Field order defines canonical execution JSON.
 	SchemaVersion                string               `json:"schema_version"`
@@ -803,48 +798,47 @@ func logicalOriginForPath(root, path string) (string, bool) {
 const ChangedStateSchemaVersion = "tokenbench.changed-state-cache/v1"
 
 var utilityLogicalNames = map[string]struct{}{
-	"rg": {}, "sed": {}, "awk": {}, "find": {}, "head": {}, "tail": {},
+	"rg": {}, "find": {}, "head": {}, "tail": {},
 	"wc": {}, "sort": {}, "cut": {}, "tr": {}, "cat": {}, "ls": {},
-	"grep": {}, "xargs": {},
+	"grep": {},
 }
 
 func (origins UtilityOrigins) named() map[string]FileOrigin {
 	return map[string]FileOrigin{
-		"rg": origins.Ripgrep, "sed": origins.Sed, "awk": origins.Awk,
+		"rg":   origins.Ripgrep,
 		"find": origins.Find, "head": origins.Head, "tail": origins.Tail,
 		"wc": origins.WC, "sort": origins.Sort, "cut": origins.Cut,
 		"tr": origins.Tr, "cat": origins.Cat, "ls": origins.LS,
-		"grep": origins.Grep, "xargs": origins.Xargs,
+		"grep": origins.Grep,
 	}
 }
 
 func (paths UtilityPaths) values() []string {
 	return []string{
-		paths.Ripgrep, paths.Sed, paths.Awk, paths.Find, paths.Head,
+		paths.Ripgrep, paths.Find, paths.Head,
 		paths.Tail, paths.WC, paths.Sort, paths.Cut, paths.Tr, paths.Cat,
-		paths.LS, paths.Grep, paths.Xargs,
+		paths.LS, paths.Grep,
 	}
 }
 
 func (paths UtilityPaths) named() map[string]string {
 	return map[string]string{
-		"rg": paths.Ripgrep, "sed": paths.Sed, "awk": paths.Awk,
+		"rg":   paths.Ripgrep,
 		"find": paths.Find, "head": paths.Head, "tail": paths.Tail,
 		"wc": paths.WC, "sort": paths.Sort, "cut": paths.Cut,
 		"tr": paths.Tr, "cat": paths.Cat, "ls": paths.LS,
-		"grep": paths.Grep, "xargs": paths.Xargs,
+		"grep": paths.Grep,
 	}
 }
 
 func utilityPathsForRoot(root string) UtilityPaths {
 	return UtilityPaths{
-		Ripgrep: filepath.Join(root, "rg"), Sed: filepath.Join(root, "sed"),
-		Awk: filepath.Join(root, "awk"), Find: filepath.Join(root, "find"),
+		Ripgrep: filepath.Join(root, "rg"), Find: filepath.Join(root, "find"),
 		Head: filepath.Join(root, "head"), Tail: filepath.Join(root, "tail"),
 		WC: filepath.Join(root, "wc"), Sort: filepath.Join(root, "sort"),
 		Cut: filepath.Join(root, "cut"), Tr: filepath.Join(root, "tr"),
 		Cat: filepath.Join(root, "cat"), LS: filepath.Join(root, "ls"),
-		Grep: filepath.Join(root, "grep"), Xargs: filepath.Join(root, "xargs"),
+		Grep: filepath.Join(root, "grep"),
 	}
 }
 

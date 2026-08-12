@@ -25,8 +25,8 @@ The checked-in implementation provides:
 
 - strict read-only `tokenbench.suite/v2`, load-only code-task
   `tokenbench.suite/v3`, bounded workspace audit types and Linux mount authority,
-  artifact-manifest v3, plan v5, run v4,
-  observation v2, capture v6, signed-root, trust-policy v2, and replay v3
+  artifact-manifest v4, plan v6, run v5,
+  observation v2, capture v7, signed-root, trust-policy v2, and replay v3
   contracts;
 - an audit-only planner plus one publishable live adapter for Codex CLI
   `0.144.0`, exact executable SHA-256
@@ -130,8 +130,8 @@ sorted key IDs for `capture`, `replay`, or both roles.
 ## Building a publishable binary
 
 Publishable execution uses a closed artifact bundle. Its fixed manifest name is
-`tokenbench-artifacts-v3.json`; the exact compact JSON bytes must match
-[`schemas/artifact-manifest-v3.schema.json`](schemas/artifact-manifest-v3.schema.json).
+`tokenbench-artifacts-v4.json`; the exact compact JSON bytes must match
+[`schemas/artifact-manifest-v4.schema.json`](schemas/artifact-manifest-v4.schema.json).
 It names exact, single-link, native static ELF images for Codex, scopesifter,
 verifier Git, and each allowlisted utility, with reproducible provenance.
 No symlink, dynamic loader, multicall alias, unlisted executable, or digest drift
@@ -141,10 +141,13 @@ The suite and tokenbench binary must independently allow the same manifest
 digest. Build tokenbench itself as a static executable and bind that digest at
 link time:
 
-```sh
-manifest_sha256="$(sha256sum /absolute/artifacts/tokenbench-artifacts-v3.json | awk '{print $1}')"
+Compute the manifest digest with `sha256sum
+/absolute/artifacts/tokenbench-artifacts-v4.json`, then substitute its first
+field for `<manifest SHA-256>` below.
+
+```text
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=<manifest SHA-256>" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```

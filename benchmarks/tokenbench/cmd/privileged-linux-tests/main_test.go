@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -65,5 +68,68 @@ func TestReplaceEnvironment(t *testing.T) {
 	want := []string{"UNCHANGED=yes", "A=new", "B=added"}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("environment = %q, want %q", got, want)
+	}
+}
+
+func TestValidateContainerEngineInvocationBindsRoleAndArguments(t *testing.T) {
+	t.Parallel()
+	image := "example.invalid/tool@sha256:" + strings.Repeat("a", 64)
+	arguments := privilegedContainerArguments(
+		"/workspace/repository",
+		"/tmp/tokenbench-test-binaries",
+		image,
+		"mnt:[123]",
+		"cgroup:[456]",
+	)
+	if err := validateContainerEngineInvocation("docker", arguments); err != nil {
+		t.Fatalf("valid container invocation rejected: %v", err)
+	}
+
+	mutated := append([]string(nil), arguments...)
+	mutated[len(mutated)-1] = "bash"
+	if err := validateContainerEngineInvocation("docker", mutated); err == nil {
+		t.Fatal("mutated container command accepted")
+	}
+	if err := validateContainerEngineInvocation("make", arguments); err == nil {
+		t.Fatal("native dispatcher accepted as a container engine")
+	}
+	if err := validateContainerEngineInvocation("bash", arguments); err == nil {
+		t.Fatal("script runtime accepted as a container engine")
+	}
+}
+
+func TestValidateBuildInvocationBindsPackageAndEnvironment(t *testing.T) {
+	t.Parallel()
+	repositoryRoot, err := findRepositoryRoot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	binaryDirectory := filepath.Join(os.TempDir(), "tokenbench-build-validation")
+	environment := privilegedBuildEnvironment(os.Environ(), repositoryRoot)
+	arguments := []string{
+		"test", "-mod=readonly", "-c", "-o",
+		filepath.Join(binaryDirectory, "runner.test"),
+		"./benchmarks/tokenbench/runner",
+	}
+	if err := validateBuildInvocation("go", repositoryRoot, binaryDirectory, environment, arguments); err != nil {
+		t.Fatalf("valid build invocation rejected: %v", err)
+	}
+
+	mutated := append([]string(nil), arguments...)
+	mutated[5] = "./internal/processpolicy"
+	if err := validateBuildInvocation("go", repositoryRoot, binaryDirectory, environment, mutated); err == nil {
+		t.Fatal("unapproved build package accepted")
+	}
+	if err := validateBuildInvocation("bash", repositoryRoot, binaryDirectory, environment, arguments); err == nil {
+		t.Fatal("script runtime accepted as the build executable")
+	}
+	unsafeEnvironment := replaceEnvironment(environment, map[string]string{"GOFLAGS": "-toolexec=/tmp/tool"})
+	if err := validateBuildInvocation("go", repositoryRoot, binaryDirectory, unsafeEnvironment, arguments); err == nil {
+		t.Fatal("execution-injecting Go flags accepted")
+	}
+	unsafeEnvironment = slices.Clone(environment)
+	unsafeEnvironment = append(unsafeEnvironment, "GOCACHEPROG=/bin/bash")
+	if err := validateBuildInvocation("go", repositoryRoot, binaryDirectory, unsafeEnvironment, arguments); err == nil {
+		t.Fatal("ambient Go helper program accepted")
 	}
 }

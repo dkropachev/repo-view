@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -346,6 +347,9 @@ func snapshotGitOutput(
 	if ctx == nil || limit <= 0 || int64(limit) > maximumRegularFileBytes {
 		return nil, errors.New("invalid bounded Git invocation")
 	}
+	if err := processpolicy.ValidateExecutable(gitPath); err != nil {
+		return nil, fmt.Errorf("snapshot Git violates process policy: %w", err)
+	}
 	before, err := os.Lstat(gitPath)
 	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
 		before.Mode().Perm()&0o111 == 0 || hasMultipleLinks(before) {
@@ -366,12 +370,18 @@ func snapshotGitOutput(
 	if err != nil || !os.SameFile(before, opened) {
 		return nil, errors.New("snapshot verifier Git changed while opening")
 	}
+	if err := processpolicy.ValidateNativeFile(gitFile); err != nil {
+		return nil, err
+	}
 	digestValue, err := hashOpenFile(gitFile, opened.Size())
 	if err != nil || digestValue != gitSHA256 {
 		return nil, errors.Join(errors.New("snapshot verifier Git digest changed"), err)
 	}
 	safe := gitdiffcontract.InvocationPrefix()
 	safe = append(safe, arguments...)
+	if err := processpolicy.ValidateGit(safe...); err != nil {
+		return nil, fmt.Errorf("reject snapshot Git invocation: %w", err)
+	}
 	command := exec.CommandContext(ctx, "/proc/self/fd/3", safe...)
 	command.Args[0] = gitPath
 	command.ExtraFiles = []*os.File{gitFile}

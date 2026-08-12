@@ -2,8 +2,21 @@ package gitdiffcontract
 
 import (
 	"reflect"
+	"slices"
 	"testing"
 )
+
+func TestInvocationPrefixIgnoresOnlySubmoduleWorktreeDirtiness(t *testing.T) {
+	t.Parallel()
+	prefix := InvocationPrefix()
+	index := slices.Index(prefix, "diff.ignoreSubmodules=dirty")
+	if index < 1 || prefix[index-1] != "-c" {
+		t.Fatalf("InvocationPrefix() omits exact -c diff.ignoreSubmodules=dirty pair: %#v", prefix)
+	}
+	if Version != "scopesifter.git-diff/v3" {
+		t.Fatalf("Version = %q, want semantic contract v3", Version)
+	}
+}
 
 func TestPatchArgumentsFixSemanticOptionsAndContext(t *testing.T) {
 	base := "1111111111111111111111111111111111111111"
@@ -20,7 +33,7 @@ func TestPatchArgumentsFixSemanticOptionsAndContext(t *testing.T) {
 			arguments := test.arguments
 			for _, required := range []string{
 				"--find-renames=50%", "-l20000", "--diff-algorithm=myers",
-				"--no-indent-heuristic", "--full-index", "--src-prefix=a/",
+				"--ignore-submodules=dirty", "--no-indent-heuristic", "--full-index", "--src-prefix=a/",
 				"--dst-prefix=b/", "--inter-hunk-context=0",
 			} {
 				if !contains(arguments, required) {
@@ -51,7 +64,7 @@ func TestMetadataArgumentsShareRenameContract(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			for _, required := range []string{
-				test.format, "-z", "--find-renames=50%", "-l20000",
+				test.format, "-z", "--ignore-submodules=dirty", "--find-renames=50%", "-l20000",
 			} {
 				if !contains(test.arguments, required) {
 					t.Fatalf("metadata arguments omit %q: %#v", required, test.arguments)

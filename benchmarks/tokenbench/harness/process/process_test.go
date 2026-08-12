@@ -200,6 +200,29 @@ func TestExternalAdapterRejectsHardLinkedExecutable(t *testing.T) {
 	}
 }
 
+func TestExternalAdapterRejectsScriptRuntimeExecutable(t *testing.T) {
+	t.Parallel()
+	if _, err := New(Config{
+		Command: "/tmp/bash",
+		Kind:    "external-fixture",
+		Timeout: time.Second,
+	}); err == nil || !strings.Contains(err.Error(), "script runtime") {
+		t.Fatalf("script-runtime adapter was accepted: %v", err)
+	}
+}
+
+func TestExternalAdapterRejectsScriptRuntimeArgument(t *testing.T) {
+	t.Parallel()
+	if _, err := New(Config{
+		Command:   "/usr/bin/env",
+		Arguments: []string{"bash", "-c", "true"},
+		Kind:      "external-fixture",
+		Timeout:   time.Second,
+	}); err == nil || !strings.Contains(err.Error(), "script runtime") {
+		t.Fatalf("script-runtime adapter argument was accepted: %v", err)
+	}
+}
+
 func TestExternalAdapterRejectsInvalidProcessStrings(t *testing.T) {
 	t.Parallel()
 	for _, mode := range []string{

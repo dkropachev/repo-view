@@ -15,7 +15,7 @@ concurrency:
 
 defaults:
   run:
-    shell: sh
+    shell: go run -mod=readonly ./internal/cmd/workflow-runner -- {0}
 
 jobs:
   lint:
@@ -42,7 +42,7 @@ jobs:
           args: --config=.golangci.yml
 
       - name: Check production struct alignment
-        run: make ci-fieldalignment
+        run: ci-fieldalignment
 
   test:
     name: Test
@@ -62,19 +62,19 @@ jobs:
           cache: true
 
       - name: Vet
-        run: make ci-vet
+        run: ci-vet
 
       - name: Test
-        run: make ci-test
+        run: ci-test
 
       - name: Build commands
-        run: make ci-build
+        run: ci-build
 
       - name: Validate JSON files
-        run: make ci-json
+        run: ci-json
 
       - name: Enforce no executable scripts
-        run: make ci-no-scripts
+        run: ci-no-scripts
 
   privileged-linux:
     name: Privileged Linux kernel boundaries
@@ -96,4 +96,4 @@ jobs:
       - name: Run fail-closed privileged kernel tests
         env:
           TOKENBENCH_PRIVILEGED_IMAGE: golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599
-        run: make tokenbench-privileged-linux
+        run: tokenbench-privileged-linux

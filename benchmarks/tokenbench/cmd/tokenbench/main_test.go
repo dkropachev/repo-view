@@ -95,8 +95,8 @@ func TestDispatchUsesGoCommandRunnerAtPinnedCodexDiscoveryPath(t *testing.T) {
 		context.Background(),
 		"/snapshot/toolbox/bash",
 		"/snapshot/toolbox",
-		[]string{"-c", "printf '%s\\n' go-native"},
-		strings.NewReader(""),
+		[]string{"-c", "cat"},
+		strings.NewReader("go-native\n"),
 		&stdout,
 		&stderr,
 	)

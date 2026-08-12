@@ -19,6 +19,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 const (
@@ -1089,10 +1092,6 @@ func rejectLocalOverrides(ctx context.Context, git gitRunner, root string) error
 		return errors.New("git replacement objects are not allowed")
 	}
 
-	config, err := git.output(ctx, root, "config", "--local", "--name-only", "--list")
-	if err != nil {
-		return err
-	}
 	allowedConfig := map[string]struct{}{
 		"core.bare":                     {},
 		"core.filemode":                 {},
@@ -1101,10 +1100,21 @@ func rejectLocalOverrides(ctx context.Context, git gitRunner, root string) error
 		"extensions.compatobjectformat": {},
 		"extensions.objectformat":       {},
 	}
-	for _, key := range strings.Fields(config) {
+	config, err := git.outputBytes(ctx, root, processpolicy.GitRepositoryConfigArguments()...)
+	if err != nil {
+		return err
+	}
+	if err := processpolicy.ValidateGitWorktreeConfig(config); err != nil {
+		return fmt.Errorf("unsafe repository Git configuration: %w", err)
+	}
+	for record := range bytes.SplitSeq(config, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		key := string(record)
 		lower := strings.ToLower(key)
 		if _, allowed := allowedConfig[lower]; !allowed {
-			return fmt.Errorf("unsafe local Git configuration %q", key)
+			return fmt.Errorf("unsafe repository Git configuration %q", key)
 		}
 	}
 	fileMode, err := git.output(ctx, root, "config", "--local", "--get", "core.filemode")
@@ -1490,6 +1500,9 @@ func resolveGitRunnerAt(path string) (result gitRunner, resultErr error) {
 	if err != nil {
 		return gitRunner{}, fmt.Errorf("resolve canonical Git executable: %w", err)
 	}
+	if err := processpolicy.ValidateExecutable(path); err != nil {
+		return gitRunner{}, fmt.Errorf("git executable violates process policy: %w", err)
+	}
 	before, err := os.Lstat(path)
 	if err != nil {
 		return gitRunner{}, fmt.Errorf("inspect Git executable: %w", err)
@@ -1515,6 +1528,9 @@ func resolveGitRunnerAt(path string) (result gitRunner, resultErr error) {
 	opened, err := executable.Stat()
 	if err != nil {
 		return gitRunner{}, fmt.Errorf("inspect opened Git executable: %w", err)
+	}
+	if err := processpolicy.ValidateNativeFile(executable); err != nil {
+		return gitRunner{}, err
 	}
 	if err := validateUnchangedPinnedGitExecutable(before, opened); err != nil {
 		return gitRunner{}, err
@@ -1625,6 +1641,10 @@ func (git gitRunner) outputBytes(
 	root string,
 	arguments ...string,
 ) ([]byte, error) {
+	invocation := gitInvocation(root, arguments)
+	if err := processpolicy.ValidateGit(invocation...); err != nil {
+		return nil, fmt.Errorf("reject source Git invocation: %w", err)
+	}
 	if err := git.verify(); err != nil {
 		return nil, fmt.Errorf("verify Git executable before invocation: %w", err)
 	}
@@ -1632,7 +1652,7 @@ func (git gitRunner) outputBytes(
 		ctx,
 		git.executable,
 		git.path,
-		append([]string{"-C", root}, arguments...),
+		invocation,
 	)
 	if err != nil {
 		return nil, err
@@ -1665,6 +1685,10 @@ func (git gitRunner) outputBytes(
 }
 
 func (git gitRunner) run(ctx context.Context, root string, arguments ...string) error {
+	invocation := gitInvocation(root, arguments)
+	if err := processpolicy.ValidateGit(invocation...); err != nil {
+		return fmt.Errorf("reject source Git invocation: %w", err)
+	}
 	if err := git.verify(); err != nil {
 		return fmt.Errorf("verify Git executable before invocation: %w", err)
 	}
@@ -1672,7 +1696,7 @@ func (git gitRunner) run(ctx context.Context, root string, arguments ...string) 
 		ctx,
 		git.executable,
 		git.path,
-		append([]string{"-C", root}, arguments...),
+		invocation,
 	)
 	if err != nil {
 		return err
@@ -1696,6 +1720,15 @@ func (git gitRunner) run(ctx context.Context, root string, arguments ...string) 
 		)
 	}
 	return nil
+}
+
+func gitInvocation(root string, arguments []string) []string {
+	invocation := []string{}
+	if !processpolicy.IsGitRepositoryConfigQuery(arguments) {
+		invocation = gitdiffcontract.InvocationPrefix()
+	}
+	invocation = append(invocation, "-C", root)
+	return append(invocation, arguments...)
 }
 
 func (git gitRunner) close() error {

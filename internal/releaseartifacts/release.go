@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"compress/gzip"
+	"crypto/sha1"
 	"crypto/sha256"
 	"debug/buildinfo"
 	"debug/elf"
@@ -15,17 +16,33 @@ import (
 	"debug/pe"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
+	pathpkg "path"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
+
+	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/internal/processpolicy"
+	"golang.org/x/mod/modfile"
 )
 
 const noticeName = "THIRD_PARTY_NOTICES.md"
+
+const releaseRepository = "yapless/scopesifter"
+
+const (
+	maximumReleaseTreeEntries      = 100_000
+	maximumReleaseTreeListingBytes = 16 << 20
+	maximumReleaseBlobBytes        = 128 << 20
+	maximumReleaseTreeBytes        = 512 << 20
+	maximumReleaseGitErrorBytes    = 1 << 20
+)
 
 var archiveTime = time.Date(1980, time.January, 1, 0, 0, 0, 0, time.UTC)
 
@@ -54,20 +71,9 @@ func Build(root, refName string) error {
 	if err != nil {
 		return err
 	}
-	if err := requireRegularFile(filepath.Join(root, "go.mod")); err != nil {
-		return fmt.Errorf("validate repository root: %w", err)
-	}
 	commit, err := validateReleaseCheckout(root, refName)
 	if err != nil {
 		return err
-	}
-	noticePath := filepath.Join(root, noticeName)
-	if err := requireRegularFile(noticePath); err != nil {
-		return fmt.Errorf("validate third-party notice: %w", err)
-	}
-	notice, err := os.ReadFile(noticePath)
-	if err != nil {
-		return fmt.Errorf("read third-party notice: %w", err)
 	}
 	destination := filepath.Join(root, "dist")
 	if _, err := os.Lstat(destination); err == nil {
@@ -81,13 +87,34 @@ func Build(root, refName string) error {
 		return fmt.Errorf("create release staging directory: %w", err)
 	}
 	defer os.RemoveAll(workRoot)
+	sourceRoot := filepath.Join(workRoot, "source")
+	if err := os.Mkdir(sourceRoot, 0o700); err != nil {
+		return fmt.Errorf("create committed release source directory: %w", err)
+	}
+	if err := materializeReleaseTree(root, sourceRoot, commit); err != nil {
+		return fmt.Errorf("materialize committed release source: %w", err)
+	}
+	if err := requireRegularFile(filepath.Join(sourceRoot, "go.mod")); err != nil {
+		return fmt.Errorf("validate committed repository root: %w", err)
+	}
+	if err := validateReleaseModule(filepath.Join(sourceRoot, "go.mod")); err != nil {
+		return err
+	}
+	noticePath := filepath.Join(sourceRoot, noticeName)
+	if err := requireRegularFile(noticePath); err != nil {
+		return fmt.Errorf("validate committed third-party notice: %w", err)
+	}
+	notice, err := os.ReadFile(noticePath)
+	if err != nil {
+		return fmt.Errorf("read committed third-party notice: %w", err)
+	}
 	stagedDist := filepath.Join(workRoot, "dist")
 	if err := os.Mkdir(stagedDist, 0o755); err != nil {
 		return fmt.Errorf("create staged dist directory: %w", err)
 	}
 
 	for _, item := range targets {
-		if err := buildTarget(root, workRoot, stagedDist, noticePath, version, commit, item); err != nil {
+		if err := buildTarget(sourceRoot, workRoot, stagedDist, noticePath, version, commit, item); err != nil {
 			return err
 		}
 	}
@@ -150,9 +177,20 @@ func Publish(root, refName string) error {
 		return err
 	}
 	dist := filepath.Join(root, "dist")
-	notice, err := os.ReadFile(filepath.Join(root, noticeName))
+	sourceRoot, err := os.MkdirTemp("", "scopesifter-release-source-")
 	if err != nil {
-		return fmt.Errorf("read third-party notice: %w", err)
+		return fmt.Errorf("create committed release source directory: %w", err)
+	}
+	defer os.RemoveAll(sourceRoot)
+	if err := materializeReleaseTree(root, sourceRoot, commit); err != nil {
+		return fmt.Errorf("materialize committed release source: %w", err)
+	}
+	if err := validateReleaseModule(filepath.Join(sourceRoot, "go.mod")); err != nil {
+		return err
+	}
+	notice, err := os.ReadFile(filepath.Join(sourceRoot, noticeName))
+	if err != nil {
+		return fmt.Errorf("read committed third-party notice: %w", err)
 	}
 	if err := validateArtifactSet(dist, version, commit, notice); err != nil {
 		return fmt.Errorf("refuse unvalidated release artifacts: %w", err)
@@ -166,19 +204,32 @@ func Publish(root, refName string) error {
 		names = append(names, entry.Name())
 	}
 	args := releaseCreateArguments(refName, dist, names)
-	command := exec.Command("gh", args...)
+	ghEnvironment, err := releasePublishEnvironment(os.Environ())
+	if err != nil {
+		return err
+	}
+	command, ghFile, err := processpolicy.NativeCommand("gh", args...)
+	if err != nil {
+		return fmt.Errorf("pin native GitHub CLI: %w", err)
+	}
 	command.Dir = root
-	command.Stdin = os.Stdin
+	command.Env = ghEnvironment
+	command.Stdin = nil
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("publish GitHub release: %w", err)
+	runErr := command.Run()
+	closeErr := ghFile.Close()
+	if runErr != nil {
+		return fmt.Errorf("publish GitHub release: %w", runErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close native GitHub CLI image: %w", closeErr)
 	}
 	return nil
 }
 
 func releaseCreateArguments(refName, dist string, names []string) []string {
-	args := []string{"release", "create", refName}
+	args := []string{"release", "create", refName, "--repo", releaseRepository}
 	for _, name := range names {
 		args = append(args, filepath.Join(dist, name))
 	}
@@ -195,13 +246,26 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 		binaryName += ".exe"
 	}
 	binaryPath := filepath.Join(workRoot, binaryName)
-	command := exec.Command("go", "build", "-mod=readonly", "-trimpath", "-buildvcs=true", "-ldflags=-s -w", "-o", binaryPath, "./cmd/scopesifter")
+	arguments := []string{
+		"build", "-mod=readonly", "-trimpath", "-buildvcs=false",
+		"-ldflags=-s -w -X main.releaseRevision=" + commit,
+		"-o", binaryPath, "./cmd/scopesifter",
+	}
+	command, goFile, err := processpolicy.NativeCommand("go", arguments...)
+	if err != nil {
+		return fmt.Errorf("pin native Go tool: %w", err)
+	}
 	command.Dir = root
-	command.Env = releaseBuildEnvironment(os.Environ(), item)
+	command.Env = releaseBuildEnvironment(os.Environ(), item, workRoot)
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("build %s/%s binary: %w", item.goos, item.goarch, err)
+	runErr := command.Run()
+	closeErr := goFile.Close()
+	if runErr != nil {
+		return fmt.Errorf("build %s/%s binary: %w", item.goos, item.goarch, runErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close native Go image: %w", closeErr)
 	}
 	binary, err := os.ReadFile(binaryPath)
 	if err != nil {
@@ -573,11 +637,11 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 	for _, setting := range info.Settings {
 		settings[setting.Key] = setting.Value
 	}
-	if settings["vcs.revision"] != commit {
-		return fmt.Errorf("embedded VCS revision = %q, want %q", settings["vcs.revision"], commit)
+	if settings["vcs.revision"] != "" || settings["vcs.modified"] != "" {
+		return errors.New("release binary unexpectedly contains ambient VCS build settings")
 	}
-	if settings["vcs.modified"] != "false" {
-		return fmt.Errorf("embedded VCS modified state = %q, want false", settings["vcs.modified"])
+	if occurrences := bytes.Count(binary, []byte(commit)); occurrences != 1 {
+		return fmt.Errorf("release revision occurs %d times in binary, want exactly once", occurrences)
 	}
 	return nil
 }
@@ -659,6 +723,13 @@ func validSemanticVersion(version string) bool {
 }
 
 func validateReleaseCheckout(root, refName string) (string, error) {
+	configuration, err := gitOutputBytes(root, processpolicy.GitRepositoryConfigArguments()...)
+	if err != nil {
+		return "", fmt.Errorf("inspect release repository Git configuration: %w", err)
+	}
+	if err := processpolicy.ValidateGitWorktreeConfig(configuration); err != nil {
+		return "", fmt.Errorf("reject release repository Git configuration: %w", err)
+	}
 	head, err := gitOutput(root, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve release checkout HEAD: %w", err)
@@ -673,24 +744,226 @@ func validateReleaseCheckout(root, refName string) (string, error) {
 	if !validObjectID(head) {
 		return "", fmt.Errorf("release commit has invalid object ID %q", head)
 	}
-	status, err := gitOutput(root, "status", "--porcelain=v1", "--untracked-files=no")
-	if err != nil {
-		return "", fmt.Errorf("inspect release checkout state: %w", err)
-	}
-	if status != "" {
-		return "", errors.New("release checkout has tracked modifications")
-	}
 	return head, nil
 }
 
 func gitOutput(root string, arguments ...string) (string, error) {
-	command := exec.Command("git", arguments...)
-	command.Dir = root
-	output, err := command.CombinedOutput()
+	output, err := gitOutputBytes(root, arguments...)
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(string(output)))
+		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
+}
+
+func gitOutputBytes(root string, arguments ...string) ([]byte, error) {
+	return gitOutputBytesLimit(root, maximumReleaseTreeListingBytes, arguments...)
+}
+
+func gitOutputBytesLimit(root string, limit int, arguments ...string) ([]byte, error) {
+	if limit <= 0 || limit > maximumReleaseBlobBytes {
+		return nil, errors.New("release Git output limit is invalid")
+	}
+	safeArguments := arguments
+	if !processpolicy.IsGitRepositoryConfigQuery(arguments) {
+		safeArguments = append(gitdiffcontract.InvocationPrefix(), arguments...)
+	}
+	if err := processpolicy.ValidateGit(safeArguments...); err != nil {
+		return nil, fmt.Errorf("reject release Git invocation: %w", err)
+	}
+	command, gitFile, err := processpolicy.NativeCommand("git", safeArguments...)
+	if err != nil {
+		return nil, fmt.Errorf("pin native Git: %w", err)
+	}
+	command.Dir = root
+	command.Env = gitdiffcontract.Environment(os.DevNull)
+	stdout := &releaseBoundedBuffer{limit: limit}
+	stderr := &releaseBoundedBuffer{limit: maximumReleaseGitErrorBytes}
+	command.Stdout = stdout
+	command.Stderr = stderr
+	runErr := command.Run()
+	closeErr := gitFile.Close()
+	if runErr != nil {
+		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(arguments, " "), runErr, bytes.TrimSpace(stderr.Bytes()))
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("close native Git image: %w", closeErr)
+	}
+	return stdout.Bytes(), nil
+}
+
+type releaseBoundedBuffer struct {
+	data  []byte
+	limit int
+}
+
+func (buffer *releaseBoundedBuffer) Write(data []byte) (int, error) {
+	written := len(data)
+	remaining := buffer.limit - len(buffer.data)
+	if remaining <= 0 {
+		return 0, errors.New("release Git output exceeded its limit")
+	}
+	if len(data) > remaining {
+		buffer.data = append(buffer.data, data[:remaining]...)
+		return remaining, errors.New("release Git output exceeded its limit")
+	}
+	buffer.data = append(buffer.data, data...)
+	return written, nil
+}
+
+func (buffer *releaseBoundedBuffer) Bytes() []byte {
+	return bytes.Clone(buffer.data)
+}
+
+type releaseTreeEntry struct {
+	objectID string
+	path     string
+	mode     fs.FileMode
+}
+
+func materializeReleaseTree(repositoryRoot, destination, commit string) error {
+	listing, err := gitOutputBytes(
+		repositoryRoot,
+		"ls-tree", "-r", "-z", "--full-tree", commit, "--",
+	)
+	if err != nil {
+		return fmt.Errorf("list committed release tree: %w", err)
+	}
+	entries, err := parseReleaseTree(listing)
+	if err != nil {
+		return err
+	}
+	objectFormat, err := gitOutput(repositoryRoot, "rev-parse", "--show-object-format")
+	if err != nil {
+		return fmt.Errorf("read release repository object format: %w", err)
+	}
+	var total int64
+	for _, entry := range entries {
+		content, err := gitOutputBytesLimit(
+			repositoryRoot,
+			maximumReleaseBlobBytes,
+			"cat-file", "blob", entry.objectID,
+		)
+		if err != nil {
+			return fmt.Errorf("read committed release path %s: %w", entry.path, err)
+		}
+		if int64(len(content)) > maximumReleaseBlobBytes ||
+			int64(len(content)) > maximumReleaseTreeBytes-total {
+			return fmt.Errorf("committed release source exceeds its size limit at %s", entry.path)
+		}
+		if err := validateGitBlobID(objectFormat, entry.objectID, content); err != nil {
+			return fmt.Errorf("authenticate committed release path %s: %w", entry.path, err)
+		}
+		total += int64(len(content))
+		target := filepath.Join(destination, filepath.FromSlash(entry.path))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return fmt.Errorf("create committed release directory for %s: %w", entry.path, err)
+		}
+		file, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, entry.mode)
+		if err != nil {
+			return fmt.Errorf("create committed release path %s: %w", entry.path, err)
+		}
+		_, writeErr := file.Write(content)
+		closeErr := file.Close()
+		if writeErr != nil || closeErr != nil {
+			return fmt.Errorf("write committed release path %s: %w", entry.path, errors.Join(writeErr, closeErr))
+		}
+	}
+	return nil
+}
+
+func validateReleaseModule(path string) error {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read committed go.mod: %w", err)
+	}
+	module, err := modfile.Parse("go.mod", content, nil)
+	if err != nil {
+		return fmt.Errorf("parse committed go.mod: %w", err)
+	}
+	for _, replacement := range module.Replace {
+		if replacement.New.Version == "" {
+			return fmt.Errorf(
+				"committed go.mod replacement for %s uses a local filesystem path",
+				replacement.Old.Path,
+			)
+		}
+	}
+	return nil
+}
+
+func parseReleaseTree(listing []byte) ([]releaseTreeEntry, error) {
+	if len(listing) != 0 && listing[len(listing)-1] != 0 {
+		return nil, errors.New("committed release tree listing is not NUL terminated")
+	}
+	entries := make([]releaseTreeEntry, 0)
+	seen := make(map[string]struct{})
+	for record := range bytes.SplitSeq(listing, []byte{0}) {
+		if len(record) == 0 {
+			continue
+		}
+		if len(entries) >= maximumReleaseTreeEntries {
+			return nil, errors.New("committed release tree has too many entries")
+		}
+		metadata, rawPath, found := bytes.Cut(record, []byte{'\t'})
+		fields := bytes.Fields(metadata)
+		if !found || len(fields) != 3 || string(fields[1]) != "blob" ||
+			(string(fields[0]) != "100644" && string(fields[0]) != "100755") {
+			return nil, fmt.Errorf("unsupported committed release tree entry %q", record)
+		}
+		path := string(rawPath)
+		if !safeReleaseTreePath(path) {
+			return nil, fmt.Errorf("unsafe committed release path %q", path)
+		}
+		if _, duplicate := seen[path]; duplicate {
+			return nil, fmt.Errorf("duplicate committed release path %q", path)
+		}
+		seen[path] = struct{}{}
+		objectID := string(fields[2])
+		if !validObjectID(objectID) {
+			return nil, fmt.Errorf("invalid committed release object ID %q", objectID)
+		}
+		mode := fs.FileMode(0o644)
+		if string(fields[0]) == "100755" {
+			mode = 0o755
+		}
+		entries = append(entries, releaseTreeEntry{mode: mode, objectID: objectID, path: path})
+	}
+	if len(entries) == 0 {
+		return nil, errors.New("committed release tree is empty")
+	}
+	return entries, nil
+}
+
+func safeReleaseTreePath(value string) bool {
+	if value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n\\") ||
+		filepath.IsAbs(filepath.FromSlash(value)) || pathpkg.Clean(value) != value ||
+		value == "." || value == ".." || strings.HasPrefix(value, "../") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if strings.EqualFold(component, ".git") {
+			return false
+		}
+	}
+	return true
+}
+
+func validateGitBlobID(objectFormat, objectID string, content []byte) error {
+	var digest hash.Hash
+	switch objectFormat {
+	case "sha1":
+		digest = sha1.New() //nolint:gosec // Git SHA-1 repositories require SHA-1 object authentication.
+	case "sha256":
+		digest = sha256.New()
+	default:
+		return fmt.Errorf("unsupported Git object format %q", objectFormat)
+	}
+	_, _ = fmt.Fprintf(digest, "blob %d%c", len(content), byte(0))
+	_, _ = digest.Write(content)
+	if actual := fmt.Sprintf("%x", digest.Sum(nil)); actual != objectID {
+		return fmt.Errorf("git blob ID = %s, want %s", actual, objectID)
+	}
+	return nil
 }
 
 func validObjectID(value string) bool {
@@ -776,16 +1049,14 @@ func replaceEnvironment(environment []string, replacements map[string]string) []
 	return result
 }
 
-func releaseBuildEnvironment(environment []string, item target) []string {
+func releaseBuildEnvironment(environment []string, item target, cacheRoot string) []string {
 	clean := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, found := strings.Cut(entry, "=")
 		if !found {
 			continue
 		}
-		if strings.HasPrefix(name, "GO") || name == "CGO_ENABLED" ||
-			name == "CC" || name == "CXX" || name == "PKG_CONFIG" ||
-			strings.HasPrefix(name, "CGO_") {
+		if releaseGoEnvironmentVariableControlled(name) {
 			continue
 		}
 		clean = append(clean, entry)
@@ -796,11 +1067,58 @@ func releaseBuildEnvironment(environment []string, item target) []string {
 		"GOAMD64":      "v1",
 		"GOARCH":       item.goarch,
 		"GOARM64":      "v8.0",
+		"GOAUTH":       "off",
 		"GOENV":        "off",
 		"GOEXPERIMENT": "",
-		"GOFLAGS":      "-mod=readonly -trimpath -buildvcs=true",
+		"GOFLAGS":      "-mod=readonly -trimpath -buildvcs=false",
+		"GOCACHE":      filepath.Join(cacheRoot, "go-build-cache"),
+		"GOMODCACHE":   filepath.Join(cacheRoot, "go-module-cache"),
+		"GONOPROXY":    "none",
+		"GONOSUMDB":    "",
 		"GOOS":         item.goos,
+		"GOPRIVATE":    "",
+		"GOPROXY":      "https://proxy.golang.org",
+		"GOSUMDB":      "sum.golang.org",
 		"GOTOOLCHAIN":  "local",
+		"GOVCS":        "*:off",
 		"GOWORK":       "off",
 	})
+}
+
+func releaseGoEnvironmentVariableControlled(name string) bool {
+	if strings.HasPrefix(name, "GO") || strings.HasPrefix(name, "CGO") {
+		return true
+	}
+	switch name {
+	case "AR", "CC", "CXX", "FC", "GCCGO", "PKG_CONFIG":
+		return true
+	default:
+		return false
+	}
+}
+
+func releasePublishEnvironment(environment []string) ([]string, error) {
+	token := ""
+	for _, entry := range environment {
+		name, value, found := strings.Cut(entry, "=")
+		if found && name == "GH_TOKEN" {
+			token = value
+		}
+	}
+	if token == "" || strings.ContainsAny(token, "\x00\r\n") {
+		return nil, errors.New("release publication requires a valid GH_TOKEN")
+	}
+	return []string{
+		"GH_HOST=github.com",
+		"GH_PROMPT_DISABLED=1",
+		"GH_TOKEN=" + token,
+		"HOME=/",
+		"LANG=C",
+		"LC_ALL=C",
+		"NO_COLOR=1",
+		"PAGER=cat",
+		"PATH=",
+		"TZ=UTC",
+		"XDG_CONFIG_HOME=/",
+	}, nil
 }

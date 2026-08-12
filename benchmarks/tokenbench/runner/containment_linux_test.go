@@ -622,7 +622,7 @@ func TestInitializeArmCgroupCapturesZeroResourcesBeforeConfiguringLimits(t *test
 	}
 }
 
-func TestInitializeArmCgroupRejectsNonzeroResourcesBeforeConfiguringLimits(t *testing.T) {
+func TestInitializeArmCgroupAllowsElapsedPeriodBeforeConfiguringLimits(t *testing.T) {
 	t.Parallel()
 	parent, err := os.OpenRoot(t.TempDir())
 	if err != nil {
@@ -631,7 +631,7 @@ func TestInitializeArmCgroupRejectsNonzeroResourcesBeforeConfiguringLimits(t *te
 	t.Cleanup(func() { _ = parent.Close() })
 
 	configured := false
-	_, _, err = initializeArmCgroup(
+	directory, _, err := initializeArmCgroup(
 		parent,
 		cgroupResourceCounterKeys{},
 		armCgroupInitializationOperations{
@@ -646,11 +646,52 @@ func TestInitializeArmCgroupRejectsNonzeroResourcesBeforeConfiguringLimits(t *te
 			},
 		},
 	)
-	if err == nil || !strings.Contains(err.Error(), "counter nr_periods started at 1") {
+	if err != nil {
+		t.Fatalf("fresh elapsed CFS period rejected: %v", err)
+	}
+	if !configured {
+		t.Fatal("limits were not configured after accepting the elapsed period")
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Remove(pairCgroupName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitializeArmCgroupRejectsNonzeroUsageBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configured := false
+	_, _, err = initializeArmCgroup(
+		parent,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{
+						{Name: "nr_periods", Value: 1},
+						{Name: "usage_usec", Value: 1},
+					},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				configured = true
+				return nil
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "counter usage_usec started at 1") {
 		t.Fatalf("initialization error = %v", err)
 	}
 	if configured {
-		t.Fatal("limits were configured before strict zero-resource validation")
+		t.Fatal("limits were configured before strict usage validation")
 	}
 	if _, statErr := parent.Stat(pairCgroupName); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("failed initialization retained arm directory: %v", statErr)

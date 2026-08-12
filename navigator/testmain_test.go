@@ -24,7 +24,7 @@ func TestMain(m *testing.M) {
 		switch filepath.Base(executable) {
 		case "git":
 			os.Exit(runNavigatorGitTestHelper(filepath.Dir(executable)))
-		case "fsmonitor-test":
+		case "fsmonitor-test", "filter-test":
 			marker := executable + ".marker"
 			if err := os.WriteFile(marker, []byte("executed"), 0o600); err != nil {
 				os.Exit(98)

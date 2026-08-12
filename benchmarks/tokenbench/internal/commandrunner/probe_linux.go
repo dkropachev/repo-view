@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -59,7 +60,7 @@ func VerifyEntrypoint(ctx context.Context, executable string) error {
 		probeCtx,
 		executable,
 		"-c",
-		"printf '%s\\n' "+entrypointProbeMarker,
+		"cat",
 	)
 	command.Args[0] = executable
 	command.Dir = "/"
@@ -82,6 +83,7 @@ func VerifyEntrypoint(ctx context.Context, executable string) error {
 	}
 	command.WaitDelay = 100 * time.Millisecond
 	var stdout, stderr entrypointProbeCapture
+	command.Stdin = strings.NewReader(entrypointProbeMarker + "\n")
 	command.Stdout = &stdout
 	command.Stderr = &stderr
 	if err := command.Run(); err != nil {

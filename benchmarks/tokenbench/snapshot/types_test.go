@@ -14,21 +14,21 @@ func TestFrozenInputSchemasAreRejected(t *testing.T) {
 	t.Parallel()
 
 	origins := originFixture(t)
-	origins.SchemaVersion = "tokenbench.origin-inputs/v2"
+	origins.SchemaVersion = "tokenbench.origin-inputs/v3"
 	if err := origins.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected origin-input schema") {
-		t.Fatalf("origin-inputs/v2 rejection = %v", err)
+		t.Fatalf("origin-inputs/v3 rejection = %v", err)
 	}
 
 	execution := executionFixture(t)
-	execution.SchemaVersion = "tokenbench.execution-inputs/v2"
+	execution.SchemaVersion = "tokenbench.execution-inputs/v3"
 	if err := execution.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected execution-input schema") {
-		t.Fatalf("execution-inputs/v2 rejection = %v", err)
+		t.Fatalf("execution-inputs/v3 rejection = %v", err)
 	}
 }
 
 func TestOriginInputsRejectsSharedExecutableRole(t *testing.T) {
 	origins := originFixture(t)
-	origins.Utilities.Cat = origins.Utilities.Sed
+	origins.Utilities.Cat = origins.Utilities.Find
 	origins.Commitment = mustOriginCommitment(t, origins)
 	if err := origins.Validate(); err == nil || !strings.Contains(err.Error(), "share an origin") {
 		t.Fatalf("Validate() = %v, want shared-role rejection", err)
@@ -37,7 +37,7 @@ func TestOriginInputsRejectsSharedExecutableRole(t *testing.T) {
 
 func TestOriginInputsRejectsSharedExecutableDigestAtDistinctPaths(t *testing.T) {
 	origins := originFixture(t)
-	origins.Utilities.Cat.SHA256 = origins.Utilities.Sed.SHA256
+	origins.Utilities.Cat.SHA256 = origins.Utilities.Find.SHA256
 	origins.Commitment = mustOriginCommitment(t, origins)
 	if err := origins.Validate(); err == nil || !strings.Contains(err.Error(), "image digest") {
 		t.Fatalf("Validate() = %v, want shared-image rejection", err)
@@ -275,10 +275,10 @@ func originFixture(t *testing.T) OriginInputs {
 		},
 		file("codex"), file("scopesifter"), file("git"),
 		UtilityOrigins{
-			Ripgrep: file("rg"), Sed: file("sed"), Awk: file("awk"),
-			Find: file("find"), Head: file("head"), Tail: file("tail"),
+			Ripgrep: file("rg"),
+			Find:    file("find"), Head: file("head"), Tail: file("tail"),
 			WC: file("wc"), Sort: file("sort"), Cut: file("cut"), Tr: file("tr"),
-			Cat: file("cat"), LS: file("ls"), Grep: file("grep"), Xargs: file("xargs"),
+			Cat: file("cat"), LS: file("ls"), Grep: file("grep"),
 		},
 		file("runner"),
 	)

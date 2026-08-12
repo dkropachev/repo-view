@@ -13,7 +13,7 @@ concurrency:
 
 defaults:
   run:
-    shell: sh
+    shell: go run -mod=readonly ./internal/cmd/workflow-runner -- {0}
 
 jobs:
   release:
@@ -34,12 +34,12 @@ jobs:
           cache: true
 
       - name: Test
-        run: make ci-test
+        run: ci-test
 
       - name: Build release archives
-        run: make release-artifacts
+        run: release-artifacts
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: make release-publish
+        run: release-publish

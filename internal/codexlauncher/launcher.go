@@ -10,39 +10,24 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
-var sanitizedGoVariables = []string{
-	"GOOS",
-	"GOARCH",
-	"GO386",
-	"GOAMD64",
-	"GOARM",
-	"GOARM64",
-	"GOMIPS",
-	"GOMIPS64",
-	"GOPPC64",
-	"GORISCV64",
-	"GOWASM",
-	"CGO_ENABLED",
-	"CC",
-	"CXX",
-	"CGO_CFLAGS",
-	"CGO_CPPFLAGS",
-	"CGO_CXXFLAGS",
-	"CGO_LDFLAGS",
-	"PKG_CONFIG",
-	"GOROOT",
-	"GOEXPERIMENT",
-	"GODEBUG",
-}
-
 var fixedGoVariables = map[string]string{
+	"CGO_ENABLED": "0",
 	"GO111MODULE": "on",
+	"GOAUTH":      "off",
 	"GOENV":       "off",
-	"GOTOOLCHAIN": "local",
-	"GOWORK":      "off",
 	"GOFLAGS":     "-mod=readonly -trimpath -buildvcs=false",
+	"GONOPROXY":   "none",
+	"GONOSUMDB":   "",
+	"GOPRIVATE":   "",
+	"GOPROXY":     "https://proxy.golang.org",
+	"GOSUMDB":     "sum.golang.org",
+	"GOTOOLCHAIN": "local",
+	"GOVCS":       "*:off",
+	"GOWORK":      "off",
 }
 
 // Streams are the inherited standard streams for the build and Codex process.
@@ -70,8 +55,29 @@ type osExecutor struct {
 	signals <-chan os.Signal
 }
 
-func (e osExecutor) run(p process) error {
-	command := exec.Command(p.name, p.arguments...)
+func (e osExecutor) run(p process) (resultErr error) {
+	if err := processpolicy.ValidateExecutable(p.name); err != nil {
+		return fmt.Errorf("reject launcher executable: %w", err)
+	}
+	switch p.name {
+	case "go":
+		if err := validateLauncherBuildProcess(p); err != nil {
+			return err
+		}
+	case "codex":
+		if err := validateLauncherCodexProcess(p); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unsupported launcher executable %q", p.name)
+	}
+	command, nativeFile, err := processpolicy.NativeCommand(p.name, p.arguments...)
+	if err != nil {
+		return fmt.Errorf("pin launcher executable: %w", err)
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, nativeFile.Close())
+	}()
 	command.Dir = p.directory
 	command.Env = p.environment
 	command.Stdin = p.stdin
@@ -105,6 +111,184 @@ func (e osExecutor) run(p process) error {
 			}
 		}
 	}
+}
+
+func validateLauncherBuildProcess(p process) error {
+	if len(p.arguments) != 6 || p.arguments[0] != "build" ||
+		p.arguments[1] != "-ldflags" || p.arguments[3] != "-o" ||
+		p.arguments[5] != "./cmd/scopesifter" {
+		return errors.New("launcher Go build arguments do not match the fixed role")
+	}
+	if err := processpolicy.Validate(p.name, p.arguments...); err != nil {
+		return fmt.Errorf("launcher Go build violates process policy: %w", err)
+	}
+	if p.directory == "" || !filepath.IsAbs(p.directory) || filepath.Clean(p.directory) != p.directory {
+		return errors.New("launcher Go build directory is not canonical and absolute")
+	}
+	output := p.arguments[4]
+	if !filepath.IsAbs(output) || filepath.Clean(output) != output || filepath.Base(output) != "scopesifter" {
+		return errors.New("launcher Go build output is not the fixed binary role")
+	}
+	if !safeLauncherLinkerFlags(p.arguments[2]) {
+		return errors.New("launcher Go linker flags are outside the generated -X grammar")
+	}
+	required := buildEnvironmentValues(p.directory)
+	seen := make(map[string]bool, len(required))
+	for _, entry := range p.environment {
+		name, value, found := strings.Cut(entry, "=")
+		if !found {
+			continue
+		}
+		expected, constrained := required[name]
+		if launcherGoEnvironmentVariableControlled(name) && !constrained {
+			return fmt.Errorf("launcher Go environment retains prohibited %s", name)
+		}
+		if constrained {
+			if seen[name] || value != expected {
+				return fmt.Errorf("launcher Go environment does not bind %s exactly", name)
+			}
+			seen[name] = true
+		}
+	}
+	for name := range required {
+		if !seen[name] {
+			return fmt.Errorf("launcher Go environment omits required binding %s", name)
+		}
+	}
+	return nil
+}
+
+func safeLauncherLinkerFlags(flags string) bool {
+	if flags == "" || strings.ContainsAny(flags, "\r\n\\`$;@") {
+		return false
+	}
+	assignments, valid := parseLauncherLinkerAssignments(flags)
+	if !valid {
+		return false
+	}
+	for _, required := range []string{
+		"main.enforcedLimitCap",
+		"main.enforcedContextCap",
+		"main.enforcedMaxCodeLinesCap",
+		"main.enforcedMaxPatchLinesCap",
+	} {
+		if _, found := assignments[required]; !found {
+			return false
+		}
+	}
+	semanticNames := []string{
+		"main.enforcedNavigationRoot",
+		"main.enforcedNavigationBaseCommit",
+		"main.enforcedChangedReturn",
+		"main.enforcedChangedContext",
+		"main.enforcedNavigationSemantics",
+	}
+	semanticCount := 0
+	for _, name := range semanticNames {
+		if _, found := assignments[name]; found {
+			semanticCount++
+		}
+	}
+	if semanticCount != 0 && semanticCount != len(semanticNames) {
+		return false
+	}
+	_, commandCap := assignments["main.enforcedNavigationCommandCap"]
+	_, transcript := assignments["main.enforcedNavigationTranscriptPath"]
+	return commandCap == transcript
+}
+
+func parseLauncherLinkerAssignments(flags string) (map[string]string, bool) {
+	assignments := make(map[string]string)
+	remaining := flags
+	for remaining != "" {
+		if !strings.HasPrefix(remaining, "-X ") {
+			return nil, false
+		}
+		remaining = strings.TrimPrefix(remaining, "-X ")
+		assignment, rest, valid := linkerAssignment(remaining)
+		if !valid {
+			return nil, false
+		}
+		name, value, found := strings.Cut(assignment, "=")
+		if !found || value == "" || !validLauncherLinkerValue(name, value) {
+			return nil, false
+		}
+		if _, duplicate := assignments[name]; duplicate {
+			return nil, false
+		}
+		assignments[name] = value
+		remaining = rest
+	}
+	return assignments, true
+}
+
+func linkerAssignment(value string) (string, string, bool) {
+	if value == "" {
+		return "", "", false
+	}
+	if value[0] == '\'' || value[0] == '"' {
+		quote := value[0]
+		end := strings.IndexByte(value[1:], quote)
+		if end < 0 {
+			return "", "", false
+		}
+		end++
+		assignment := value[1:end]
+		rest := value[end+1:]
+		if rest != "" {
+			if !strings.HasPrefix(rest, " -X ") {
+				return "", "", false
+			}
+			rest = rest[1:]
+		}
+		return assignment, rest, assignment != ""
+	}
+	separator := strings.Index(value, " -X ")
+	if separator < 0 {
+		if strings.IndexFunc(value, unicode.IsSpace) >= 0 || strings.ContainsAny(value, "'\"") {
+			return "", "", false
+		}
+		return value, "", true
+	}
+	assignment := value[:separator]
+	if assignment == "" || strings.IndexFunc(assignment, unicode.IsSpace) >= 0 ||
+		strings.ContainsAny(assignment, "'\"") {
+		return "", "", false
+	}
+	return assignment, value[separator+1:], true
+}
+
+func validLauncherLinkerValue(name, value string) bool {
+	if containsControl(value) {
+		return false
+	}
+	switch name {
+	case "main.enforcedLimitCap", "main.enforcedContextCap",
+		"main.enforcedMaxCodeLinesCap", "main.enforcedMaxPatchLinesCap",
+		"main.enforcedChangedContext", "main.enforcedNavigationCommandCap":
+		return decimalPattern.MatchString(value)
+	case "main.enforcedNavigationBaseCommit":
+		return objectIDPattern.MatchString(value)
+	case "main.enforcedChangedReturn":
+		return oneOf(value, "locations", "line", "context", "scope")
+	case "main.enforcedNavigationSemantics":
+		return value == "1"
+	case "main.enforcedNavigationRoot", "main.enforcedNavigationTranscriptPath":
+		return filepath.IsAbs(value) && filepath.Clean(value) == value
+	default:
+		return false
+	}
+}
+
+func validateLauncherCodexProcess(p process) error {
+	if p.directory != "" || len(p.arguments) < 2 || p.arguments[0] != "-c" ||
+		!strings.HasPrefix(p.arguments[1], "developer_instructions=\"") {
+		return errors.New("launcher Codex process does not begin with generated instructions")
+	}
+	if len(p.environment) == 0 || environmentMap(p.environment)["PATH"] == "" {
+		return errors.New("launcher Codex process lacks its generated environment")
+	}
+	return nil
 }
 
 type forwardedSignalError struct {
@@ -213,11 +397,7 @@ func run(
 		)
 	}
 
-	buildEnvironment := replaceEnvironment(
-		environment,
-		sanitizedGoVariables,
-		buildEnvironmentValues(root),
-	)
+	buildEnvironment := launcherBuildEnvironment(environment, root)
 	build := process{
 		name: "go",
 		arguments: []string{
@@ -313,6 +493,30 @@ func buildEnvironmentValues(root string) map[string]string {
 	}
 	values["PWD"] = root
 	return values
+}
+
+func launcherBuildEnvironment(environment []string, root string) []string {
+	filtered := make([]string, 0, len(environment))
+	for _, entry := range environment {
+		name, _, found := strings.Cut(entry, "=")
+		if !found || launcherGoEnvironmentVariableControlled(name) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return replaceEnvironment(filtered, nil, buildEnvironmentValues(root))
+}
+
+func launcherGoEnvironmentVariableControlled(name string) bool {
+	if strings.HasPrefix(name, "GO") || strings.HasPrefix(name, "CGO") {
+		return true
+	}
+	switch name {
+	case "AR", "CC", "CXX", "FC", "GCCGO", "PKG_CONFIG", "PWD":
+		return true
+	default:
+		return false
+	}
 }
 
 func prepareDirectories(c config, stderr io.Writer) (string, int) {

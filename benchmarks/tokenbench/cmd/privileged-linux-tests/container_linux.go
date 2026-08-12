@@ -14,6 +14,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -32,58 +33,62 @@ type privilegedSuite struct {
 	delegated   bool
 }
 
-var privilegedSuites = []privilegedSuite{
-	{
-		binary: "/tokenbench-tests/runner.test", timeout: "8m", delegated: true,
-		names: []string{
-			"TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath",
-			"TestArmCleanupRetriesTransientRmdirWithinDeadline",
-			"TestPrivilegedGoCommandRunnerDiscoveryPath",
-			"TestLandlockBlocksCgroupEscapeAndAllowsOnlyPinnedWritableRoots",
-			"TestLandlockFullPolicyDeniesHostReadsExecutablesAndLoaderBypass",
-			"TestPrivilegedExactConnectKernelBoundary",
-			"TestPrivilegedExactConnectRejectsAncestorProgram",
-			"TestPrivilegedArmInitPIDNamespaceBoundary",
-			"TestProcessInspectionSeccompKillsX32SyscallTable",
+var privilegedSuites = configuredPrivilegedSuites()
+
+func configuredPrivilegedSuites() []privilegedSuite {
+	return []privilegedSuite{
+		{
+			binary: "/tokenbench-tests/runner.test", timeout: "8m", delegated: true,
+			names: []string{
+				"TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath",
+				"TestArmCleanupRetriesTransientRmdirWithinDeadline",
+				"TestPrivilegedGoCommandRunnerDiscoveryPath",
+				"TestLandlockBlocksCgroupEscapeAndAllowsOnlyPinnedWritableRoots",
+				"TestLandlockFullPolicyDeniesHostReadsExecutablesAndLoaderBypass",
+				"TestPrivilegedExactConnectKernelBoundary",
+				"TestPrivilegedExactConnectRejectsAncestorProgram",
+				"TestPrivilegedArmInitPIDNamespaceBoundary",
+				"TestProcessInspectionSeccompKillsX32SyscallTable",
+			},
+			environment: map[string]string{
+				commandRunnerImageEnvironment:   "/tokenbench-tests/tokenbench",
+				commandRunnerUtilityEnvironment: "/tokenbench-tests/privileged-linux-tests",
+			},
 		},
-		environment: map[string]string{
-			commandRunnerImageEnvironment:   "/tokenbench-tests/tokenbench",
-			commandRunnerUtilityEnvironment: "/tokenbench-tests/privileged-linux-tests",
+		{
+			binary: "/tokenbench-tests/tokenbench-command.test", timeout: "2m",
+			names: []string{"TestPhysicalPathSeparationRejectsBindMountAliases"},
 		},
-	},
-	{
-		binary: "/tokenbench-tests/tokenbench-command.test", timeout: "2m",
-		names: []string{"TestPhysicalPathSeparationRejectsBindMountAliases"},
-	},
-	{
-		binary: "/tokenbench-tests/source.test", timeout: "2m",
-		names: []string{"TestPrivilegedTreeDigestRejectsMountedGitlink"},
-	},
-	{
-		binary: "/tokenbench-tests/snapshot.test", timeout: "2m",
-		names: []string{
-			"TestImmutableFileHasMeasuredFSVerity",
-			"TestFSVerityMerkleBlockSizeIsPageCompatible",
-			"TestReadOnlySelfBindFailsClosedWithoutAuthority",
-			"TestPrivilegedMountedAuthorityCloseReleasesKernelBoundary",
+		{
+			binary: "/tokenbench-tests/source.test", timeout: "2m",
+			names: []string{"TestPrivilegedTreeDigestRejectsMountedGitlink"},
 		},
-		environment: map[string]string{
-			"TOKENBENCH_FSVERITY_TEST_ROOT": fsverityRoot,
-			"TMPDIR":                        fsverityRoot + "/tmp",
+		{
+			binary: "/tokenbench-tests/snapshot.test", timeout: "2m",
+			names: []string{
+				"TestImmutableFileHasMeasuredFSVerity",
+				"TestFSVerityMerkleBlockSizeIsPageCompatible",
+				"TestReadOnlySelfBindFailsClosedWithoutAuthority",
+				"TestPrivilegedMountedAuthorityCloseReleasesKernelBoundary",
+			},
+			environment: map[string]string{
+				"TOKENBENCH_FSVERITY_TEST_ROOT": fsverityRoot,
+				"TMPDIR":                        fsverityRoot + "/tmp",
+			},
 		},
-	},
-	{
-		binary: "/tokenbench-tests/workspace.test", timeout: "2m",
-		names: []string{
-			"TestPrivilegedWorkspaceMountLifecycle",
-			"TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout",
-			"TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts",
-			"TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach",
-			"TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup",
-			"TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair",
-			"TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot",
+		{
+			binary: "/tokenbench-tests/workspace.test", timeout: "2m",
+			names: []string{
+				"TestPrivilegedWorkspaceMountLifecycle",
+				"TestPrivilegedWorkspaceMinimumEntryLimitReservesPrivateLayout",
+				"TestPrivilegedWorkspaceCleanupFollowsRelocatedActiveMounts",
+				"TestPrivilegedWorkspaceCleanupFollowsRootRelocatedDuringAttach",
+				"TestPrivilegedWorkspaceRestrictiveUmaskConstructionAndCleanup",
+				"TestPrivilegedWorkspaceUnidentifiedPostMkdirClosesPair",
+				"TestPrivilegedWorkspaceMaximumEntriesIncludesCacheRoot",
+			},
 		},
-	},
+	}
 }
 
 func containerMain(stdout, stderr io.Writer) (resultErr error) {
@@ -95,11 +100,6 @@ func containerMain(stdout, stderr io.Writer) (resultErr error) {
 	}
 	if err := assertDistinctNamespace("cgroup", os.Getenv("TOKENBENCH_HOST_CGROUP_NAMESPACE")); err != nil {
 		return err
-	}
-	for _, name := range []string{"mkfs.ext4", "mount", "umount"} {
-		if _, err := exec.LookPath(name); err != nil {
-			return fmt.Errorf("required command is unavailable: %s", name)
-		}
 	}
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_PRIVATE, ""); err != nil {
 		return fmt.Errorf("make container mount tree private: %w", err)
@@ -181,19 +181,19 @@ func setupFSVerity(stdout, stderr io.Writer) (func() error, error) {
 			_ = os.Remove(fsverityRoot)
 		}
 	}()
-	if err := runExternal(stdout, stderr, "mount", "-t", "ext4", "-o", "loop,nosuid,nodev", fsverityImage, fsverityRoot); err != nil {
+	if err := runExternal(stdout, stderr, "mount", "-i", "-t", "ext4", "-o", "loop,nosuid,nodev", fsverityImage, fsverityRoot); err != nil {
 		return nil, fmt.Errorf("mount fs-verity image: %w", err)
 	}
 	mounted = true
 	if err := os.Mkdir(filepath.Join(fsverityRoot, "tmp"), 0o755); err != nil {
-		_ = runExternal(stdout, stderr, "umount", fsverityRoot)
+		_ = runExternal(stdout, stderr, "umount", "-i", fsverityRoot)
 		_ = os.Remove(fsverityRoot)
 		return nil, fmt.Errorf("create fs-verity temporary directory: %w", err)
 	}
 	removeImage = false
 	return func() error {
 		var cleanupErr error
-		if err := runExternal(stdout, stderr, "umount", fsverityRoot); err != nil {
+		if err := runExternal(stdout, stderr, "umount", "-i", fsverityRoot); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("unmount fs-verity image: %w", err))
 		} else if err := os.Remove(fsverityRoot); err != nil {
 			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("remove fs-verity mountpoint: %w", err))
@@ -206,10 +206,39 @@ func setupFSVerity(stdout, stderr io.Writer) (func() error, error) {
 }
 
 func runExternal(stdout, stderr io.Writer, name string, arguments ...string) error {
-	command := exec.Command(name, arguments...)
+	if err := validateExternalInvocation(name, arguments); err != nil {
+		return err
+	}
+	command, nativeFile, err := processpolicy.NativeCommand(name, arguments...)
+	if err != nil {
+		return fmt.Errorf("pin privileged native command %q: %w", name, err)
+	}
 	command.Stdout = stdout
 	command.Stderr = stderr
-	return command.Run()
+	commandErr := command.Run()
+	closeErr := nativeFile.Close()
+	return errors.Join(commandErr, closeErr)
+}
+
+func validateExternalInvocation(name string, arguments []string) error {
+	if err := processpolicy.Validate(name, arguments...); err != nil {
+		return fmt.Errorf("validate privileged external command: %w", err)
+	}
+	var expected []string
+	switch name {
+	case "mkfs.ext4":
+		expected = []string{"-q", "-F", "-O", "verity", fsverityImage}
+	case "mount":
+		expected = []string{"-i", "-t", "ext4", "-o", "loop,nosuid,nodev", fsverityImage, fsverityRoot}
+	case "umount":
+		expected = []string{"-i", fsverityRoot}
+	default:
+		return fmt.Errorf("privileged external executable %q has no approved role", name)
+	}
+	if !slices.Equal(arguments, expected) {
+		return fmt.Errorf("privileged external executable %q received arguments outside its fixed role", name)
+	}
+	return nil
 }
 
 func setupCgroupDelegation() (string, func() error, error) {
@@ -330,27 +359,42 @@ func closeCgroupDelegation(delegation string) error {
 }
 
 func runPrivilegedSuite(suite privilegedSuite, delegation string, stdout io.Writer) error {
-	arguments := []string{
-		"-test.run=" + testExpression(suite.names),
-		"-test.v", "-test.count=1", "-test.timeout=" + suite.timeout,
+	if err := validatePrivilegedSuiteInvocation(suite, delegation); err != nil {
+		return err
 	}
+	arguments := privilegedSuiteArguments(suite)
 	environment := map[string]string{requiredEnvironment: "1"}
 	for key, value := range suite.environment {
 		environment[key] = value
 	}
 	var command *exec.Cmd
+	var nativeFile *os.File
 	if suite.delegated {
 		coordinator, err := os.Executable()
 		if err != nil {
 			return fmt.Errorf("resolve privileged test coordinator: %w", err)
 		}
 		entryArguments := append([]string{"--cgroup-entry", delegation, suite.binary}, arguments...)
-		command = exec.Command(coordinator, entryArguments...)
+		if err := processpolicy.Validate(coordinator, entryArguments...); err != nil {
+			return fmt.Errorf("validate delegated suite coordinator: %w", err)
+		}
+		command, nativeFile, err = processpolicy.NativeCommand(coordinator, entryArguments...)
+		if err != nil {
+			return fmt.Errorf("pin privileged test coordinator image: %w", err)
+		}
 	} else {
-		command = exec.Command(suite.binary, arguments...)
+		if err := processpolicy.Validate(suite.binary, arguments...); err != nil {
+			return fmt.Errorf("validate privileged suite process: %w", err)
+		}
+		var err error
+		command, nativeFile, err = processpolicy.NativeCommand(suite.binary, arguments...)
+		if err != nil {
+			return fmt.Errorf("pin privileged suite image: %w", err)
+		}
 	}
 	command.Env = replaceEnvironment(os.Environ(), environment)
 	output, err := command.CombinedOutput()
+	err = errors.Join(err, nativeFile.Close())
 	_, _ = stdout.Write(output)
 	if err != nil {
 		return fmt.Errorf("privileged test binary %s failed: %w", filepath.Base(suite.binary), err)
@@ -361,23 +405,84 @@ func runPrivilegedSuite(suite privilegedSuite, delegation string, stdout io.Writ
 	return nil
 }
 
+func privilegedSuiteArguments(suite privilegedSuite) []string {
+	return []string{
+		"-test.run=" + testExpression(suite.names),
+		"-test.v", "-test.count=1", "-test.timeout=" + suite.timeout,
+	}
+}
+
+func validatePrivilegedSuiteInvocation(suite privilegedSuite, delegation string) error {
+	if delegation != filepath.Join(cgroupRoot, "tokenbench-ci-delegation-v1") {
+		return errors.New("privileged suite received an unexpected cgroup delegation")
+	}
+	for _, expected := range configuredPrivilegedSuites() {
+		if suite.binary != expected.binary {
+			continue
+		}
+		if suite.timeout != expected.timeout || suite.delegated != expected.delegated ||
+			!slices.Equal(suite.names, expected.names) || !equalEnvironment(suite.environment, expected.environment) {
+			return fmt.Errorf("privileged suite %s does not match its fixed configuration", filepath.Base(suite.binary))
+		}
+		if err := processpolicy.Validate(suite.binary, privilegedSuiteArguments(suite)...); err != nil {
+			return fmt.Errorf("validate privileged suite configuration: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("privileged suite binary %q has no approved role", suite.binary)
+}
+
+func equalEnvironment(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		expected, found := right[key]
+		if !found || expected != value {
+			return false
+		}
+	}
+	return true
+}
+
 func cgroupEntry(delegation, binary string, arguments []string) error {
 	if os.Getenv(containerEnvironment) != "1" {
 		return errors.New("cgroup entry requires its container marker")
 	}
-	cleanDelegation := filepath.Clean(delegation)
-	if cleanDelegation != delegation || !strings.HasPrefix(cleanDelegation, cgroupRoot+string(filepath.Separator)) {
-		return errors.New("delegated cgroup path is invalid")
+	if err := validateCgroupEntryInvocation(delegation, binary, arguments); err != nil {
+		return err
 	}
-	if !filepath.IsAbs(binary) || len(arguments) == 0 {
-		return errors.New("cgroup entry requires an absolute binary and test arguments")
+	_, executable, err := processpolicy.OpenNativeExecutable(binary)
+	if err != nil {
+		return fmt.Errorf("pin delegated suite image: %w", err)
 	}
+	defer executable.Close()
 	pid := strconv.Itoa(os.Getpid()) + "\n"
 	if err := os.WriteFile(filepath.Join(delegation, "cgroup.procs"), []byte(pid), 0); err != nil {
 		return fmt.Errorf("enter delegated cgroup: %w", err)
 	}
 	environment := replaceEnvironment(os.Environ(), map[string]string{requiredEnvironment: "1"})
-	return syscall.Exec(binary, append([]string{binary}, arguments...), environment)
+	executablePath := "/proc/self/fd/" + strconv.FormatUint(uint64(executable.Fd()), 10)
+	return syscall.Exec(executablePath, append([]string{binary}, arguments...), environment)
+}
+
+func validateCgroupEntryInvocation(delegation, binary string, arguments []string) error {
+	if delegation != filepath.Join(cgroupRoot, "tokenbench-ci-delegation-v1") {
+		return errors.New("delegated cgroup path does not match the fixed suite delegation")
+	}
+	for _, suite := range configuredPrivilegedSuites() {
+		if !suite.delegated || suite.binary != binary {
+			continue
+		}
+		if !slices.Equal(arguments, privilegedSuiteArguments(suite)) {
+			return errors.New("cgroup entry arguments do not match the delegated suite role")
+		}
+		if err := processpolicy.Validate(binary, arguments...); err != nil {
+			return fmt.Errorf("validate cgroup entry process: %w", err)
+		}
+		return nil
+	}
+	return fmt.Errorf("cgroup entry binary %q has no approved delegated-suite role", binary)
 }
 
 func readWords(path string) ([]string, error) {

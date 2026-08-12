@@ -1085,8 +1085,15 @@ func requireCgroupResourceKeys(got, want cgroupResourceCounterKeys) error {
 }
 
 func requireZeroInitialResources(outcome *harness.ResourceOutcome) error {
+	// nr_periods is the number of elapsed CFS bandwidth periods. A fresh,
+	// empty cgroup can observe it advancing as soon as the kernel activates a
+	// quota timer, so it is not evidence that a task consumed resources.
+	for _, counter := range outcome.CPUStat {
+		if counter.Name != "nr_periods" && counter.Value != 0 {
+			return fmt.Errorf("fresh arm cgroup counter %s started at %d", counter.Name, counter.Value)
+		}
+	}
 	for _, counters := range [][]harness.ResourceCounter{
-		outcome.CPUStat,
 		outcome.MemoryEvents,
 		outcome.MemoryEventsLocal,
 		outcome.PIDsEvents,

@@ -14,12 +14,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 const (
@@ -56,6 +58,9 @@ type Config struct {
 // New constructs an external adapter. Command must be absolute, and Environment
 // is complete rather than merged with the parent process environment.
 func New(config Config) (*Adapter, error) {
+	if err := processpolicy.Validate(config.Command, config.Arguments...); err != nil {
+		return nil, fmt.Errorf("reject external adapter invocation: %w", err)
+	}
 	switch {
 	case !validString(config.Command):
 		return nil, errors.New("external adapter command contains invalid text")
@@ -102,6 +107,22 @@ func New(config Config) (*Adapter, error) {
 	if err != nil {
 		return nil, err
 	}
+	commandPath, commandFile, err := processpolicy.OpenNativeExecutable(config.Command)
+	if err != nil {
+		return nil, fmt.Errorf("pin external adapter image: %w", err)
+	}
+	openedDigest, err := executableFileSHA256(commandFile)
+	if err != nil {
+		_ = commandFile.Close()
+		return nil, err
+	}
+	if openedDigest != commandDigest {
+		_ = commandFile.Close()
+		return nil, errors.New("external adapter executable changed while pinning")
+	}
+	if err := commandFile.Close(); err != nil {
+		return nil, fmt.Errorf("close pinned external adapter image: %w", err)
+	}
 	controlDigest, err := configurationSHA256(config, commandDigest, maxOutput)
 	if err != nil {
 		return nil, err
@@ -111,7 +132,7 @@ func New(config Config) (*Adapter, error) {
 		controlSHA256: controlDigest,
 		commandSHA256: commandDigest,
 		arguments:     append([]string(nil), config.Arguments...),
-		command:       filepath.Clean(config.Command),
+		command:       commandPath,
 		kind:          config.Kind,
 		timeout:       config.Timeout,
 		maxOutput:     maxOutput,
@@ -210,6 +231,23 @@ func executableSHA256(path string) (string, error) {
 		!before.ModTime().Equal(openedAfter.ModTime()) ||
 		!before.ModTime().Equal(after.ModTime()) {
 		return "", errors.New("external adapter executable changed while hashing")
+	}
+	return hex.EncodeToString(hasher.Sum(nil)), nil
+}
+
+func executableFileSHA256(file *os.File) (string, error) {
+	if file == nil {
+		return "", errors.New("external adapter executable descriptor is required")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("rewind external adapter executable: %w", err)
+	}
+	hasher := sha256.New()
+	if _, err := io.Copy(hasher, file); err != nil {
+		return "", fmt.Errorf("read external adapter executable: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", fmt.Errorf("restore external adapter executable offset: %w", err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
@@ -341,7 +379,15 @@ func (adapter *Adapter) call(
 	ctx context.Context,
 	request wireRequest,
 ) (wireResponse, error) {
-	currentDigest, err := executableSHA256(adapter.command)
+	commandPath, commandFile, err := processpolicy.OpenNativeExecutable(adapter.command)
+	if err != nil {
+		return wireResponse{}, fmt.Errorf("reopen external adapter image: %w", err)
+	}
+	defer commandFile.Close()
+	if commandPath != adapter.command {
+		return wireResponse{}, errors.New("external adapter executable path identity changed")
+	}
+	currentDigest, err := executableFileSHA256(commandFile)
 	if err != nil {
 		return wireResponse{}, err
 	}
@@ -354,7 +400,18 @@ func (adapter *Adapter) call(
 	}
 	callContext, cancel := context.WithTimeout(ctx, adapter.timeout)
 	defer cancel()
-	command := exec.CommandContext(callContext, adapter.command, adapter.arguments...)
+	launchPath := adapter.command
+	if runtime.GOOS != "windows" {
+		launchPath = "/dev/fd/3"
+		if runtime.GOOS == "linux" {
+			launchPath = "/proc/self/fd/3"
+		}
+	}
+	command := exec.CommandContext(callContext, launchPath, adapter.arguments...)
+	command.Args[0] = adapter.command
+	if runtime.GOOS != "windows" {
+		command.ExtraFiles = []*os.File{commandFile}
+	}
 	command.Dir = filepath.Dir(adapter.command)
 	command.Env = environmentList(adapter.environment)
 	command.Stdin = bytes.NewReader(input)
@@ -366,7 +423,7 @@ func (adapter *Adapter) call(
 	isolateCommand(command)
 	runErr := command.Run()
 	cleanupCommandGroup(command)
-	afterDigest, verifyErr := executableSHA256(adapter.command)
+	afterDigest, verifyErr := executableFileSHA256(commandFile)
 	if verifyErr != nil {
 		return wireResponse{}, fmt.Errorf(
 			"reverify external adapter executable: %w",

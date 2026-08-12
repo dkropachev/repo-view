@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 type commandCall struct {
@@ -40,14 +42,23 @@ func (runner *fixtureRunner) run(
 	})
 	switch name {
 	case "git":
+		if processpolicy.IsGitRepositoryConfigQuery(arguments) {
+			return nil, nil
+		}
 		if slices.Equal(arguments, []string{"rev-parse", "HEAD"}) {
 			return []byte(runner.commit + "\n"), nil
 		}
-		if len(arguments) >= 3 && slices.Equal(arguments[:3], []string{"diff", "--quiet", "--"}) {
+		if len(arguments) >= 6 && slices.Equal(
+			arguments[:6],
+			[]string{"diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--quiet", "--"},
+		) {
 			return nil, runner.diffError
 		}
 		return nil, errors.New("unexpected git invocation")
-	case "npm":
+	case "tree-sitter":
+		if slices.Equal(arguments, []string{"--version"}) {
+			return []byte("tree-sitter " + treeSitterCLIVersion + "\n"), nil
+		}
 		parserPath := filepath.Join(directory, "src", "parser.c")
 		if err := os.WriteFile(parserPath, runner.generatedParser, 0o644); err != nil {
 			return nil, err
@@ -286,7 +297,7 @@ func TestGenerateSwiftStagesParserAndCorpusWithFakeExecutables(t *testing.T) {
 			t.Errorf("copied %s = %q, want %q", name, got, want)
 		}
 	}
-	if !hasCommand(runner.calls, "npm", "--package=tree-sitter-cli@0.23.0", "--abi", "14", "--no-bindings") {
+	if !hasCommand(runner.calls, "tree-sitter", "generate", "--abi", "14", "--no-bindings") {
 		t.Error("pinned tree-sitter-cli ABI 14 invocation not observed")
 	}
 	if !hasGoTool(runner.calls, "split.go") {
@@ -322,7 +333,10 @@ func writeFixture(t *testing.T, path string, data []byte) {
 
 func assertPinnedCommands(t *testing.T, calls []commandCall, spec grammarSpec) {
 	t.Helper()
-	wantDiff := append([]string{"diff", "--quiet", "--"}, spec.dirtyPaths...)
+	wantDiff := append(
+		[]string{"diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--quiet", "--"},
+		spec.dirtyPaths...,
+	)
 	if !hasExactCommand(calls, "git", wantDiff...) {
 		t.Errorf("git dirty-input invocation not observed: %v", wantDiff)
 	}

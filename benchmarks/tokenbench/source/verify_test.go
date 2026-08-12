@@ -501,8 +501,20 @@ func TestVerifyIgnoresPATHAfterExpectedGitIsPinned(t *testing.T) {
 
 func TestMain(m *testing.M) {
 	executable, executableErr := os.Executable()
-	if executableErr == nil && filepath.Base(executable) == "git" {
-		os.Exit(97)
+	if executableErr == nil {
+		switch filepath.Base(executable) {
+		case "git":
+			os.Exit(97)
+		case "fsmonitor-sentinel":
+			if err := os.WriteFile(
+				filepath.Join(".git", "fsmonitor-invoked"),
+				[]byte("invoked\n"),
+				0o600,
+			); err != nil {
+				os.Exit(98)
+			}
+			os.Exit(99)
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -869,8 +881,50 @@ func TestVerifyRejectsUnallowlistedLocalConfiguration(t *testing.T) {
 	_, err = Verify(context.Background(), expectedSource(
 		t, repository.root, repository.head, repository.base, digest,
 	))
-	if err == nil || !strings.Contains(err.Error(), "unsafe local Git configuration") {
+	if err == nil || !strings.Contains(err.Error(), "unsafe repository Git configuration") {
 		t.Fatalf("expected unsafe-config error, got %v", err)
+	}
+}
+
+func TestSourceGitRunnerDisablesMaliciousLocalFilesystemMonitor(t *testing.T) {
+	repository := newRepository(t)
+	digest, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	monitor := filepath.Join(repository.root, ".git", "fsmonitor-sentinel")
+	marker := filepath.Join(repository.root, ".git", "fsmonitor-invoked")
+	copySourceTestExecutable(t, monitor)
+	runGit(t, repository.root, "config", "core.fsmonitor", monitor)
+
+	gitRunner, err := resolveGitRunner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := gitRunner.close(); closeErr != nil {
+			t.Errorf("close Git runner: %v", closeErr)
+		}
+	}()
+	if _, err := gitRunner.output(
+		context.Background(),
+		repository.root,
+		"status", "--porcelain=v1", "--untracked-files=all",
+	); err != nil {
+		t.Fatalf("run isolated Git status: %v", err)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("local core.fsmonitor was executed: %v", err)
+	}
+
+	_, err = Verify(context.Background(), expectedSource(
+		t, repository.root, repository.head, repository.base, digest,
+	))
+	if err == nil || !strings.Contains(err.Error(), "unsafe repository Git configuration") {
+		t.Fatalf("expected unsafe-config error, got %v", err)
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("Verify executed local core.fsmonitor: %v", statErr)
 	}
 }
 

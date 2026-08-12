@@ -6,7 +6,7 @@ commit `8d02b7ff390a17a43ce90c4e987c49315cfc4be6` (2026-08-02).
 The upstream repository deliberately omits `parser.c`, so generation has two
 pinned stages:
 
-1. `tree-sitter-cli@0.23.0` generates an ABI 14 `parser.c` from the tracked
+1. The native `tree-sitter` 0.23.0 executable generates an ABI 14 `parser.c` from the tracked
    `src/grammar.json`.
 2. `github.com/dcosson/treesitter-go/cmd/tsgo-generate@v0.1.0` converts that
    parser to the pure-Go runtime representation.

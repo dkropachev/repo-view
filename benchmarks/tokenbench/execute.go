@@ -19,7 +19,7 @@ import (
 )
 
 // RunSchemaVersion is the current reconstructed run schema.
-const RunSchemaVersion = "tokenbench.run/v4"
+const RunSchemaVersion = "tokenbench.run/v5"
 
 // Arm identifies one side of a paired attempt.
 type Arm string
@@ -102,7 +102,7 @@ type AttemptFailure struct {
 
 // ArmRun contains raw capture and a normalized observation when decoding
 // succeeds. Failed arms are retained; they are never silently dropped.
-type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v4 JSON.
+type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v5 JSON.
 	Failure     *AttemptFailure      `json:"failure,omitempty"`
 	Observation *harness.Observation `json:"observation,omitempty"`
 	Raw         harness.RawExecution `json:"raw"`
@@ -111,7 +111,7 @@ type ArmRun struct { //nolint:govet,nolintlint // Field order defines tokenbench
 
 // Run is one randomized, paired execution. The embedded plan is audit data;
 // it still cannot be used as an execution capability.
-type Run struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v4 JSON.
+type Run struct { //nolint:govet,nolintlint // Field order defines tokenbench.run/v5 JSON.
 	Plan             ResolvedPlan     `json:"plan"`
 	Baseline         ArmRun           `json:"baseline"`
 	Candidate        ArmRun           `json:"candidate"`

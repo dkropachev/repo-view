@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 // Generate regenerates a pinned grammar and installs all validated outputs.
@@ -215,6 +217,15 @@ func verifyCheckout(
 	spec grammarSpec,
 	sourceRoot string,
 ) error {
+	configuration, err := runner.run(
+		ctx, sourceRoot, "git", processpolicy.GitRepositoryConfigArguments()...,
+	)
+	if err != nil {
+		return fmt.Errorf("inspect %s repository Git configuration: %w", spec.upstreamName, err)
+	}
+	if err := processpolicy.ValidateGitWorktreeConfig(configuration); err != nil {
+		return fmt.Errorf("reject %s repository Git configuration: %w", spec.upstreamName, err)
+	}
 	output, err := runner.run(ctx, sourceRoot, "git", "rev-parse", "HEAD")
 	if err != nil {
 		return fmt.Errorf("read %s revision: %w", spec.upstreamName, err)
@@ -226,7 +237,10 @@ func verifyCheckout(
 			spec.upstreamCommit,
 		)
 	}
-	diffArguments := append([]string{"diff", "--quiet", "--"}, spec.dirtyPaths...)
+	diffArguments := append(
+		[]string{"diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty", "--quiet", "--"},
+		spec.dirtyPaths...,
+	)
 	if _, err := runner.run(ctx, sourceRoot, "git", diffArguments...); err != nil {
 		return errors.New(spec.dirtyMessage)
 	}
@@ -264,14 +278,20 @@ func prepareParser(
 	if err := os.WriteFile(grammarSource, input, 0o644); err != nil {
 		return "", fmt.Errorf("stage grammar.json: %w", err)
 	}
+	version, err := runner.run(ctx, grammarRoot, "tree-sitter", "--version")
+	if err != nil {
+		return "", fmt.Errorf("verify tree-sitter CLI: %w", err)
+	}
+	if strings.TrimSpace(string(version)) != "tree-sitter "+treeSitterCLIVersion {
+		return "", fmt.Errorf(
+			"tree-sitter CLI version is %q, want %s",
+			strings.TrimSpace(string(version)),
+			treeSitterCLIVersion,
+		)
+	}
 	if _, err := runner.run(
 		ctx,
 		grammarRoot,
-		"npm",
-		"exec",
-		"--yes",
-		"--package=tree-sitter-cli@"+treeSitterCLIVersion,
-		"--",
 		"tree-sitter",
 		"generate",
 		"--abi",

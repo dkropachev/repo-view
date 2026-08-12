@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
 const (
@@ -1102,6 +1103,9 @@ func openPinnedExecutable(
 	requireStatic bool,
 ) (*pinnedExecutionTarget, error) {
 	path := request.Process.Argv[0]
+	if err := processpolicy.ValidateExecutable(path); err != nil {
+		return nil, fmt.Errorf("approved executable violates process policy: %w", err)
+	}
 	if path != request.Invocation.Executable {
 		return nil, errors.New("approved process executable does not match invocation")
 	}
@@ -1129,6 +1133,9 @@ func openPinnedExecutable(
 	opened, err := file.Stat()
 	if err != nil || !os.SameFile(before, opened) {
 		return nil, errors.New("approved executable changed while opening")
+	}
+	if err := processpolicy.ValidateNativeFile(file); err != nil {
+		return nil, err
 	}
 	// Conformant targets are executed from the exact fs-verity-protected
 	// execution-snapshot pathname committed by the plan. Unlike a deleted

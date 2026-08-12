@@ -19,7 +19,7 @@ import (
 
 const (
 	// PlanSchemaVersion is the schema emitted after pair resolution.
-	PlanSchemaVersion = "tokenbench.plan/v5"
+	PlanSchemaVersion = "tokenbench.plan/v6"
 	// MaximumPlanObjectBytes is the common pre-execution and evidence-store
 	// ceiling for one canonical plan. Keeping the format limit here lets Pair
 	// reject an oversized embedded snapshot before either arm is launched.
@@ -480,7 +480,7 @@ func (plan ResolvedPlan) Validate() error {
 	}
 	if plan.Publishable {
 		if plan.OriginInputs == nil || plan.ExecutionInputs == nil || plan.ArtifactBundle == nil {
-			return errors.New("publishable v5 plan requires origin, execution, and artifact inputs")
+			return errors.New("publishable v6 plan requires origin, execution, and artifact inputs")
 		}
 		if err := executionsnapshot.ValidateBinding(
 			*plan.OriginInputs,
@@ -496,7 +496,7 @@ func (plan ResolvedPlan) Validate() error {
 			return errors.Join(errors.New("plan artifacts differ from this tokenbench binary policy"), err)
 		}
 	} else if plan.OriginInputs != nil || plan.ExecutionInputs != nil || plan.ArtifactBundle != nil {
-		return errors.New("nonpublishable v5 plan must not claim immutable input authority")
+		return errors.New("nonpublishable v6 plan must not claim immutable input authority")
 	}
 	authoredSuite, err := decodeEmbeddedSuite(plan.SuiteJSON)
 	if err != nil {

@@ -48,28 +48,64 @@ func TestRunSupportsNavigationCommandSubsetWithoutExternalShell(t *testing.T) {
 	}
 }
 
-func TestRunSupportsVariablesConditionalsAndRedirection(t *testing.T) {
+func TestParserBuildsLiteralArgvPipeline(t *testing.T) {
 	t.Parallel()
-	directory := t.TempDir()
-	output := filepath.Join(directory, "output.txt")
-	command := "value=ok; if [ \"$value\" = ok ]; then printf '%s\\n' \"$value\" > " + quoteWord(output) + "; fi"
-	var stdout, stderr bytes.Buffer
-	if exit := Run(context.Background(), []string{"-c", command}, nil, &stdout, &stderr); exit != 0 {
-		t.Fatalf("Run() exit=%d stderr=%q", exit, stderr.String())
+	program, err := parseCommandProgram(`rg 'a|$b*' "two words" plain\ value | wc -l`)
+	if err != nil {
+		t.Fatal(err)
 	}
-	raw, err := os.ReadFile(output)
-	if err != nil || string(raw) != "ok\n" {
-		t.Fatalf("redirection bytes=%q err=%v", raw, err)
+	want := []string{"rg", "a|$b*", "two words", "plain value"}
+	if len(program.pipeline) != 2 || strings.Join(program.pipeline[0], "\x00") != strings.Join(want, "\x00") ||
+		strings.Join(program.pipeline[1], "\x00") != "wc\x00-l" {
+		t.Fatalf("parseCommandProgram()=%q", program.pipeline)
 	}
 }
 
-func TestRunPreservesExitStatusAndRejectsOtherArgv(t *testing.T) {
+func TestRunRejectsShellLanguage(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"source config",
+		". config",
+		"eval 'rg --files'",
+		"value=ok rg needle",
+		"rg $value",
+		`rg "${value}"`,
+		"while true; do true; done",
+		"until false; do true; done",
+		"if true; then rg needle; fi",
+		"for value in x; do rg needle; done",
+		"case x in x) rg needle;; esac",
+		"lookup() { rg needle; }",
+		"rg $(cat input)",
+		"rg `cat input`",
+		"rg <(cat input)",
+		"cat input > >(cat)",
+		"rg needle &",
+		"rg needle && wc -l",
+		"rg needle || wc -l",
+		"rg needle; wc -l",
+		"cat > output",
+		"cat < input",
+		"cat <<EOF",
+		"rg *.go",
+		"rg file?.go",
+		"rg {one,two}",
+		"rg needle\nwc -l",
+		"# rg needle",
+	} {
+		var stdout, stderr bytes.Buffer
+		if exit := Run(context.Background(), []string{"-c", command}, nil, &stdout, &stderr); exit != 2 {
+			t.Errorf("Run(%q)=%d, want parse rejection 2; stderr=%q", command, exit, stderr.String())
+		}
+	}
+}
+
+func TestRunPreservesExternalExitStatusAndRejectsOtherArgv(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
 		args []string
 		want int
 	}{
-		{args: []string{"-c", "exit 17"}, want: 17},
 		{args: []string{"-lc", "true"}, want: 2},
 		{args: []string{"-c"}, want: 2},
 		{args: nil, want: 2},
@@ -79,16 +115,17 @@ func TestRunPreservesExitStatusAndRejectsOtherArgv(t *testing.T) {
 			t.Fatalf("Run(%q)=%d, want %d; stderr=%q", test.args, got, test.want, stderr.String())
 		}
 	}
-}
 
-func TestRunHonorsCancellation(t *testing.T) {
-	t.Parallel()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
 	var stdout, stderr bytes.Buffer
-	exit := Run(ctx, []string{"-c", "while :; do :; done"}, nil, &stdout, &stderr)
-	if exit != 124 {
-		t.Fatalf("Run(cancelled)=%d, want 124; stderr=%q", exit, stderr.String())
+	exit := Run(
+		context.Background(),
+		[]string{"-c", "grep absent"},
+		strings.NewReader("present\n"),
+		&stdout,
+		&stderr,
+	)
+	if exit != 1 || stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("Run(grep no match)=%d stdout=%q stderr=%q", exit, stdout.String(), stderr.String())
 	}
 }
 
@@ -98,7 +135,7 @@ func TestRunCancelsExternalCommandWithoutGracePeriod(t *testing.T) {
 	defer cancel()
 	var stdout, stderr bytes.Buffer
 	started := time.Now()
-	exit := Run(ctx, []string{"-c", "sleep 30"}, nil, &stdout, &stderr)
+	exit := Run(ctx, []string{"-c", "tail -f /dev/null"}, nil, &stdout, &stderr)
 	if elapsed := time.Since(started); exit != 124 || elapsed > time.Second {
 		t.Fatalf(
 			"Run(cancelled external)=%d after %s, want 124 before 1s; stderr=%q",
@@ -106,6 +143,85 @@ func TestRunCancelsExternalCommandWithoutGracePeriod(t *testing.T) {
 			elapsed,
 			stderr.String(),
 		)
+	}
+}
+
+func TestRunRejectsExecutablePathsAndScriptImages(t *testing.T) {
+	for _, command := range []string{"./tool.sh", "/tmp/tool.py", "/bin/cat"} {
+		var stdout, stderr bytes.Buffer
+		if exit := Run(context.Background(), []string{"-c", command}, nil, &stdout, &stderr); exit != 125 {
+			t.Errorf("Run(%q)=%d, want policy rejection 125; stderr=%q", command, exit, stderr.String())
+		}
+	}
+
+	directory := t.TempDir()
+	disguisedScript := filepath.Join(directory, "cat")
+	if err := os.WriteFile(disguisedScript, []byte("#!/bin/false\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", directory)
+	var stdout, stderr bytes.Buffer
+	if exit := Run(context.Background(), []string{"-c", "cat"}, nil, &stdout, &stderr); exit != 125 {
+		t.Fatalf("Run(disguised script)=%d, want native-image rejection 125; stderr=%q", exit, stderr.String())
+	}
+}
+
+func TestClosedCommandEnvironmentDropsToolConfiguration(t *testing.T) {
+	t.Parallel()
+	got := closedCommandEnvironment()
+	want := []string{"HOME=/", "LC_ALL=C", "PATH=", "TZ=UTC"}
+	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("closedCommandEnvironment()=%q, want %q", got, want)
+	}
+}
+
+func TestValidateExternalCommandRejectsScriptAndDelegatingTools(t *testing.T) {
+	t.Parallel()
+	for _, arguments := range [][]string{
+		{"bash", "-c", "true"},
+		{"awk", "BEGIN { system(\"sh\") }"},
+		{"sed", "-n", "1p"},
+		{"xargs", "sh"},
+		{"find", ".", "-exec", "sh", "{}", ";"},
+		{"find", ".", "-delete"},
+		{"find", ".", "-fprintf", "output", "%p"},
+		{"rg", "--pre=python3", "needle"},
+		{"rg", "--search-zip", "needle"},
+		{"rg", "-z", "needle"},
+		{"rg", "-nzi", "needle"},
+		{"sort", "--co=/bin/true", "input"},
+		{"sort", "--com=/bin/true", "input"},
+		{"sort", "--compress-program=gzip", "input"},
+		{"sort", "-ooutput", "input"},
+		{"sort", "-uooutput", "input"},
+		{"sort", "-ruooutput", "input"},
+		{"sort", "--o=output", "input"},
+		{"sort", "--out=output", "input"},
+		{"sort", "--output=output", "input"},
+		{"sort", "-T", "/tmp", "input"},
+		{"sort", "-T/tmp", "input"},
+		{"sort", "-uT/tmp", "input"},
+		{"sort", "--t=/tmp", "input"},
+		{"sort", "--temporary-directory=/tmp", "input"},
+		{"/bin/cat", "input"},
+		{"./cat", "input"},
+	} {
+		if err := validateExternalCommand(arguments); err == nil {
+			t.Errorf("external command accepted: %q", arguments)
+		}
+	}
+	for _, arguments := range [][]string{
+		{"rg", "needle", "tool.sh"},
+		{"rg", "--no-search-zip", "needle"},
+		{"rg", "--", "-z"},
+		{"find", ".", "-name", "*.sh"},
+		{"cat", "tool.sh"},
+		{"sort", "--", "-ooperand"},
+		{"sort", "--", "-Toperand"},
+	} {
+		if err := validateExternalCommand(arguments); err != nil {
+			t.Errorf("inert script path rejected for %q: %v", arguments, err)
+		}
 	}
 }
 
