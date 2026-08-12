@@ -15,7 +15,7 @@ It can also drop comments and Python docstrings from returned snippets.
 
 Install the latest source with Go:
 
-```bash
+```console
 go install github.com/yapless/scopesifter/cmd/scopesifter@latest
 ```
 
@@ -25,7 +25,7 @@ Version tags publish prebuilt Linux, macOS, and Windows binaries, plus a
 
 ## Navigation CLI
 
-```bash
+```console
 scopesifter find renderUser parseSession --root ./my-repo --include both --return scope --json
 scopesifter inspect src/app.go:42 src/session.go:18 --root ./my-repo --include scope --return scope --json
 scopesifter outline src/app.go src/session.go --root ./my-repo --return scope --json
@@ -169,7 +169,7 @@ from Git history.
 
 ## Validation
 
-```bash
+```console
 go run ./cmd/scopesifter-validate --cases 100
 ```
 
