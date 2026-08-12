@@ -27,7 +27,7 @@ var approvedDynamicProcessFileSHA256 = map[string]string{
 	"benchmarks/tokenbench/runner/codex/runtime.go":                       "686a1de9ee4289b080569cbec729d90d551b0f3bb94851c5b7d2397752348b52",
 	"benchmarks/tokenbench/runner/containment_linux.go":                   "9948b93c208647bbffc39ef1eb46a8a8cc43b092f6dee1b9fad18cbb36db4747",
 	"benchmarks/tokenbench/runner/executor.go":                            "0b70835603db6ce7d375794edc23383412363fc3eed9f1046d8faa1ee2011b60",
-	"benchmarks/tokenbench/runner/executor_test.go":                       "df29fe1c667126abbafb5213e1e957da8bff2da8ffce5e4612549a5220989587",
+	"benchmarks/tokenbench/runner/executor_test.go":                       "fb65c2541df6d72ed3ce6bfd37503c8f8a05fa278c26fdcfad17249582358d41",
 	"benchmarks/tokenbench/runner/privileged_linux_test.go":               "4f6065e1cc8823d835228acbd31519a40dddb49c2279e021ee083c668776e941",
 	"benchmarks/tokenbench/runner/processgroup_other.go":                  "bd7628265dbc6da64aedf7c200c887e0b14934222ad729db33a669d37f605704",
 	"benchmarks/tokenbench/runner/processgroup_unix.go":                   "aa8454b7ecc4eed04ab4eb27d82d6814b7b7feeea1bdd436191ca00e1477e547",

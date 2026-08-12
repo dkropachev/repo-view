@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/internal/processpolicy"
 	"golang.org/x/sys/unix"
 )
 
@@ -902,12 +903,23 @@ func dialProbeError(network, address string) error {
 }
 
 func spawnEscapedHelper() {
-	executable, err := os.Executable()
+	// The privileged fixture directory is deliberately not searchable after
+	// arm-init drops every capability. Pin the exact running image through the
+	// kernel's self magic link and execute that descriptor, rather than reopening
+	// os.Executable() by its host-owned bind-mount pathname.
+	executable, err := os.Open("/proc/self/exe")
 	if err != nil {
 		fmt.Fprint(os.Stderr, err)
 		os.Exit(3)
 	}
-	command := exec.Command(executable, "-test.run=^TestRunnerHelperProcess$")
+	if err := processpolicy.ValidateNativeFile(executable); err != nil {
+		_ = executable.Close()
+		fmt.Fprint(os.Stderr, err)
+		os.Exit(3)
+	}
+	command := exec.Command("/proc/self/fd/3", "-test.run=^TestRunnerHelperProcess$")
+	command.Args[0] = "tokenbench-detached-helper"
+	command.ExtraFiles = []*os.File{executable}
 	command.Env = make([]string, 0, len(os.Environ())+1)
 	for _, value := range os.Environ() {
 		if !strings.HasPrefix(value, "TOKENBENCH_OPERATION=") {
@@ -917,6 +929,13 @@ func spawnEscapedHelper() {
 	command.Env = append(command.Env, "TOKENBENCH_OPERATION=escaped-child")
 	command.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if err := command.Start(); err != nil {
+		_ = executable.Close()
+		fmt.Fprint(os.Stderr, err)
+		os.Exit(3)
+	}
+	if err := executable.Close(); err != nil {
+		_ = command.Process.Kill()
+		_ = command.Wait()
 		fmt.Fprint(os.Stderr, err)
 		os.Exit(3)
 	}
