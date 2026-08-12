@@ -10,14 +10,14 @@ The pinned inputs are:
 - `src/parser.c`: `70f193db454cfb1315d17d2d85879619e4b62295325bc4cbd4fe0f9fb96098e1`
 - `src/scanner.c`: `8a300c7da25290d5de076605fb46cc6b53b188d99aa9e8f34e928dbb7191935f`
 
-Regenerate from a clean checkout at that commit:
+Regenerate from a clean checkout at that commit through the Make entrypoint:
 
-```bash
-internal/kotlingrammar/generate.sh /path/to/tree-sitter-kotlin
+```text
+make -f make/grammar.mk generate-kotlin-grammar GRAMMAR_SOURCE=/path/to/tree-sitter-kotlin
 ```
 
 The generator normally targets a package inside `treesitter-go` and imports
-its `internal/core` package. The script deterministically redirects those
+its `internal/core` package. The Go generator deterministically redirects those
 references to the runtime's public facade, which re-exports the same types and
 constants. It moves the two largest numeric literals into the deterministic,
 little-endian `language_tables.bin` asset; `tables.go` validates and decodes

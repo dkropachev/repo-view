@@ -10,14 +10,14 @@ The pinned inputs are:
 - `src/parser.c`: `2549deeed0c8aeb84f42f9ccd3cf9de047a0c609387075a97784fddb2d1770cd`
 - `src/scanner.c`: `2ee1241a6a275e72a06838f5df927700bd405c16b48f986e2c33d1264cae4818`
 
-Regenerate from a clean checkout at that commit:
+Regenerate from a clean checkout at that commit through the Make entrypoint:
 
-```bash
-internal/csharpgrammar/generate.sh /path/to/tree-sitter-c-sharp
+```text
+make -f make/grammar.mk generate-csharp-grammar GRAMMAR_SOURCE=/path/to/tree-sitter-c-sharp
 ```
 
 The generator normally targets a package inside `treesitter-go` and imports
-its `internal/core` package. The script deterministically redirects those
+its `internal/core` package. The Go generator deterministically redirects those
 references to the runtime's public facade, which re-exports the same types and
 constants, and records the source grammar's ABI 15 metadata. It moves the two
 largest numeric literals into the deterministic, little-endian
