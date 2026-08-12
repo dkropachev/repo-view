@@ -34,29 +34,21 @@ type privilegedSuite struct {
 
 var privilegedSuites = []privilegedSuite{
 	{
-		// Run the command-runner proof before any other fixture creates and
-		// removes the fixed-name pair cgroup. The hosted kernel has reported a
-		// nonzero nr_periods value during rapid cross-fixture pathname reuse.
-		// This suite still performs repeated in-executor reuse after
-		// killAndRemove has proved pids.current reached zero.
-		binary: "/tokenbench-tests/runner.test", timeout: "2m", delegated: true,
-		names: []string{"TestPrivilegedGoCommandRunnerDiscoveryPath"},
-		environment: map[string]string{
-			commandRunnerImageEnvironment:   "/tokenbench-tests/tokenbench",
-			commandRunnerUtilityEnvironment: "/tokenbench-tests/privileged-linux-tests",
-		},
-	},
-	{
 		binary: "/tokenbench-tests/runner.test", timeout: "8m", delegated: true,
 		names: []string{
 			"TestCgroupManagerAppliesExactArmLimitsAndReusesStablePath",
 			"TestArmCleanupRetriesTransientRmdirWithinDeadline",
+			"TestPrivilegedGoCommandRunnerDiscoveryPath",
 			"TestLandlockBlocksCgroupEscapeAndAllowsOnlyPinnedWritableRoots",
 			"TestLandlockFullPolicyDeniesHostReadsExecutablesAndLoaderBypass",
 			"TestPrivilegedExactConnectKernelBoundary",
 			"TestPrivilegedExactConnectRejectsAncestorProgram",
 			"TestPrivilegedArmInitPIDNamespaceBoundary",
 			"TestProcessInspectionSeccompKillsX32SyscallTable",
+		},
+		environment: map[string]string{
+			commandRunnerImageEnvironment:   "/tokenbench-tests/tokenbench",
+			commandRunnerUtilityEnvironment: "/tokenbench-tests/privileged-linux-tests",
 		},
 	},
 	{

@@ -580,6 +580,141 @@ func processExists(pid int) bool {
 	return err == nil
 }
 
+func TestInitializeArmCgroupCapturesZeroResourcesBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	var events []string
+	directory, keys, err := initializeArmCgroup(
+		parent,
+		pairCgroupName,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				events = append(events, "capture")
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods"}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				events = append(events, "configure-and-verify")
+				return nil
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(events, ","); got != "capture,configure-and-verify" {
+		t.Fatalf("arm initialization order = %q", got)
+	}
+	if len(keys.CPUStat) != 1 || keys.CPUStat[0] != "nr_periods" {
+		t.Fatalf("captured resource keys = %+v", keys)
+	}
+	if err := directory.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := parent.Remove(pairCgroupName); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInitializeArmCgroupRejectsNonzeroResourcesBeforeConfiguringLimits(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configured := false
+	_, _, err = initializeArmCgroup(
+		parent,
+		pairCgroupName,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods", Value: 1}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				configured = true
+				return nil
+			},
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "counter nr_periods started at 1") {
+		t.Fatalf("initialization error = %v", err)
+	}
+	if configured {
+		t.Fatal("limits were configured before strict zero-resource validation")
+	}
+	if _, statErr := parent.Stat(pairCgroupName); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed initialization retained arm directory: %v", statErr)
+	}
+}
+
+func TestInitializeArmCgroupCleansUpConfigureFailure(t *testing.T) {
+	t.Parallel()
+	parent, err := os.OpenRoot(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = parent.Close() })
+
+	configureErr := errors.New("configure and verify limits")
+	_, _, err = initializeArmCgroup(
+		parent,
+		pairCgroupName,
+		cgroupResourceCounterKeys{},
+		armCgroupInitializationOperations{
+			captureResources: func(*os.Root) (*harness.ResourceOutcome, error) {
+				return &harness.ResourceOutcome{
+					CPUStat: []harness.ResourceCounter{{Name: "nr_periods"}},
+				}, nil
+			},
+			configureAndVerifyLimits: func(*os.Root) error {
+				return configureErr
+			},
+		},
+	)
+	if !errors.Is(err, configureErr) {
+		t.Fatalf("initialization error = %v, want %v", err, configureErr)
+	}
+	if _, statErr := parent.Stat(pairCgroupName); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("configure failure retained arm directory: %v", statErr)
+	}
+}
+
+func TestConfigureArmLimitsVerifiesReadback(t *testing.T) {
+	t.Parallel()
+	rootPath := t.TempDir()
+	for _, write := range armLimitValues() {
+		content := strings.Repeat("x", len(write.value))
+		if write.name == "cpu.max" {
+			content += "x"
+		}
+		if err := os.WriteFile(filepath.Join(rootPath, write.name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	err = configureArmLimits(root)
+	if err == nil || !strings.Contains(err.Error(), "arm cgroup cpu.max readback") {
+		t.Fatalf("configureArmLimits error = %v, want cpu.max readback rejection", err)
+	}
+}
+
 func TestCgroupRootEmptyWaitsForPIDsController(t *testing.T) {
 	t.Parallel()
 	rootPath := t.TempDir()
