@@ -2,6 +2,7 @@ package releaseartifacts
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,6 +71,18 @@ func TestBuildIsDeterministicClosedAndBoundToTag(t *testing.T) {
 		t.Fatalf("validate built artifact set: %v", err)
 	}
 	archive := filepath.Join(second, "scopesifter_1.2.3_linux_amd64.tar.gz")
+	for _, name := range []string{
+		"scopesifter-taskctl_1.2.3_linux_amd64",
+		"scopesifter-taskctl_1.2.3_linux_arm64",
+		"scopesifter-taskctl-launcher_1.2.3_linux_amd64",
+		"scopesifter-taskctl-launcher_1.2.3_linux_arm64",
+	} {
+		if info, err := os.Stat(filepath.Join(second, name)); err != nil {
+			t.Fatalf("stat trusted program artifact %s: %v", name, err)
+		} else if info.Mode().Perm() != 0o644 {
+			t.Fatalf("trusted program artifact %s mode = %04o, want 0644", name, info.Mode().Perm())
+		}
+	}
 	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +310,7 @@ func TestValidateReleaseModuleRejectsLocalReplacement(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "go.mod")
 	if err := os.WriteFile(path, []byte(
-		"module example.invalid/release\n\ngo 1.26\n\nreplace example.invalid/dependency => ../dependency\n",
+		"module example.invalid/release\n\ngo 1.26.5\n\nreplace example.invalid/dependency => ../dependency\n",
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -306,16 +319,34 @@ func TestValidateReleaseModuleRejectsLocalReplacement(t *testing.T) {
 	}
 }
 
-func TestReleaseCreateArguments(t *testing.T) {
-	t.Parallel()
-	got := releaseCreateArguments("v1.2.3", "/repo/dist", []string{"SHA256SUMS", "scopesifter_1.2.3_linux_amd64.tar.gz"})
-	want := []string{
-		"release", "create", "v1.2.3", "--repo", releaseRepository,
-		"/repo/dist/SHA256SUMS", "/repo/dist/scopesifter_1.2.3_linux_amd64.tar.gz",
-		"--generate-notes", "--title", "ScopeSifter v1.2.3", "--verify-tag",
+func TestOpenReleaseArtifactsPinsValidatedBytes(t *testing.T) {
+	set := map[string][]byte{"artifact": []byte("reviewed bytes")}
+	artifacts, err := openReleaseArtifacts(set)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("releaseCreateArguments() = %#v, want %#v", got, want)
+	defer artifacts[0].file.Close()
+	set["artifact"] = []byte("substitute")
+	if err := verifyOpenReleaseArtifacts(artifacts); err != nil {
+		t.Fatalf("sealed artifact changed after input-map mutation: %v", err)
+	}
+	content, err := os.ReadFile("/proc/self/fd/" + fmt.Sprint(artifacts[0].file.Fd()))
+	if err != nil || string(content) != "reviewed bytes" {
+		t.Fatalf("sealed artifact content = %q, %v", content, err)
+	}
+}
+
+func TestOpenReleaseArtifactsRejectMutation(t *testing.T) {
+	artifacts, err := openReleaseArtifacts(map[string][]byte{"artifact": []byte("reviewed bytes")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer artifacts[0].file.Close()
+	if _, err := artifacts[0].file.WriteAt([]byte("mutate"), 0); err == nil {
+		t.Fatal("sealed release artifact accepted WriteAt")
+	}
+	if err := verifyOpenReleaseArtifacts(artifacts); err != nil {
+		t.Fatalf("failed mutation changed sealed artifact: %v", err)
 	}
 }
 
@@ -370,28 +401,6 @@ func TestReleaseBuildEnvironmentRejectsAmbientGoConfiguration(t *testing.T) {
 	}
 }
 
-func TestReleasePublishEnvironmentDropsRepositoryAndProgramOverrides(t *testing.T) {
-	t.Parallel()
-	got, err := releasePublishEnvironment([]string{
-		"GH_TOKEN=secret", "GH_REPO=attacker/repository", "GH_CONFIG_DIR=/tmp/config",
-		"GIT_EDITOR=/tmp/editor", "PATH=/tmp/untrusted",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := []string{
-		"GH_HOST=github.com", "GH_PROMPT_DISABLED=1", "GH_TOKEN=secret", "HOME=/",
-		"LANG=C", "LC_ALL=C", "NO_COLOR=1", "PAGER=cat", "PATH=", "TZ=UTC",
-		"XDG_CONFIG_HOME=/",
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("release publish environment = %#v, want %#v", got, want)
-	}
-	if _, err := releasePublishEnvironment(nil); err == nil {
-		t.Fatal("missing GH_TOKEN was accepted")
-	}
-}
-
 func newReleaseRepository(t *testing.T, tag string) (string, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -405,11 +414,19 @@ func newReleaseRepository(t *testing.T, tag string) (string, string) {
 			t.Fatal(err)
 		}
 	}
-	write("go.mod", "module github.com/yapless/scopesifter\n\ngo 1.26\n")
+	write("go.mod", "module github.com/yapless/scopesifter\n\ngo 1.26.5\n")
 	write(noticeName, "notice\n")
 	write(
 		"cmd/scopesifter/main.go",
-		"package main\nvar releaseRevision = \"development\"\nfunc main() { println(releaseRevision) }\n",
+		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
+	)
+	write(
+		"cmd/taskctl/main.go",
+		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
+	)
+	write(
+		"internal/cmd/taskctl-launcher/main.go",
+		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
 	)
 	gitRun(t, root, "init", "-q", "-b", "main")
 	gitRun(t, root, "config", "user.name", "Release Test")

@@ -15,6 +15,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"sort"
@@ -32,24 +33,33 @@ import (
 // data and never executes it.
 const WorkflowShell = "go run -mod=readonly ./internal/cmd/workflow-runner -- {0}"
 
+const taskctlLauncherExecutable = "/usr/local/libexec/scopesifter/taskctl-launcher"
+
 var (
 	makeTargetPattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./-]*$`)
 	makeTokenPattern   = regexp.MustCompile(`^[A-Za-z0-9_./:=,+%-]+$`)
 	makeIncludePattern = regexp.MustCompile(`^[A-Za-z0-9_./-]+\.mk$`)
 )
 
-var approvedWorkflowActions = map[string]map[string]string{
-	"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": {
+var approvedWorkflowActions = map[string][]map[string]string{
+	"actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1": {{
 		"persist-credentials": "false",
-	},
-	"actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e": {
+	}},
+	"actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e": {{
 		"cache":           "true",
 		"go-version-file": "go.mod",
+	}, {
+		"cache":      "false",
+		"go-version": "1.26.5",
+	}},
+	"actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6": {
+		{"subject-checksums": "dist/SHA256SUMS"},
+		{"subject-path": "dist/SHA256SUMS"},
 	},
-	"golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a": {
+	"golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a": {{
 		"args":    "--config=.golangci.yml",
 		"version": "v2.12.2",
-	},
+	}},
 }
 
 var approvedWorkflowTargets = map[string]struct{}{
@@ -247,7 +257,10 @@ type workflowPushTrigger struct {
 }
 
 type workflowPermissions struct {
-	Contents string `yaml:"contents"`
+	ArtifactMetadata string `yaml:"artifact-metadata"`
+	Attestations     string `yaml:"attestations"`
+	Contents         string `yaml:"contents"`
+	IDToken          string `yaml:"id-token"`
 }
 
 type workflowConcurrency struct {
@@ -264,12 +277,16 @@ type workflowRunDefaults struct {
 }
 
 type workflowJob struct {
-	Defaults       workflowDefaults `yaml:"defaults"`
-	Uses           *string          `yaml:"uses"`
-	Name           string           `yaml:"name"`
-	RunsOn         string           `yaml:"runs-on"`
-	Steps          []workflowStep   `yaml:"steps"`
-	TimeoutMinutes int              `yaml:"timeout-minutes"`
+	Permissions    workflowPermissions `yaml:"permissions"`
+	Defaults       workflowDefaults    `yaml:"defaults"`
+	Uses           *string             `yaml:"uses"`
+	Container      string              `yaml:"container"`
+	Environment    string              `yaml:"environment"`
+	Name           string              `yaml:"name"`
+	Needs          string              `yaml:"needs"`
+	RunsOn         string              `yaml:"runs-on"`
+	Steps          []workflowStep      `yaml:"steps"`
+	TimeoutMinutes int                 `yaml:"timeout-minutes"`
 }
 
 type workflowStep struct {
@@ -279,6 +296,88 @@ type workflowStep struct {
 	With  map[string]string `yaml:"with"`
 	Env   map[string]string `yaml:"env"`
 	Name  string            `yaml:"name"`
+}
+
+func reviewedReleaseWorkflowDocument() workflowDocument {
+	workflowShell := WorkflowShell
+	checkout := "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
+	setupGo := "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
+	attest := "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+	test := "ci-test"
+	build := "release-artifacts"
+	publish := "release-publish"
+	return workflowDocument{
+		Defaults: workflowDefaults{Run: workflowRunDefaults{Shell: &workflowShell}},
+		Jobs: map[string]workflowJob{
+			"test": {
+				Name:           "Test",
+				RunsOn:         "ubuntu-24.04",
+				TimeoutMinutes: 20,
+				Permissions:    workflowPermissions{Contents: "read"},
+				Steps: []workflowStep{
+					{
+						Name: "Check out repository",
+						Uses: &checkout,
+						With: map[string]string{"persist-credentials": "false"},
+					},
+					{
+						Name: "Set up Go",
+						Uses: &setupGo,
+						With: map[string]string{
+							"cache":      "false",
+							"go-version": "1.26.5",
+						},
+					},
+					{Name: "Test", Run: &test},
+				},
+			},
+			"release": {
+				Name:           "Release",
+				Needs:          "test",
+				Environment:    "release",
+				RunsOn:         "ubuntu-24.04",
+				Container:      "golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f",
+				TimeoutMinutes: 20,
+				Permissions: workflowPermissions{
+					ArtifactMetadata: "write",
+					Attestations:     "write",
+					Contents:         "read",
+					IDToken:          "write",
+				},
+				Steps: []workflowStep{
+					{
+						Name: "Check out repository",
+						Uses: &checkout,
+						With: map[string]string{"persist-credentials": "false"},
+					},
+					{Name: "Build release archives", Run: &build},
+					{
+						Name: "Attest release artifacts",
+						Uses: &attest,
+						With: map[string]string{"subject-checksums": "dist/SHA256SUMS"},
+					},
+					{
+						Name: "Attest release manifest",
+						Uses: &attest,
+						With: map[string]string{"subject-path": "dist/SHA256SUMS"},
+					},
+					{
+						Name: "Publish GitHub release",
+						Run:  &publish,
+						Env: map[string]string{
+							"GH_TOKEN": "${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}",
+						},
+					},
+				},
+			},
+		},
+		Name:        "Release",
+		Permissions: workflowPermissions{Contents: "read"},
+		Concurrency: workflowConcurrency{Group: "release-${{ github.ref }}"},
+		On: workflowTriggers{
+			Push: workflowPushTrigger{Tags: []string{"v*"}},
+		},
+	}
 }
 
 func rejectWorkflowScripts(path, content string, makeTargets map[string]struct{}) error {
@@ -299,12 +398,28 @@ func rejectWorkflowScripts(path, content string, makeTargets map[string]struct{}
 		return fmt.Errorf("workflow has no jobs: %s", path)
 	}
 	var failures []error
+	if err := validateWorkflowPermissions(path, document.Permissions); err != nil {
+		failures = append(failures, err)
+	}
 	if err := validateWorkflowShell(path+" workflow default", document.Defaults.Run.Shell); err != nil {
 		failures = append(failures, err)
+	}
+	if path == ".github/workflows/release.yml" &&
+		!reflect.DeepEqual(document, reviewedReleaseWorkflowDocument()) {
+		failures = append(failures, fmt.Errorf(
+			"release workflow differs from the exact reviewed contract: %s",
+			path,
+		))
 	}
 	for jobName, job := range document.Jobs {
 		if job.Uses != nil {
 			failures = append(failures, fmt.Errorf("reusable workflow delegation is forbidden: %s job %s", path, jobName))
+		}
+		if err := validateWorkflowJobPermissions(path, jobName, job.Permissions); err != nil {
+			failures = append(failures, err)
+		}
+		if err := validateWorkflowJobBoundary(path, jobName, job); err != nil {
+			failures = append(failures, err)
 		}
 		if err := validateWorkflowShell(path+" job "+jobName+" default", job.Defaults.Run.Shell); err != nil {
 			failures = append(failures, err)
@@ -358,26 +473,73 @@ func rejectWorkflowScripts(path, content string, makeTargets map[string]struct{}
 	return errors.Join(failures...)
 }
 
+func validateWorkflowPermissions(path string, permissions workflowPermissions) error {
+	// Empty permissions are accepted for isolated policy fixtures. Tracked
+	// workflows otherwise use a read-only workflow-wide baseline; the release
+	// job receives its complete elevated profile at job scope only.
+	if permissions == (workflowPermissions{}) {
+		return nil
+	}
+	if permissions == (workflowPermissions{Contents: "read"}) {
+		return nil
+	}
+	return fmt.Errorf("workflow permissions differ from a complete reviewed profile: %s", path)
+}
+
+func validateWorkflowJobPermissions(
+	path, jobName string,
+	permissions workflowPermissions,
+) error {
+	if permissions == (workflowPermissions{}) ||
+		permissions == (workflowPermissions{Contents: "read"}) {
+		return nil
+	}
+	release := workflowPermissions{
+		ArtifactMetadata: "write",
+		Attestations:     "write",
+		Contents:         "read",
+		IDToken:          "write",
+	}
+	if path == ".github/workflows/release.yml" && jobName == "release" && permissions == release {
+		return nil
+	}
+	return fmt.Errorf(
+		"workflow job permissions differ from a complete reviewed profile: %s job %s",
+		path,
+		jobName,
+	)
+}
+
+func validateWorkflowJobBoundary(path, jobName string, job workflowJob) error {
+	const releaseContainer = "golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f"
+	if job.Container == "" && job.Environment == "" && job.Needs == "" {
+		return nil
+	}
+	if path == ".github/workflows/release.yml" && jobName == "release" &&
+		job.Container == releaseContainer && job.Environment == "release" &&
+		job.Needs == "test" {
+		return nil
+	}
+	return fmt.Errorf("workflow job boundary differs from the reviewed profile: %s job %s", path, jobName)
+}
+
 func validateWorkflowAction(
 	location, action string,
 	inputs, environment map[string]string,
 ) error {
-	expected, approved := approvedWorkflowActions[action]
+	expectedSets, approved := approvedWorkflowActions[action]
 	if !approved {
 		return fmt.Errorf("workflow action is local, unapproved, unpinned, or malformed at %s", location)
 	}
 	if len(environment) != 0 {
 		return fmt.Errorf("workflow action environment is forbidden at %s", location)
 	}
-	if len(inputs) != len(expected) {
-		return fmt.Errorf("workflow action inputs differ from the reviewed set at %s", location)
-	}
-	for name, expectedValue := range expected {
-		if inputs[name] != expectedValue {
-			return fmt.Errorf("workflow action input %s differs from the reviewed value at %s", name, location)
+	for _, expected := range expectedSets {
+		if reflect.DeepEqual(inputs, expected) {
+			return nil
 		}
 	}
-	return nil
+	return fmt.Errorf("workflow action input set differs from the reviewed sets at %s", location)
 }
 
 func validateWorkflowRunEnvironment(target string, environment map[string]string) error {
@@ -386,7 +548,7 @@ func validateWorkflowRunEnvironment(target string, environment map[string]string
 	case "tokenbench-privileged-linux":
 		expected["TOKENBENCH_PRIVILEGED_IMAGE"] = "golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
 	case "release-publish":
-		expected["GH_TOKEN"] = "${{ github.token }}"
+		expected["GH_TOKEN"] = "${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}"
 	}
 	if len(environment) != len(expected) {
 		return errors.New("environment differs from the reviewed target-specific set")
@@ -650,6 +812,11 @@ func validateMakeRecipe(recipe string) error {
 	switch fields[0] {
 	case "go":
 		return validateMakeGoCommand(fields[1:])
+	case taskctlLauncherExecutable:
+		if !reviewedTaskctlLauncherRole(fields[1:]) {
+			return errors.New("taskctl launcher arguments do not match a reviewed role")
+		}
+		return nil
 	case "golangci-lint":
 		if len(fields) != 3 || fields[1] != "run" ||
 			(fields[2] != "--config=.golangci.yml" && fields[2] != "--config=.golangci-fieldalignment.yml") {
@@ -752,6 +919,27 @@ func reviewedMakeGoRun(packagePath string, arguments []string) bool {
 	}
 	for _, role := range roles[packagePath] {
 		if slices.Equal(arguments, role) {
+			return true
+		}
+	}
+	return false
+}
+
+func reviewedTaskctlLauncherRole(arguments []string) bool {
+	roles := [][2]string{
+		{"inspect", "executable-sha256"},
+		{"generate", "source-audit"},
+		{"generate", "source-repository-bindings"},
+		{"generate", "source-selections"},
+		{"validate", "source-audit"},
+		{"validate", "source-repository-bindings"},
+		{"validate", "source-selections"},
+	}
+	if len(arguments) != 2 {
+		return false
+	}
+	for _, role := range roles {
+		if arguments[0] == role[0] && arguments[1] == role[1] {
 			return true
 		}
 	}

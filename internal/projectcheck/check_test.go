@@ -295,6 +295,40 @@ func TestValidateNoScriptsAcceptsNarrowMakeGrammar(t *testing.T) {
 	}
 }
 
+func TestValidateMakeRecipeAcceptsExactTaskctlLauncherRoles(t *testing.T) {
+	t.Parallel()
+	roles := [][2]string{
+		{"inspect", "executable-sha256"},
+		{"generate", "source-audit"},
+		{"generate", "source-repository-bindings"},
+		{"generate", "source-selections"},
+		{"validate", "source-audit"},
+		{"validate", "source-repository-bindings"},
+		{"validate", "source-selections"},
+	}
+	for _, role := range roles {
+		recipe := taskctlLauncherExecutable + " " + role[0] + " " + role[1]
+		if err := validateMakeRecipe(recipe); err != nil {
+			t.Fatalf("reviewed taskctl launcher recipe %q rejected: %v", recipe, err)
+		}
+	}
+	for _, recipe := range []string{
+		taskctlLauncherExecutable + " generate checksums",
+		taskctlLauncherExecutable + " generate pointer-checksums",
+		taskctlLauncherExecutable + " validate checksums",
+		taskctlLauncherExecutable + " validate pointer-checksums",
+		taskctlLauncherExecutable + " generate unknown",
+		taskctlLauncherExecutable + " run checksums",
+		taskctlLauncherExecutable + " generate checksums --root=.",
+		"go run -mod=readonly ./internal/cmd/taskctl-launcher generate checksums",
+		"bin/taskctl-launcher generate checksums",
+	} {
+		if err := validateMakeRecipe(recipe); err == nil {
+			t.Fatalf("unreviewed taskctl launcher recipe %q accepted", recipe)
+		}
+	}
+}
+
 func TestValidateTrackedMakeTargetAcceptsCompleteSafeGraph(t *testing.T) {
 	t.Parallel()
 	root := newRepository(t)
@@ -392,21 +426,41 @@ func TestValidateNoScriptsRejectsWorkflowEnvironmentInjection(t *testing.T) {
 
 func TestValidateNoScriptsRejectsUnknownWorkflowExecutionSurfaces(t *testing.T) {
 	t.Parallel()
-	tests := map[string]string{
-		"job container": "    container: ubuntu:latest\n",
-		"job services":  "    services:\n      database:\n        image: postgres:latest\n",
-		"job env":       "    env:\n      MAKEFLAGS: unsafe\n",
+	tests := map[string]struct {
+		extra   string
+		failure string
+	}{
+		"job container": {
+			extra:   "    container: ubuntu:latest\n",
+			failure: "workflow job boundary differs",
+		},
+		"job environment": {
+			extra:   "    environment: unsafe\n",
+			failure: "workflow job boundary differs",
+		},
+		"job dependency": {
+			extra:   "    needs: unsafe\n",
+			failure: "workflow job boundary differs",
+		},
+		"job services": {
+			extra:   "    services:\n      database:\n        image: postgres:latest\n",
+			failure: "field services not found",
+		},
+		"job env": {
+			extra:   "    env:\n      MAKEFLAGS: unsafe\n",
+			failure: "field env not found",
+		},
 	}
-	for name, extra := range tests {
+	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			root := newRepository(t)
-			workflow := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n" + extra +
+			workflow := "jobs:\n  test:\n    runs-on: ubuntu-latest\n    timeout-minutes: 20\n" + test.extra +
 				"    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" +
 				"        with:\n          persist-credentials: false\n"
 			writeTracked(t, root, ".github/workflows/ci.yml", workflow)
 			err := ValidateNoScripts(root)
-			if err == nil || !strings.Contains(err.Error(), "field ") || !strings.Contains(err.Error(), "not found") {
+			if err == nil || !strings.Contains(err.Error(), test.failure) {
 				t.Fatalf("unknown workflow surface %s accepted: %v", name, err)
 			}
 		})
@@ -432,6 +486,298 @@ func TestValidateNoScriptsPinsReviewedWorkflowActions(t *testing.T) {
 	err := ValidateNoScripts(root)
 	if err == nil || !strings.Contains(err.Error(), "workflow action is local, unapproved, unpinned, or malformed") {
 		t.Fatalf("local workflow action accepted: %v", err)
+	}
+}
+
+func TestValidateNoScriptsAcceptsOnlyReviewedAttestationInputs(t *testing.T) {
+	t.Parallel()
+	const action = "actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6"
+	for _, inputs := range []map[string]string{
+		{"subject-checksums": "dist/SHA256SUMS"},
+		{"subject-path": "dist/SHA256SUMS"},
+	} {
+		if err := validateWorkflowAction("test", action, inputs, nil); err != nil {
+			t.Fatalf("reviewed attestation inputs %v rejected: %v", inputs, err)
+		}
+	}
+	if err := validateWorkflowAction(
+		"test",
+		action,
+		map[string]string{"subject-path": "dist/**"},
+		nil,
+	); err == nil ||
+		!strings.Contains(err.Error(), "differs from the reviewed") {
+		t.Fatalf("unreviewed attestation input accepted: %v", err)
+	}
+}
+
+func TestValidateNoScriptsAcceptsExactReleaseTestGoSetup(t *testing.T) {
+	t.Parallel()
+	const action = "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
+	inputs := map[string]string{"cache": "false", "go-version": "1.26.5"}
+	if err := validateWorkflowAction("test", action, inputs, nil); err != nil {
+		t.Fatalf("exact release-test Go setup rejected: %v", err)
+	}
+	inputs["cache"] = "true"
+	if err := validateWorkflowAction("test", action, inputs, nil); err == nil ||
+		!strings.Contains(err.Error(), "differs from the reviewed") {
+		t.Fatalf("cached release-test Go setup accepted: %v", err)
+	}
+}
+
+const reviewedReleaseWorkflowFixture = `name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+
+defaults:
+  run:
+    shell: ` + WorkflowShell + `
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: "1.26.5"
+          cache: false
+
+      - name: Test
+        run: ci-test
+
+  release:
+    name: Release
+    needs: test
+    environment: release
+    runs-on: ubuntu-24.04
+    container: golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f
+    timeout-minutes: 20
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Build release archives
+        run: release-artifacts
+
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest release manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: dist/SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}
+        run: release-publish
+`
+
+func TestReleaseWorkflowFixtureMatchesExactReviewedContract(t *testing.T) {
+	t.Parallel()
+	if err := rejectWorkflowScripts(
+		".github/workflows/release.yml",
+		reviewedReleaseWorkflowFixture,
+		releaseWorkflowTargets(),
+	); err != nil {
+		t.Fatalf("exact reviewed release workflow rejected: %v", err)
+	}
+}
+
+func TestTrackedReleaseWorkflowMatchesExactReviewedContract(t *testing.T) {
+	t.Parallel()
+	content, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := rejectWorkflowScripts(
+		".github/workflows/release.yml",
+		string(content),
+		releaseWorkflowTargets(),
+	); err != nil {
+		t.Fatalf("tracked release workflow rejected: %v", err)
+	}
+}
+
+func TestReleaseWorkflowRejectsContractMutations(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		old  string
+		new  string
+	}{
+		{name: "workflow name", old: "name: Release\n\non:", new: "name: Publish\n\non:"},
+		{name: "tag trigger", old: `- "v*"`, new: `- "release-*"`},
+		{name: "branch trigger", old: "    tags:\n", new: "    branches: [main]\n    tags:\n"},
+		{name: "workflow permission", old: "permissions:\n  contents: read\n\nconcurrency:", new: "permissions:\n  contents: write\n\nconcurrency:"},
+		{name: "concurrency group", old: "  group: release-${{ github.ref }}\n", new: "  group: release-${{ github.sha }}\n"},
+		{name: "concurrency cancellation", old: "  group: release-${{ github.ref }}\n", new: "  group: release-${{ github.ref }}\n  cancel-in-progress: true\n"},
+		{name: "default shell", old: WorkflowShell, new: WorkflowShell + " --fixed"},
+		{name: "test job identifier", old: "jobs:\n  test:\n", new: "jobs:\n  verify:\n"},
+		{name: "test job name", old: "  test:\n    name: Test\n", new: "  test:\n    name: Verify\n"},
+		{name: "test runner", old: "  test:\n    name: Test\n    runs-on: ubuntu-24.04\n", new: "  test:\n    name: Test\n    runs-on: ubuntu-latest\n"},
+		{name: "test timeout", old: "  test:\n    name: Test\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n", new: "  test:\n    name: Test\n    runs-on: ubuntu-24.04\n    timeout-minutes: 21\n"},
+		{name: "test permission", old: "  test:\n    name: Test\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    permissions:\n      contents: read\n", new: "  test:\n    name: Test\n    runs-on: ubuntu-24.04\n    timeout-minutes: 20\n    permissions:\n      contents: write\n"},
+		{name: "test setup pin", old: "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e", new: "actions/setup-go@main"},
+		{name: "test Go version", old: `go-version: "1.26.5"`, new: `go-version: "1.26.4"`},
+		{name: "test Go cache", old: "          cache: false\n", new: "          cache: true\n"},
+		{name: "test target", old: "      - name: Test\n        run: ci-test\n", new: "      - name: Test\n        run: ci-vet\n"},
+		{name: "release job identifier", old: "\n  release:\n    name: Release\n", new: "\n  publish:\n    name: Release\n"},
+		{name: "release job name", old: "  release:\n    name: Release\n", new: "  release:\n    name: Publish\n"},
+		{name: "release dependency", old: "    needs: test\n", new: "    needs: verify\n"},
+		{name: "release environment", old: "    environment: release\n", new: "    environment: production\n"},
+		{name: "release runner", old: "    environment: release\n    runs-on: ubuntu-24.04\n", new: "    environment: release\n    runs-on: ubuntu-latest\n"},
+		{name: "release container", old: "golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f", new: "golang:1.26.5-bookworm"},
+		{name: "release timeout", old: "    container: golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f\n    timeout-minutes: 20\n", new: "    container: golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f\n    timeout-minutes: 21\n"},
+		{name: "release permission", old: "      id-token: write\n", new: "      id-token: read\n"},
+		{
+			name: "release step order",
+			old: "      - name: Build release archives\n" +
+				"        run: release-artifacts\n\n" +
+				"      - name: Attest release artifacts\n" +
+				"        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\n" +
+				"        with:\n          subject-checksums: dist/SHA256SUMS\n",
+			new: "      - name: Attest release artifacts\n" +
+				"        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\n" +
+				"        with:\n          subject-checksums: dist/SHA256SUMS\n\n" +
+				"      - name: Build release archives\n" +
+				"        run: release-artifacts\n",
+		},
+		{name: "checkout pin", old: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1", new: "actions/checkout@main"},
+		{name: "checkout inputs", old: "persist-credentials: false", new: "persist-credentials: true"},
+		{
+			name: "setup Go in release job",
+			old:  "      - name: Build release archives\n        run: release-artifacts\n",
+			new: "      - name: Set up Go again\n" +
+				"        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e\n" +
+				"        with:\n          go-version: \"1.26.5\"\n          cache: false\n\n" +
+				"      - name: Build release archives\n        run: release-artifacts\n",
+		},
+		{name: "artifact attestation", old: "subject-checksums: dist/SHA256SUMS", new: "subject-checksums: dist/OTHER"},
+		{name: "manifest attestation", old: "subject-path: dist/SHA256SUMS", new: "subject-path: dist/**"},
+		{
+			name: "missing manifest attestation",
+			old: "\n      - name: Attest release manifest\n" +
+				"        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6\n" +
+				"        with:\n          subject-path: dist/SHA256SUMS\n",
+			new: "",
+		},
+		{name: "publish credential", old: "GH_TOKEN: ${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}", new: "GH_TOKEN: ${{ github.token }}"},
+		{name: "publish target", old: "run: release-publish", new: "run: release-artifacts"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if !strings.Contains(reviewedReleaseWorkflowFixture, test.old) {
+				t.Fatalf("fixture lacks mutation source %q", test.old)
+			}
+			mutated := strings.Replace(reviewedReleaseWorkflowFixture, test.old, test.new, 1)
+			err := rejectWorkflowScripts(
+				".github/workflows/release.yml",
+				mutated,
+				releaseWorkflowTargets(),
+			)
+			if err == nil || !strings.Contains(err.Error(), "release workflow differs from the exact reviewed contract") {
+				t.Fatalf("release workflow mutation accepted: %v", err)
+			}
+		})
+	}
+}
+
+func releaseWorkflowTargets() map[string]struct{} {
+	return map[string]struct{}{
+		"ci-test":           {},
+		"release-artifacts": {},
+		"release-publish":   {},
+	}
+}
+
+func TestValidateNoScriptsRejectsPartialOrMisplacedElevatedPermissions(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		path        string
+		permissions string
+	}{
+		{
+			path: ".github/workflows/release.yml",
+			permissions: "permissions:\n  contents: write\n  id-token: write\n" +
+				"  attestations: write\n",
+		},
+		{
+			path: ".github/workflows/ci.yml",
+			permissions: "permissions:\n  contents: write\n  id-token: write\n" +
+				"  attestations: write\n  artifact-metadata: write\n",
+		},
+	} {
+		root := newRepository(t)
+		workflow := test.permissions + "jobs:\n  test:\n    runs-on: ubuntu-latest\n" +
+			"    timeout-minutes: 20\n    steps:\n" +
+			"      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n" +
+			"        with:\n          persist-credentials: false\n"
+		writeTracked(t, root, test.path, workflow)
+		if err := ValidateNoScripts(root); err == nil ||
+			!strings.Contains(err.Error(), "permissions differ") {
+			t.Fatalf("permissions %q at %s accepted: %v", test.permissions, test.path, err)
+		}
+	}
+}
+
+func TestValidateNoScriptsRestrictsElevatedPermissionsToReleaseJob(t *testing.T) {
+	t.Parallel()
+	elevated := workflowPermissions{
+		ArtifactMetadata: "write",
+		Attestations:     "write",
+		Contents:         "read",
+		IDToken:          "write",
+	}
+	if err := validateWorkflowJobPermissions(
+		".github/workflows/release.yml",
+		"release",
+		elevated,
+	); err != nil {
+		t.Fatalf("exact release-job permissions rejected: %v", err)
+	}
+	for _, test := range []struct {
+		path string
+		job  string
+	}{
+		{path: ".github/workflows/release.yml", job: "test"},
+		{path: ".github/workflows/ci.yml", job: "release"},
+	} {
+		if err := validateWorkflowJobPermissions(test.path, test.job, elevated); err == nil ||
+			!strings.Contains(err.Error(), "job permissions differ") {
+			t.Fatalf("elevated permissions accepted at %s job %s: %v", test.path, test.job, err)
+		}
 	}
 }
 

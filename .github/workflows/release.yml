@@ -6,7 +6,7 @@ on:
       - "v*"
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
@@ -16,10 +16,12 @@ defaults:
     shell: go run -mod=readonly ./internal/cmd/workflow-runner -- {0}
 
 jobs:
-  release:
-    name: Release
-    runs-on: ubuntu-latest
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
+    permissions:
+      contents: read
 
     steps:
       - name: Check out repository
@@ -30,16 +32,45 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: go.mod
-          cache: true
+          go-version: "1.26.5"
+          cache: false
 
       - name: Test
         run: ci-test
 
+  release:
+    name: Release
+    needs: test
+    environment: release
+    runs-on: ubuntu-24.04
+    container: golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f
+    timeout-minutes: 20
+    permissions:
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Build release archives
         run: release-artifacts
 
+      - name: Attest release artifacts
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: dist/SHA256SUMS
+
+      - name: Attest release manifest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/SHA256SUMS
+
       - name: Publish GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}
         run: release-publish

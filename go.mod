@@ -1,6 +1,6 @@
 module github.com/yapless/scopesifter
 
-go 1.26
+go 1.26.5
 
 require (
 	github.com/dcosson/treesitter-go v0.1.0

@@ -19,9 +19,50 @@ Install the latest source with Go:
 go install github.com/yapless/scopesifter/cmd/scopesifter@latest
 ```
 
-Version tags publish prebuilt Linux, macOS, and Windows binaries, plus a
+Version tags publish prebuilt Linux, macOS, and Windows binaries, raw static
+Linux `taskctl` and `taskctl-launcher` executables for amd64 and arm64, plus a
 `SHA256SUMS` file, on the
 [GitHub Releases page](https://github.com/yapless/scopesifter/releases).
+Before publication, the release workflow creates signed GitHub build-provenance
+attestations for every artifact named by the checksum manifest and a separate
+attestation for `SHA256SUMS` itself.
+
+### Trusted taskctl launcher
+
+`taskctl` generates and validates authenticated benchmark-task artifacts. Its
+launcher is intentionally outside the writable repository at
+`/usr/local/libexec/scopesifter/taskctl-launcher`; there is no repository-local
+fallback and no compatibility path.
+
+Provisioning is an administrator trust decision, not an automatic build step:
+
+1. Download `SHA256SUMS` and the raw
+   `scopesifter-taskctl-launcher_VERSION_linux_ARCH` artifact from one exact
+   GitHub release tag.
+2. Verify the artifact's signed provenance with `gh attestation verify`, bound
+   to `yapless/scopesifter`, the exact release workflow, tag ref, and source
+   commit; then verify its line in `SHA256SUMS` and record that lowercase
+   SHA-256 independently.
+3. Mark the already-verified raw artifact executable and authorize its narrow
+   root-only installer with
+   `sudo ./scopesifter-taskctl-launcher_VERSION_linux_ARCH install trusted-launcher SHA256`.
+   This is installation convenience after the trust decision, not a verifier
+   or trust bootstrap. It copies the executing bytes through pinned
+   descriptors and creates the fixed pathname with owner and group
+   `root:root`, mode exactly `0555`, one hard link, and no capabilities or
+   set-ID bits.
+4. Run the installed launcher directly in the trusted host mount namespace.
+   It rejects non-initial user-ID mappings, a privilege transition, or any
+   mismatch in pathname, inode, ownership, mode, link count, static ELF shape,
+   or capabilities. Its in-process checks cannot authenticate the mount
+   namespace itself.
+
+The launcher opens `bin/taskctl`, copies the authenticated bytes to a sealed
+anonymous executable, and executes that descriptor with a closed environment.
+For every mutating role, provide the independently reviewed lowercase digest as
+`TASKCTL_EXECUTABLE_SHA256`. `make taskctl-inspect-executable-sha256` prints the
+digest through the installed launcher; it does not admit the digest on the
+operator's behalf.
 
 ## Navigation CLI
 

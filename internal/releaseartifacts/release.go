@@ -37,6 +37,15 @@ const noticeName = "THIRD_PARTY_NOTICES.md"
 const releaseRepository = "yapless/scopesifter"
 
 const (
+	scopesifterProgramPath        = "github.com/yapless/scopesifter/cmd/scopesifter"
+	taskctlProgramPath            = "github.com/yapless/scopesifter/cmd/taskctl"
+	taskctlLauncherProgramPath    = "github.com/yapless/scopesifter/internal/cmd/taskctl-launcher"
+	taskctlArtifactPrefix         = "scopesifter-taskctl"
+	taskctlLauncherArtifactPrefix = "scopesifter-taskctl-launcher"
+	requiredReleaseGoVersion      = "go1.26.5"
+)
+
+const (
 	maximumReleaseTreeEntries      = 100_000
 	maximumReleaseTreeListingBytes = 16 << 20
 	maximumReleaseBlobBytes        = 128 << 20
@@ -51,12 +60,22 @@ type target struct {
 	goarch string
 }
 
+type trustedProgram struct {
+	artifactPrefix string
+	packagePath    string
+}
+
 var targets = []target{
 	{goos: "linux", goarch: "amd64"},
 	{goos: "linux", goarch: "arm64"},
 	{goos: "darwin", goarch: "amd64"},
 	{goos: "darwin", goarch: "arm64"},
 	{goos: "windows", goarch: "amd64"},
+}
+
+var trustedPrograms = []trustedProgram{
+	{artifactPrefix: taskctlArtifactPrefix, packagePath: taskctlProgramPath},
+	{artifactPrefix: taskctlLauncherArtifactPrefix, packagePath: taskctlLauncherProgramPath},
 }
 
 // Build creates the complete release artifact set under root/dist. The
@@ -117,6 +136,13 @@ func Build(root, refName string) error {
 		if err := buildTarget(sourceRoot, workRoot, stagedDist, noticePath, version, commit, item); err != nil {
 			return err
 		}
+		if item.goos == "linux" {
+			for _, program := range trustedPrograms {
+				if err := buildTrustedProgram(sourceRoot, workRoot, stagedDist, version, commit, item, program); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	if err := writeChecksums(stagedDist); err != nil {
 		return err
@@ -161,8 +187,10 @@ func copyArtifactDirectory(source, destination string) error {
 	return nil
 }
 
-// Publish invokes the GitHub CLI with the exact validated artifacts from
-// root/dist. Authentication is supplied by the caller through GH_TOKEN.
+// Publish validates and seals the exact artifacts from root/dist and publishes
+// them through a draft REST transaction. The release workflow creates the
+// attestations in this same fresh, privileged job immediately before calling
+// Publish; publication never delegates trust to an ambient CLI verifier.
 func Publish(root, refName string) error {
 	root, err := filepath.Abs(root)
 	if err != nil {
@@ -192,52 +220,119 @@ func Publish(root, refName string) error {
 	if err != nil {
 		return fmt.Errorf("read committed third-party notice: %w", err)
 	}
-	if err := validateArtifactSet(dist, version, commit, notice); err != nil {
+	artifactSet, err := readReleaseArtifactSet(dist)
+	if err != nil {
+		return fmt.Errorf("read release artifacts for publication: %w", err)
+	}
+	if err := validateReleaseArtifactSet(artifactSet, version, commit, notice); err != nil {
 		return fmt.Errorf("refuse unvalidated release artifacts: %w", err)
 	}
-	entries, err := os.ReadDir(dist)
-	if err != nil {
-		return fmt.Errorf("read release artifacts: %w", err)
-	}
-	names := make([]string, 0, len(entries))
-	for _, entry := range entries {
-		names = append(names, entry.Name())
-	}
-	args := releaseCreateArguments(refName, dist, names)
-	ghEnvironment, err := releasePublishEnvironment(os.Environ())
+	artifacts, err := openReleaseArtifacts(artifactSet)
 	if err != nil {
 		return err
 	}
-	command, ghFile, err := processpolicy.NativeCommand("gh", args...)
+	defer func() {
+		for _, artifact := range artifacts {
+			_ = artifact.file.Close()
+		}
+	}()
+	token, err := releasePublishToken(os.Environ())
 	if err != nil {
-		return fmt.Errorf("pin native GitHub CLI: %w", err)
+		return err
 	}
-	command.Dir = root
-	command.Env = ghEnvironment
-	command.Stdin = nil
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	runErr := command.Run()
-	closeErr := ghFile.Close()
-	if runErr != nil {
-		return fmt.Errorf("publish GitHub release: %w", runErr)
+	if err := publishGitHubRelease(refName, commit, token, artifacts); err != nil {
+		return err
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close native GitHub CLI image: %w", closeErr)
-	}
-	return nil
+	return verifyOpenReleaseArtifacts(artifacts)
 }
 
-func releaseCreateArguments(refName, dist string, names []string) []string {
-	args := []string{"release", "create", refName, "--repo", releaseRepository}
-	for _, name := range names {
-		args = append(args, filepath.Join(dist, name))
+type openReleaseArtifact struct {
+	file   *os.File
+	info   os.FileInfo
+	name   string
+	digest [sha256.Size]byte
+}
+
+func openReleaseArtifacts(set map[string][]byte) (_ []openReleaseArtifact, resultErr error) {
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
 	}
-	return append(args,
-		"--generate-notes",
-		"--title", "ScopeSifter "+refName,
-		"--verify-tag",
-	)
+	sort.Strings(names)
+	artifacts := make([]openReleaseArtifact, 0, len(names))
+	defer func() {
+		if resultErr == nil {
+			return
+		}
+		for _, artifact := range artifacts {
+			resultErr = errors.Join(resultErr, artifact.file.Close())
+		}
+	}()
+	for _, name := range names {
+		content := set[name]
+		file, err := createSealedReleaseArtifact(name, content)
+		if err != nil {
+			return nil, fmt.Errorf("seal validated release artifact %s: %w", name, err)
+		}
+		info, err := file.Stat()
+		if err != nil || !info.Mode().IsRegular() || info.Size() != int64(len(content)) {
+			_ = file.Close()
+			return nil, errors.Join(fmt.Errorf("sealed release artifact %s has unsafe identity", name), err)
+		}
+		artifacts = append(artifacts, openReleaseArtifact{
+			file: file, info: info, name: name, digest: sha256.Sum256(content),
+		})
+	}
+	return artifacts, nil
+}
+
+func digestOpenReleaseArtifact(file *os.File, expectedSize int64) ([sha256.Size]byte, error) {
+	var empty [sha256.Size]byte
+	if file == nil || expectedSize < 0 || expectedSize > maximumReleaseBlobBytes {
+		return empty, errors.New("release artifact size is outside the configured bound")
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return empty, err
+	}
+	hasher := sha256.New()
+	written, err := io.CopyN(hasher, file, expectedSize)
+	if err != nil || written != expectedSize {
+		return empty, errors.Join(err, io.ErrUnexpectedEOF)
+	}
+	var extra [1]byte
+	if count, err := file.Read(extra[:]); err != nil && !errors.Is(err, io.EOF) {
+		return empty, err
+	} else if count != 0 {
+		return empty, errors.New("release artifact grew while hashing")
+	}
+	var result [sha256.Size]byte
+	copy(result[:], hasher.Sum(nil))
+	return result, nil
+}
+
+func verifyOpenReleaseArtifacts(artifacts []openReleaseArtifact) error {
+	var failures []error
+	for _, artifact := range artifacts {
+		if err := verifySealedReleaseArtifact(artifact.file); err != nil {
+			failures = append(failures, fmt.Errorf("release artifact descriptor %s is mutable: %w", artifact.name, err))
+			continue
+		}
+		info, err := artifact.file.Stat()
+		if err != nil || !os.SameFile(artifact.info, info) ||
+			artifact.info.Mode() != info.Mode() || artifact.info.Size() != info.Size() {
+			failures = append(failures, errors.Join(
+				fmt.Errorf("release artifact descriptor %s changed identity", artifact.name), err,
+			))
+			continue
+		}
+		digest, err := digestOpenReleaseArtifact(artifact.file, info.Size())
+		if err != nil || digest != artifact.digest {
+			failures = append(failures, errors.Join(
+				fmt.Errorf("release artifact descriptor %s changed content", artifact.name), err,
+			))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 func buildTarget(root, workRoot, dist, noticePath, version, commit string, item target) error {
@@ -248,7 +343,8 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 	binaryPath := filepath.Join(workRoot, binaryName)
 	arguments := []string{
 		"build", "-mod=readonly", "-trimpath", "-buildvcs=false",
-		"-ldflags=-s -w -X main.releaseRevision=" + commit,
+		"-ldflags=-s -w -X main.releaseRevision=" + commit +
+			" -X main.releaseRevisionMarker=scopesifter.release-revision=" + commit,
 		"-o", binaryPath, "./cmd/scopesifter",
 	}
 	command, goFile, err := processpolicy.NativeCommand("go", arguments...)
@@ -271,7 +367,7 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 	if err != nil {
 		return fmt.Errorf("read %s/%s binary: %w", item.goos, item.goarch, err)
 	}
-	if err := validateExecutable(binary, item, commit); err != nil {
+	if err := validateExecutable(binary, item, commit, scopesifterProgramPath, false); err != nil {
 		return fmt.Errorf("validate built %s/%s binary: %w", item.goos, item.goarch, err)
 	}
 	notice, err := os.ReadFile(noticePath)
@@ -288,6 +384,88 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 	}
 	if err := os.Remove(binaryPath); err != nil {
 		return fmt.Errorf("remove staged %s/%s binary: %w", item.goos, item.goarch, err)
+	}
+	return nil
+}
+
+func buildTrustedProgram(
+	root, workRoot, dist, version, commit string,
+	item target,
+	program trustedProgram,
+) error {
+	if item.goos != "linux" {
+		return fmt.Errorf("trusted taskctl programs only support Linux, got %s/%s", item.goos, item.goarch)
+	}
+	binaryPath := filepath.Join(workRoot, program.artifactPrefix+"-"+item.goarch)
+	arguments := []string{
+		"build", "-mod=readonly", "-trimpath", "-buildvcs=false",
+		"-ldflags=-s -w -X main.releaseRevision=" + commit +
+			" -X main.releaseRevisionMarker=scopesifter.release-revision=" + commit,
+		"-o", binaryPath, "./" + strings.TrimPrefix(program.packagePath, "github.com/yapless/scopesifter/"),
+	}
+	command, goFile, err := processpolicy.NativeCommand("go", arguments...)
+	if err != nil {
+		return fmt.Errorf("pin native Go tool: %w", err)
+	}
+	command.Dir = root
+	command.Env = releaseBuildEnvironment(os.Environ(), item, workRoot)
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	runErr := command.Run()
+	closeErr := goFile.Close()
+	if runErr != nil {
+		return fmt.Errorf("build %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, runErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close native Go image: %w", closeErr)
+	}
+	binary, err := os.ReadFile(binaryPath)
+	if err != nil {
+		return fmt.Errorf("read built %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, err)
+	}
+	if err := validateExecutable(binary, item, commit, program.packagePath, true); err != nil {
+		return fmt.Errorf("validate built %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, err)
+	}
+	artifactPath := filepath.Join(dist, trustedArtifactName(program, version, item))
+	artifact, err := os.OpenFile(artifactPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		return fmt.Errorf("create trusted program artifact: %w", err)
+	}
+	writeErr := writeAll(artifact, binary)
+	closeArtifactErr := artifact.Close()
+	if writeErr != nil || closeArtifactErr != nil {
+		return errors.Join(
+			wrapReleaseError("write trusted program artifact", writeErr),
+			wrapReleaseError("close trusted program artifact", closeArtifactErr),
+		)
+	}
+	if err := os.Remove(binaryPath); err != nil {
+		return fmt.Errorf("remove staged trusted program: %w", err)
+	}
+	return nil
+}
+
+func trustedArtifactName(program trustedProgram, version string, item target) string {
+	return fmt.Sprintf("%s_%s_%s_%s", program.artifactPrefix, version, item.goos, item.goarch)
+}
+
+func wrapReleaseError(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func writeAll(writer io.Writer, content []byte) error {
+	for len(content) > 0 {
+		written, err := writer.Write(content)
+		if err != nil {
+			return err
+		}
+		if written <= 0 {
+			return io.ErrShortWrite
+		}
+		content = content[written:]
 	}
 	return nil
 }
@@ -398,10 +576,105 @@ func writeChecksums(dist string) error {
 }
 
 func validateArtifactSet(dist, version, commit string, notice []byte) error {
+	set, err := readReleaseArtifactSet(dist)
+	if err != nil {
+		return err
+	}
+	return validateReleaseArtifactSet(set, version, commit, notice)
+}
+
+func readReleaseArtifactSet(dist string) (map[string][]byte, error) {
 	entries, err := os.ReadDir(dist)
 	if err != nil {
-		return fmt.Errorf("read dist directory: %w", err)
+		return nil, fmt.Errorf("read dist directory: %w", err)
 	}
+	if len(entries) != expectedReleaseArtifactCount() {
+		return nil, fmt.Errorf("release artifact count = %d, want %d", len(entries), expectedReleaseArtifactCount())
+	}
+	want := expectedReleaseArtifactNamesFromDist(entries)
+	if want == nil {
+		return nil, errors.New("dist does not contain one canonical release-version closure")
+	}
+	set := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Base(entry.Name()) != entry.Name() {
+			return nil, fmt.Errorf("unexpected directory or unsafe name in dist: %s", entry.Name())
+		}
+		if _, expected := want[entry.Name()]; !expected {
+			return nil, fmt.Errorf("unexpected release artifact: %s", entry.Name())
+		}
+		path := filepath.Join(dist, entry.Name())
+		file, err := os.Open(path)
+		if err != nil {
+			return nil, fmt.Errorf("open release artifact %s: %w", entry.Name(), err)
+		}
+		info, statErr := file.Stat()
+		visible, visibleErr := os.Lstat(path)
+		if statErr != nil || visibleErr != nil || !info.Mode().IsRegular() ||
+			!os.SameFile(info, visible) || info.Mode() != visible.Mode() ||
+			info.Size() <= 0 || info.Size() > maximumReleaseBlobBytes {
+			_ = file.Close()
+			return nil, errors.Join(fmt.Errorf("release artifact %s has unsafe identity or size", entry.Name()), statErr, visibleErr)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, maximumReleaseBlobBytes+1))
+		closeErr := file.Close()
+		if readErr != nil || closeErr != nil {
+			return nil, errors.Join(fmt.Errorf("read release artifact %s", entry.Name()), readErr, closeErr)
+		}
+		if int64(len(content)) != info.Size() {
+			return nil, fmt.Errorf("release artifact %s exceeds %d bytes", entry.Name(), maximumReleaseBlobBytes)
+		}
+		set[entry.Name()] = content
+	}
+	return set, nil
+}
+
+func expectedReleaseArtifactCount() int {
+	count := 1
+	for _, item := range targets {
+		count++
+		if item.goos == "linux" {
+			count += len(trustedPrograms)
+		}
+	}
+	return count
+}
+
+func expectedReleaseArtifactNamesFromDist(entries []os.DirEntry) map[string]struct{} {
+	const prefix = "scopesifter_"
+	const suffix = "_linux_amd64.tar.gz"
+	version := ""
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, suffix) {
+			candidate := strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix)
+			if validSemanticVersion(candidate) && (version == "" || version == candidate) {
+				version = candidate
+			} else {
+				return nil
+			}
+		}
+	}
+	if version == "" {
+		return nil
+	}
+	want := map[string]struct{}{"SHA256SUMS": {}}
+	for _, item := range targets {
+		extension := ".tar.gz"
+		if item.goos == "windows" {
+			extension = ".zip"
+		}
+		want[fmt.Sprintf("scopesifter_%s_%s_%s%s", version, item.goos, item.goarch, extension)] = struct{}{}
+		if item.goos == "linux" {
+			for _, program := range trustedPrograms {
+				want[trustedArtifactName(program, version, item)] = struct{}{}
+			}
+		}
+	}
+	return want
+}
+
+func validateReleaseArtifactSet(set map[string][]byte, version, commit string, notice []byte) error {
 	want := map[string]bool{"SHA256SUMS": false}
 	for _, item := range targets {
 		extension := ".tar.gz"
@@ -409,97 +682,113 @@ func validateArtifactSet(dist, version, commit string, notice []byte) error {
 			extension = ".zip"
 		}
 		want[fmt.Sprintf("scopesifter_%s_%s_%s%s", version, item.goos, item.goarch, extension)] = false
+		if item.goos == "linux" {
+			for _, program := range trustedPrograms {
+				want[trustedArtifactName(program, version, item)] = false
+			}
+		}
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			return fmt.Errorf("unexpected directory in dist: %s", entry.Name())
+	for name := range set {
+		if _, ok := want[name]; !ok {
+			return fmt.Errorf("unexpected release artifact: %s", name)
 		}
-		if _, ok := want[entry.Name()]; !ok {
-			return fmt.Errorf("unexpected release artifact: %s", entry.Name())
-		}
-		if err := requireRegularFile(filepath.Join(dist, entry.Name())); err != nil {
-			return fmt.Errorf("release artifact %s is unsafe: %w", entry.Name(), err)
-		}
-		want[entry.Name()] = true
+		want[name] = true
 	}
 	for name, found := range want {
 		if !found {
 			return fmt.Errorf("missing release artifact: %s", name)
 		}
 	}
-	if err := verifyChecksums(dist); err != nil {
+	if err := verifyChecksumSet(set, want); err != nil {
 		return err
 	}
 	for name := range want {
 		switch {
 		case strings.HasSuffix(name, ".tar.gz"):
-			if err := validateTarGzip(filepath.Join(dist, name), notice, commit); err != nil {
+			if err := validateTarGzipBytes(name, set[name], notice, commit); err != nil {
 				return err
 			}
 		case strings.HasSuffix(name, ".zip"):
-			if err := validateZip(filepath.Join(dist, name), notice, commit); err != nil {
+			if err := validateZipBytes(name, set[name], notice, commit); err != nil {
 				return err
+			}
+		}
+	}
+	for _, item := range targets {
+		if item.goos != "linux" {
+			continue
+		}
+		for _, program := range trustedPrograms {
+			name := trustedArtifactName(program, version, item)
+			binary := set[name]
+			if err := validateExecutable(binary, item, commit, program.packagePath, true); err != nil {
+				return fmt.Errorf("validate trusted program artifact %s: %w", name, err)
 			}
 		}
 	}
 	return nil
 }
 
-func validateTarGzip(path string, notice []byte, commit string) (returnErr error) {
-	file, err := os.Open(path)
+func validateTarGzipBytes(name string, content, notice []byte, commit string) error {
+	source := bytes.NewReader(content)
+	compressed, err := gzip.NewReader(source)
 	if err != nil {
-		return fmt.Errorf("open tar archive: %w", err)
+		return fmt.Errorf("open gzip stream %s: %w", name, err)
 	}
-	defer func() {
-		if err := file.Close(); returnErr == nil && err != nil {
-			returnErr = fmt.Errorf("close tar archive: %w", err)
+	validationErr := validateTarReader(name, compressed, notice, commit)
+	if validationErr == nil {
+		var extra [1]byte
+		count, readErr := compressed.Read(extra[:])
+		if readErr != nil && !errors.Is(readErr, io.EOF) || count != 0 || source.Len() != 0 {
+			validationErr = errors.Join(errors.New("tar gzip stream has trailing or unread data"), readErr)
 		}
-	}()
-	compressed, err := gzip.NewReader(file)
-	if err != nil {
-		return fmt.Errorf("open gzip stream: %w", err)
 	}
-	defer func() {
-		if err := compressed.Close(); returnErr == nil && err != nil {
-			returnErr = fmt.Errorf("close gzip stream: %w", err)
-		}
-	}()
+	closeErr := compressed.Close()
+	return errors.Join(validationErr, wrapReleaseError("close gzip stream "+name, closeErr))
+}
+
+func validateTarReader(name string, archiveReader io.Reader, notice []byte, commit string) error {
 	names := make(map[string]struct{}, 2)
-	archive := tar.NewReader(compressed)
+	archive := tar.NewReader(archiveReader)
 	for {
 		header, err := archive.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("read tar archive: %w", err)
+			return fmt.Errorf("read tar archive %s: %w", name, err)
 		}
 		if header.Typeflag != tar.TypeReg {
 			return fmt.Errorf("non-regular tar entry: %s", header.Name)
+		}
+		if len(names) >= 2 || header.Size < 0 || header.Size > maximumReleaseBlobBytes {
+			return errors.New("tar archive entry count or size exceeds release bounds")
 		}
 		if _, exists := names[header.Name]; exists {
 			return fmt.Errorf("duplicate tar entry: %s", header.Name)
 		}
 		names[header.Name] = struct{}{}
-		if err := validateArchiveEntry(header.Name, fs.FileMode(header.Mode), header.Size, archive, notice, targetFromArchivePath(path), commit); err != nil {
+		if err := validateArchiveEntry(header.Name, fs.FileMode(header.Mode), header.Size, archive, notice, targetFromArchivePath(name), commit); err != nil {
 			return fmt.Errorf("validate tar entry: %w", err)
 		}
 	}
 	return validateArchiveNames(names, "scopesifter")
 }
 
-func validateZip(path string, notice []byte, commit string) (returnErr error) {
-	archive, err := zip.OpenReader(path)
+func validateZipBytes(name string, content, notice []byte, commit string) error {
+	reader := bytes.NewReader(content)
+	archive, err := zip.NewReader(reader, int64(len(content)))
 	if err != nil {
-		return fmt.Errorf("open zip archive: %w", err)
+		return fmt.Errorf("open zip archive %s: %w", name, err)
 	}
-	defer func() {
-		if err := archive.Close(); returnErr == nil && err != nil {
-			returnErr = fmt.Errorf("close zip archive: %w", err)
-		}
-	}()
+	if len(archive.File) != 2 {
+		return fmt.Errorf("zip archive has %d entries, want 2", len(archive.File))
+	}
 	names := make(map[string]struct{}, len(archive.File))
 	for _, entry := range archive.File {
+		if entry.UncompressedSize64 > maximumReleaseBlobBytes || entry.CompressedSize64 > uint64(len(content)) {
+			return fmt.Errorf("zip entry %s exceeds release bounds", entry.Name)
+		}
 		if !entry.Mode().IsRegular() {
 			return fmt.Errorf("non-regular zip entry: %s", entry.Name)
 		}
@@ -507,17 +796,17 @@ func validateZip(path string, notice []byte, commit string) (returnErr error) {
 			return fmt.Errorf("duplicate zip entry: %s", entry.Name)
 		}
 		names[entry.Name] = struct{}{}
-		reader, err := entry.Open()
+		entryReader, err := entry.Open()
 		if err != nil {
 			return fmt.Errorf("open zip entry %s: %w", entry.Name, err)
 		}
-		entryErr := validateArchiveEntry(entry.Name, entry.Mode(), int64(entry.UncompressedSize64), reader, notice, targetFromArchivePath(path), commit)
-		closeErr := reader.Close()
-		if entryErr != nil {
-			return fmt.Errorf("validate zip entry: %w", entryErr)
-		}
-		if closeErr != nil {
-			return fmt.Errorf("close zip entry %s: %w", entry.Name, closeErr)
+		entryErr := validateArchiveEntry(entry.Name, entry.Mode(), int64(entry.UncompressedSize64), entryReader, notice, targetFromArchivePath(name), commit)
+		closeErr := entryReader.Close()
+		if entryErr != nil || closeErr != nil {
+			return errors.Join(
+				wrapReleaseError("validate zip entry "+entry.Name, entryErr),
+				wrapReleaseError("close zip entry "+entry.Name, closeErr),
+			)
 		}
 	}
 	return validateArchiveNames(names, "scopesifter.exe")
@@ -532,7 +821,7 @@ func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.R
 		if size != int64(len(notice)) {
 			return fmt.Errorf("%s size = %d, want %d", name, size, len(notice))
 		}
-		actual, err := io.ReadAll(reader)
+		actual, err := io.ReadAll(io.LimitReader(reader, int64(len(notice))+1))
 		if err != nil {
 			return fmt.Errorf("read %s: %w", name, err)
 		}
@@ -543,7 +832,7 @@ func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.R
 		if mode.Perm() != 0o755 {
 			return fmt.Errorf("%s mode = %04o, want 0755", name, mode.Perm())
 		}
-		if size <= 0 {
+		if size <= 0 || size > maximumReleaseBlobBytes {
 			return fmt.Errorf("%s is empty", name)
 		}
 		binary, err := io.ReadAll(io.LimitReader(reader, size+1))
@@ -553,7 +842,7 @@ func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.R
 		if int64(len(binary)) != size {
 			return fmt.Errorf("%s content length = %d, want %d", name, len(binary), size)
 		}
-		if err := validateExecutable(binary, expected, commit); err != nil {
+		if err := validateExecutable(binary, expected, commit, scopesifterProgramPath, false); err != nil {
 			return fmt.Errorf("validate %s target: %w", name, err)
 		}
 	default:
@@ -573,7 +862,12 @@ func targetFromArchivePath(path string) target {
 	return target{}
 }
 
-func validateExecutable(binary []byte, expected target, commit string) error {
+func validateExecutable(
+	binary []byte,
+	expected target,
+	commit, expectedProgramPath string,
+	requireStatic bool,
+) error {
 	if expected.goos == "" || expected.goarch == "" {
 		return errors.New("archive filename does not identify a supported target")
 	}
@@ -589,6 +883,26 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 			want = elf.EM_AARCH64
 		}
 		machine := file.Machine
+		if requireStatic {
+			if file.Type != elf.ET_EXEC {
+				_ = file.Close()
+				return fmt.Errorf("ELF type = %s, want executable", file.Type)
+			}
+			if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB {
+				_ = file.Close()
+				return fmt.Errorf("ELF encoding = %s/%s, want 64-bit little-endian", file.Class, file.Data)
+			}
+			if file.OSABI != elf.ELFOSABI_NONE && file.OSABI != elf.ELFOSABI_LINUX {
+				_ = file.Close()
+				return fmt.Errorf("ELF OS ABI = %s, want System V or Linux", file.OSABI)
+			}
+			for _, program := range file.Progs {
+				if program.Type == elf.PT_INTERP || program.Type == elf.PT_DYNAMIC {
+					_ = file.Close()
+					return fmt.Errorf("ELF contains dynamic program header %s", program.Type)
+				}
+			}
+		}
 		if err := file.Close(); err != nil {
 			return fmt.Errorf("close ELF: %w", err)
 		}
@@ -630,8 +944,14 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 	if err != nil {
 		return fmt.Errorf("read Go build information: %w", err)
 	}
+	if info.GoVersion != requiredReleaseGoVersion {
+		return fmt.Errorf("go toolchain = %q, want %q", info.GoVersion, requiredReleaseGoVersion)
+	}
 	if info.Main.Path != "github.com/yapless/scopesifter" {
 		return fmt.Errorf("go main module = %q, want github.com/yapless/scopesifter", info.Main.Path)
+	}
+	if info.Path != expectedProgramPath {
+		return fmt.Errorf("go program path = %q, want %q", info.Path, expectedProgramPath)
 	}
 	settings := make(map[string]string, len(info.Settings))
 	for _, setting := range info.Settings {
@@ -640,8 +960,13 @@ func validateExecutable(binary []byte, expected target, commit string) error {
 	if settings["vcs.revision"] != "" || settings["vcs.modified"] != "" {
 		return errors.New("release binary unexpectedly contains ambient VCS build settings")
 	}
-	if occurrences := bytes.Count(binary, []byte(commit)); occurrences != 1 {
-		return fmt.Errorf("release revision occurs %d times in binary, want exactly once", occurrences)
+	marker := []byte("scopesifter.release-revision=" + commit)
+	if occurrences := bytes.Count(binary, marker); occurrences != 1 {
+		return fmt.Errorf("release revision marker occurs %d times in binary, want exactly once", occurrences)
+	}
+	withoutMarker := bytes.Replace(binary, marker, nil, 1)
+	if occurrences := bytes.Count(withoutMarker, []byte(commit)); occurrences != 1 {
+		return fmt.Errorf("runtime release revision occurs %d times outside its marker, want exactly once", occurrences)
 	}
 	return nil
 }
@@ -659,14 +984,13 @@ func validateArchiveNames(names map[string]struct{}, binaryName string) error {
 	return nil
 }
 
-func verifyChecksums(dist string) error {
-	file, err := os.Open(filepath.Join(dist, "SHA256SUMS"))
-	if err != nil {
-		return fmt.Errorf("open SHA256SUMS: %w", err)
+func verifyChecksumSet(set map[string][]byte, expected map[string]bool) error {
+	manifest, found := set["SHA256SUMS"]
+	if !found {
+		return errors.New("release artifact set lacks SHA256SUMS")
 	}
-	defer file.Close()
 	seen := make(map[string]struct{})
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(bytes.NewReader(manifest))
 	for scanner.Scan() {
 		parts := strings.SplitN(scanner.Text(), "  ", 2)
 		if len(parts) != 2 || len(parts[0]) != sha256.Size*2 || filepath.Base(parts[1]) != parts[1] {
@@ -675,10 +999,16 @@ func verifyChecksums(dist string) error {
 		if _, duplicate := seen[parts[1]]; duplicate {
 			return fmt.Errorf("duplicate SHA256SUMS entry: %s", parts[1])
 		}
+		if parts[1] == "SHA256SUMS" {
+			return errors.New("SHA256SUMS must not checksum itself")
+		}
+		if _, wanted := expected[parts[1]]; !wanted {
+			return fmt.Errorf("unexpected checksummed artifact %s", parts[1])
+		}
 		seen[parts[1]] = struct{}{}
-		data, err := os.ReadFile(filepath.Join(dist, parts[1]))
-		if err != nil {
-			return fmt.Errorf("read checksummed artifact %s: %w", parts[1], err)
+		data, found := set[parts[1]]
+		if !found {
+			return fmt.Errorf("checksummed artifact %s is absent", parts[1])
 		}
 		digest := fmt.Sprintf("%x", sha256.Sum256(data))
 		if digest != parts[0] {
@@ -688,8 +1018,17 @@ func verifyChecksums(dist string) error {
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("read SHA256SUMS: %w", err)
 	}
-	if len(seen) != len(targets) {
-		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(seen), len(targets))
+	wantCount := len(expected) - 1
+	if len(seen) != wantCount {
+		return fmt.Errorf("SHA256SUMS has %d entries, want %d", len(seen), wantCount)
+	}
+	for name := range expected {
+		if name == "SHA256SUMS" {
+			continue
+		}
+		if _, found := seen[name]; !found {
+			return fmt.Errorf("SHA256SUMS lacks %s", name)
+		}
 	}
 	return nil
 }
@@ -741,7 +1080,7 @@ func validateReleaseCheckout(root, refName string) (string, error) {
 	if head != tag {
 		return "", fmt.Errorf("release checkout HEAD %s does not match tag %s at %s", head, refName, tag)
 	}
-	if !validObjectID(head) {
+	if !validReleaseCommit(head) {
 		return "", fmt.Errorf("release commit has invalid object ID %q", head)
 	}
 	return head, nil
@@ -880,6 +1219,16 @@ func validateReleaseModule(path string) error {
 	if err != nil {
 		return fmt.Errorf("parse committed go.mod: %w", err)
 	}
+	moduleGoVersion := ""
+	if module.Go != nil {
+		moduleGoVersion = module.Go.Version
+	}
+	if moduleGoVersion != strings.TrimPrefix(requiredReleaseGoVersion, "go") {
+		return fmt.Errorf(
+			"committed go.mod Go version = %q, want %q",
+			moduleGoVersion, strings.TrimPrefix(requiredReleaseGoVersion, "go"),
+		)
+	}
 	for _, replacement := range module.Replace {
 		if replacement.New.Version == "" {
 			return fmt.Errorf(
@@ -976,6 +1325,10 @@ func validObjectID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validReleaseCommit(value string) bool {
+	return len(value) == 40 && validObjectID(value)
 }
 
 func validIdentifiers(value string, rejectNumericLeadingZero bool) bool {
@@ -1097,7 +1450,7 @@ func releaseGoEnvironmentVariableControlled(name string) bool {
 	}
 }
 
-func releasePublishEnvironment(environment []string) ([]string, error) {
+func releasePublishToken(environment []string) (string, error) {
 	token := ""
 	for _, entry := range environment {
 		name, value, found := strings.Cut(entry, "=")
@@ -1106,19 +1459,7 @@ func releasePublishEnvironment(environment []string) ([]string, error) {
 		}
 	}
 	if token == "" || strings.ContainsAny(token, "\x00\r\n") {
-		return nil, errors.New("release publication requires a valid GH_TOKEN")
+		return "", errors.New("release publication requires a valid GH_TOKEN")
 	}
-	return []string{
-		"GH_HOST=github.com",
-		"GH_PROMPT_DISABLED=1",
-		"GH_TOKEN=" + token,
-		"HOME=/",
-		"LANG=C",
-		"LC_ALL=C",
-		"NO_COLOR=1",
-		"PAGER=cat",
-		"PATH=",
-		"TZ=UTC",
-		"XDG_CONFIG_HOME=/",
-	}, nil
+	return token, nil
 }

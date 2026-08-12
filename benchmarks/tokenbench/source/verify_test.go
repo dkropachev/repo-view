@@ -138,6 +138,46 @@ func TestVerifyCleanStandaloneSource(t *testing.T) {
 	}
 }
 
+func TestTreeDigestWithGitUsesExactAuthenticatedExecutable(t *testing.T) {
+	repository := newRepository(t)
+	git, err := resolveGitRunner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if closeErr := git.close(); closeErr != nil {
+			t.Errorf("close Git runner: %v", closeErr)
+		}
+	}()
+
+	want, err := TreeDigest(context.Background(), repository.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := TreeDigestWithGit(
+		context.Background(),
+		repository.root,
+		git.path,
+		git.sha256,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("pinned digest = %s, want %s", got, want)
+	}
+
+	_, err = TreeDigestWithGit(
+		context.Background(),
+		repository.root,
+		git.path,
+		strings.Repeat("0", 64),
+	)
+	if err == nil || !strings.Contains(err.Error(), "identity mismatch") {
+		t.Fatalf("wrong Git digest error = %v, want identity rejection", err)
+	}
+}
+
 func TestVerifyRejectsDirtySource(t *testing.T) {
 	t.Parallel()
 	repository := newRepository(t)

@@ -32,6 +32,7 @@ var (
 	enforcedChangedContext           string
 	enforcedNavigationSemantics      string
 	releaseRevision                  = "development"
+	releaseRevisionMarker            = "scopesifter.release-revision=development"
 )
 
 func main() {
@@ -64,6 +65,10 @@ func run(args []string) int {
 	case "mcp":
 		return runMCP(args[1:])
 	case "version":
+		if releaseRevisionMarker != "scopesifter.release-revision="+releaseRevision {
+			fmt.Fprintln(os.Stderr, "scopesifter: release revision marker is invalid")
+			return 1
+		}
 		fmt.Fprintln(os.Stdout, releaseRevision)
 		return 0
 	default:
