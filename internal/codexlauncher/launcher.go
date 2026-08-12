@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"unicode"
@@ -65,23 +66,67 @@ type executor interface {
 	run(process) error
 }
 
-type osExecutor struct{}
+type osExecutor struct {
+	signals <-chan os.Signal
+}
 
-func (osExecutor) run(p process) error {
+func (e osExecutor) run(p process) error {
 	command := exec.Command(p.name, p.arguments...)
 	command.Dir = p.directory
 	command.Env = p.environment
 	command.Stdin = p.stdin
 	command.Stdout = p.stdout
 	command.Stderr = p.stderr
-	return command.Run()
+	if err := command.Start(); err != nil {
+		return err
+	}
+	waited := make(chan error, 1)
+	go func() {
+		waited <- command.Wait()
+	}()
+	var forwarded os.Signal
+	for {
+		select {
+		case err := <-waited:
+			if err == nil && forwarded != nil {
+				return forwardedSignalError{signal: forwarded}
+			}
+			return err
+		case received := <-e.signals:
+			if received == nil {
+				continue
+			}
+			if forwarded == nil {
+				forwarded = received
+			}
+			if err := command.Process.Signal(received); err != nil &&
+				!errors.Is(err, os.ErrProcessDone) {
+				fmt.Fprintf(p.stderr, "failed to forward %v to %s: %v\n", received, p.name, err)
+			}
+		}
+	}
+}
+
+type forwardedSignalError struct {
+	signal os.Signal
+}
+
+func (e forwardedSignalError) Error() string {
+	return fmt.Sprintf("process interrupted by %v", e.signal)
+}
+
+func (e forwardedSignalError) ExitCode() int {
+	return signalExitStatus(e.signal)
 }
 
 // Run builds the mechanically capped scopesifter binary and runs Codex with it.
 // Configuration failures use exit status 2; child-process failures preserve the
 // child exit status.
 func Run(root string, arguments []string, environment []string, streams Streams) int {
-	return run(root, arguments, environment, streams, osExecutor{})
+	signals := make(chan os.Signal, 4)
+	signal.Notify(signals, launcherSignals()...)
+	defer signal.Stop(signals)
+	return run(root, arguments, environment, streams, osExecutor{signals: signals})
 }
 
 func run(

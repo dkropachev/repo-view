@@ -11,6 +11,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if runSignalLifecycleHelper() {
+		os.Exit(0)
+	}
 	if os.Getenv("SCOPESIFTER_CODEX_TEST_HELPER") == "1" {
 		fmt.Printf("PATH=%s\n", os.Getenv("PATH"))
 		fmt.Printf("LIMIT=%s\n", os.Getenv("SCOPESIFTER_LIMIT_CAP"))
