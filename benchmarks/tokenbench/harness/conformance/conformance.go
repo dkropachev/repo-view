@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 // Fixture is one deterministic adapter exercise supplied by an adapter test.

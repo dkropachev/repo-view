@@ -7,7 +7,7 @@ import (
 	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/scopesifter/scopesifter/internal/scopesiftermcp"
+	"github.com/yapless/scopesifter/internal/scopesiftermcp"
 )
 
 func runMCP(args []string) int {

@@ -13,7 +13,7 @@ import (
 	"regexp"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-	"github.com/scopesifter/scopesifter/navigator"
+	"github.com/yapless/scopesifter/navigator"
 )
 
 const (

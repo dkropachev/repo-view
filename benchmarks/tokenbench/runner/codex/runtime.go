@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
 )
 
 const (

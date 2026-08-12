@@ -105,7 +105,7 @@ manifest=/absolute/artifacts/tokenbench-artifacts-v2.json
 manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
 
 CGO_ENABLED=0 go build -trimpath \
-  -ldflags "-X github.com/scopesifter/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
+  -ldflags "-X github.com/yapless/scopesifter/benchmarks/tokenbench.trustedArtifactManifestSHA256=${manifest_sha256}" \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
@@ -136,7 +136,7 @@ Its fixed context is:
 
 ```text
 schema_version = tokenbench.trust-policy/v2
-project        = github.com/scopesifter/scopesifter/benchmarks/tokenbench
+project        = github.com/yapless/scopesifter/benchmarks/tokenbench
 ```
 
 For each key, `public_key` is the unpadded base64url encoding of the raw 32-byte

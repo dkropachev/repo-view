@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-catalog-v1.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/study/schemas/task-catalog-v1.schema.json",
   "title": "Tokenbench task catalog v1",
   "type": "object",
   "additionalProperties": false,
@@ -48,7 +48,7 @@
         },
         "source_url": {
           "type": "string",
-          "pattern": "^https://github\\.com/scopesifter/corpus-(cpp|go|java|python|rust|typescript)-[a-z0-9-]+$",
+          "pattern": "^https://github\\.com/yapless/corpus-(cpp|go|java|python|rust|typescript)-[a-z0-9-]+$",
           "maxLength": 128
         },
         "base_object_id": {"$ref": "#/$defs/gitObjectID"},

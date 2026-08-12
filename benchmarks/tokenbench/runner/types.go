@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 // Arm identifies one side of a paired execution without coupling the process

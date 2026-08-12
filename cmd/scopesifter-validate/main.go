@@ -14,7 +14,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/navigator"
+	"github.com/yapless/scopesifter/navigator"
 )
 
 // Match the JavaScript backend's 8 MiB source budget, with one Scanner-sized

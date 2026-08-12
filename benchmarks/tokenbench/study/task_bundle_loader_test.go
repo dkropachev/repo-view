@@ -15,7 +15,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
 )
 
 type memoryTaskArtifactAuthority struct {

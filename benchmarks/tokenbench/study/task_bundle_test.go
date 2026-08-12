@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
 )
 
 func decodedTaskCatalogFixture(t *testing.T) TaskCatalog {
@@ -142,7 +142,7 @@ func TestTaskBundleCanonicalCatalogBoundRoundTrip(t *testing.T) {
 	}
 	// A v1 field, role, media type, or ordering change must deliberately update
 	// this complete-wire golden.
-	const wantSHA256 = "7087201204e9777388afe2acceb534fde553f3c54878c3978a68abeaa58cba52"
+	const wantSHA256 = "7921a039e1ab1048f0d2f2ff42a073f5666bbec0073db0d4c9d628b06b9ba242"
 	if rawSHA256 := catalogFixtureDigest(string(raw)); rawSHA256 != wantSHA256 {
 		t.Fatalf("encoded task bundle SHA-256 = %q, want %q", rawSHA256, wantSHA256)
 	}
@@ -473,7 +473,7 @@ func TestTaskBundleSchemaMatchesClosedGoSurface(t *testing.T) {
 	if document.SchemaVersion != "https://json-schema.org/draft/2020-12/schema" {
 		t.Fatalf("unexpected JSON Schema version %q", document.SchemaVersion)
 	}
-	if document.ID != "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/task-bundle-v1.schema.json" {
+	if document.ID != "https://github.com/yapless/scopesifter/benchmarks/tokenbench/study/schemas/task-bundle-v1.schema.json" {
 		t.Fatalf("unexpected task bundle schema ID %q", document.ID)
 	}
 	checkClosedSchemaObject(t, "task bundle", document.schemaObject)

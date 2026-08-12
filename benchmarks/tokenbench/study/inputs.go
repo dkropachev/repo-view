@@ -6,10 +6,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/evidence"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/evidence"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (

@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
-	runnercodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
+	runnercodex "github.com/yapless/scopesifter/benchmarks/tokenbench/runner/codex"
 )
 
 type fakeLifecycle struct{}

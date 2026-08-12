@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	executionsnapshot "github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	executionsnapshot "github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 type artifactBundleFixture struct {

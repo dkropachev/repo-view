@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 	"golang.org/x/sys/unix"
 )
 

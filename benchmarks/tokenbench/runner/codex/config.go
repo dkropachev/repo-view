@@ -12,9 +12,9 @@ import (
 	"unicode/utf8"
 
 	"github.com/pelletier/go-toml/v2"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	genericrunner "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	genericrunner "github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
 )
 
 func (lifecycle *Lifecycle) readEffectiveConfig(ctx context.Context) (_ []byte, resultErr error) {

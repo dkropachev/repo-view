@@ -18,8 +18,8 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/internal/selfexec"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/selfexec"
 )
 
 const (

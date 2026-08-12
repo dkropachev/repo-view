@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const paritySchemaVersion = "tokenbench.parity/v2"

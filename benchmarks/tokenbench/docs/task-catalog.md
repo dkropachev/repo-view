@@ -12,7 +12,7 @@ Task IDs are derived, never independently named:
 <language>.<concise-repo-slug>.<family>.<tier>
 ```
 
-The concise `scylla-driver` slug occurs in both Rust and Java and is disambiguated by the language. Every task also records the full `corpus-<language>-...` repository slug. Go validation locks each language, concise slug, full slug, upstream URL, and `https://github.com/scopesifter/<repository-slug>` source URL as one tuple.
+The concise `scylla-driver` slug occurs in both Rust and Java and is disambiguated by the language. Every task also records the full `corpus-<language>-...` repository slug. Go validation locks each language, concise slug, full slug, upstream URL, and `https://github.com/yapless/<repository-slug>` source URL as one tuple.
 
 | Language | Task slug | Corpus repository | Upstream |
 |---|---|---|---|

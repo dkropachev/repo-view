@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/scopesifter/scopesifter/internal/gitdiffcontract"
-	"github.com/scopesifter/scopesifter/navigator"
+	"github.com/yapless/scopesifter/internal/gitdiffcontract"
+	"github.com/yapless/scopesifter/navigator"
 )
 
 func TestChangedStateCacheMatchesCanonicalDirectGit(t *testing.T) {

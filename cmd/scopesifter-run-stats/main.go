@@ -8,7 +8,7 @@ import (
 	"io"
 	"os"
 
-	"github.com/scopesifter/scopesifter/internal/runstats"
+	"github.com/yapless/scopesifter/internal/runstats"
 )
 
 func main() {

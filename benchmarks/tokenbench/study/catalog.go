@@ -349,7 +349,7 @@ func validateCatalogSource(source CatalogSource, identity catalogRepositoryIdent
 	if source.UpstreamURL != identity.upstreamURL {
 		return fmt.Errorf("upstream_url must be %q", identity.upstreamURL)
 	}
-	wantSourceURL := "https://github.com/scopesifter/" + identity.repositorySlug
+	wantSourceURL := "https://github.com/yapless/" + identity.repositorySlug
 	if source.SourceURL != wantSourceURL {
 		return fmt.Errorf("source_url must be %q", wantSourceURL)
 	}

@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
 )
 
 const (

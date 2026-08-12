@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/schemas/artifact-manifest-v2.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/schemas/artifact-manifest-v2.schema.json",
   "title": "Tokenbench trusted execution-artifact manifest v2",
   "type": "object",
   "additionalProperties": false,

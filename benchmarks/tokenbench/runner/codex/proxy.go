@@ -19,7 +19,7 @@ import (
 	"strings"
 	"sync"
 
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
 )
 
 const (

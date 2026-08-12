@@ -14,7 +14,7 @@ const (
 	genericConstruction         constructionMode = "extension"
 	conformantCodexConstruction constructionMode = "builtin-codex-v0.144.0"
 
-	codexLifecyclePackage         = "github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner/codex"
+	codexLifecyclePackage         = "github.com/yapless/scopesifter/benchmarks/tokenbench/runner/codex"
 	codexIdentityPrefix           = "tokenbench.codex-runner/codex-cli-v0.144.0/v3/sha256:"
 	productionRoutePolicy         = "openai-api/v1:https://api.openai.com/v1"
 	productionNetworkPolicyPrefix = "go-system-roots/v1;proxy=disabled;ambient-overrides=forbidden/sha256:"

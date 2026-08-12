@@ -1,6 +1,6 @@
 package navigator
 
-import kotlingrammar "github.com/scopesifter/scopesifter/internal/kotlingrammar"
+import kotlingrammar "github.com/yapless/scopesifter/internal/kotlingrammar"
 
 type kotlinSyntaxNode = treeSitterSyntaxNode
 type kotlinSyntaxTree = treeSitterSyntaxTree

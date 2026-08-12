@@ -13,13 +13,13 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
 )
 
 const (
 	AttestationSchemaVersion          = "tokenbench.attestation/v2"
 	AttestationStatementSchemaVersion = "tokenbench.attestation-statement/v2"
-	AttestationProject                = "github.com/scopesifter/scopesifter/benchmarks/tokenbench"
+	AttestationProject                = "github.com/yapless/scopesifter/benchmarks/tokenbench"
 
 	attestationMediaType = "application/vnd.tokenbench.attestation.v2+json"
 	attestationDomain    = "scopesifter/tokenbench/attestation/ed25519/v2\x00"

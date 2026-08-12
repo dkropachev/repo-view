@@ -11,7 +11,7 @@ import (
 	"io"
 	"reflect"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/cas"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/cas"
 )
 
 // TaskArtifactAuthority is the only capability an authenticated task bundle

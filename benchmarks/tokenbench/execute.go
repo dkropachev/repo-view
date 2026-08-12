@@ -14,8 +14,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/runner"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/runner"
 )
 
 // RunSchemaVersion is the current reconstructed run schema.

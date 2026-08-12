@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/study/schemas/evaluator-output-v3.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/study/schemas/evaluator-output-v3.schema.json",
   "title": "Tokenbench evaluator output v3",
   "type": "object",
   "additionalProperties": false,

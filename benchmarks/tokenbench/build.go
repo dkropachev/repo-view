@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"reflect"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness"
-	harnesscodex "github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/codex"
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/harness/fake"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	harnesscodex "github.com/yapless/scopesifter/benchmarks/tokenbench/harness/codex"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness/fake"
 )
 
 // ProcessPair contains adapter-built target processes after the second parity

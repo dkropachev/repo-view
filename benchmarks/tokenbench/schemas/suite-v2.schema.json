@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/scopesifter/scopesifter/benchmarks/tokenbench/schemas/suite-v2.schema.json",
+  "$id": "https://github.com/yapless/scopesifter/benchmarks/tokenbench/schemas/suite-v2.schema.json",
   "title": "Tokenbench authored suite v2",
   "description": "One common task and harness configuration with an exact trusted execution-artifact manifest commitment. Arms and tool registrations are intentionally absent.",
   "type": "object",

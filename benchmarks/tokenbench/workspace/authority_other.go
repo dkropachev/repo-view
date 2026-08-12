@@ -6,7 +6,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/scopesifter/scopesifter/benchmarks/tokenbench/snapshot"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/snapshot"
 )
 
 // PairAuthority has no live implementation outside Linux.

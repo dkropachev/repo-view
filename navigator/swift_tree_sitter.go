@@ -1,6 +1,6 @@
 package navigator
 
-import swiftgrammar "github.com/scopesifter/scopesifter/internal/swiftgrammar"
+import swiftgrammar "github.com/yapless/scopesifter/internal/swiftgrammar"
 
 type swiftSyntaxNode = treeSitterSyntaxNode
 type swiftSyntaxTree = treeSitterSyntaxTree
