@@ -113,15 +113,33 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 	}
 
 	discoveryPath := filepath.Join(toolbox, "bash")
-	utilityPath := filepath.Join(toolbox, "probe-util")
+	utilityPath := filepath.Join(toolbox, "grep")
 	wrongDiscoveryPath := filepath.Join(wrongToolbox, "bash")
 	imageDigest := copyStaticExecutableFixture(t, imageSource, discoveryPath)
 	_ = copyStaticExecutableFixture(t, utilitySource, utilityPath)
 	_ = copyStaticExecutableFixture(t, utilitySource, wrongDiscoveryPath)
-	if err := commandrunner.VerifyEntrypoint(t.Context(), discoveryPath); err != nil {
+	if pinned, err := pinExecutable(discoveryPath, imageDigest, true, true, true); err == nil {
+		_ = pinned.close()
+		t.Fatal("generic executable pinning accepted the reserved discovery basename")
+	}
+	discoveryImage, err := os.Open(discoveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer discoveryImage.Close()
+	if err := commandrunner.VerifyPinnedEntrypoint(
+		t.Context(), discoveryPath, discoveryImage,
+	); err != nil {
 		t.Fatalf("verify production command-runner entrypoint: %v", err)
 	}
-	if err := commandrunner.VerifyEntrypoint(t.Context(), wrongDiscoveryPath); err == nil {
+	wrongImage, err := os.Open(wrongDiscoveryPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer wrongImage.Close()
+	if err := commandrunner.VerifyPinnedEntrypoint(
+		t.Context(), wrongDiscoveryPath, wrongImage,
+	); err == nil {
 		t.Fatal("semantic entrypoint probe accepted a different static Go image")
 	}
 
@@ -151,23 +169,32 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 			},
 		}
 	}
+	ordinary, ordinaryErr := executor.Prepare(t.Context(), request("-c", "grep"))
+	if ordinary != nil {
+		_ = ordinary.Abort(t.Context())
+	}
+	if ordinaryErr == nil {
+		t.Fatal("ordinary executor role accepted the reserved discovery basename")
+	}
 	run := func(t *testing.T, arguments ...string) harness.RawExecution {
 		t.Helper()
-		raw, err := runPrepared(context.Background(), executor, request(arguments...))
+		prepared, err := executor.prepare(
+			context.Background(), request(arguments...), verifiedCommandRunnerDiscovery,
+		)
+		if err != nil {
+			t.Fatalf("prepare command-runner fixture %q: %v", arguments, err)
+		}
+		raw, err := prepared.Execute(context.Background())
 		if err != nil {
 			t.Fatalf("run command-runner fixture %q: %v", arguments, err)
 		}
 		return raw
 	}
 
-	raw := run(t, "-c", "probe-util "+commandRunnerUtilityFlag+" print")
+	raw := run(t, "-c", "grep "+commandRunnerUtilityFlag+" print")
 	if raw.ExitCode != 0 || string(raw.Stdout) != commandRunnerUtilityMarker+"\n" ||
 		len(raw.Stderr) != 0 {
 		t.Fatalf("allowlisted Go utility execution: %+v", raw)
-	}
-	raw = run(t, "-c", "exit 17")
-	if raw.ExitCode != 17 || len(raw.Stdout) != 0 || len(raw.Stderr) != 0 {
-		t.Fatalf("command-runner status propagation: %+v", raw)
 	}
 	raw = run(t, "-lc", "printf forbidden")
 	if raw.ExitCode != 2 || len(raw.Stdout) != 0 ||
@@ -183,14 +210,20 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 		{
 			name:       "unlisted basename",
 			command:    "sh -c 'printf forbidden'",
-			exitCode:   127,
-			diagnostic: "executable file not found",
+			exitCode:   125,
+			diagnostic: "prohibited script runtime",
 		},
 		{
 			name:       "host absolute path",
 			command:    "/bin/sh -c 'printf forbidden'",
 			exitCode:   125,
-			diagnostic: "permission denied",
+			diagnostic: "prohibited script runtime",
+		},
+		{
+			name:       "host absolute native path",
+			command:    "/bin/cat",
+			exitCode:   125,
+			diagnostic: "bare approved role",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -202,9 +235,10 @@ func TestPrivilegedGoCommandRunnerDiscoveryPath(t *testing.T) {
 		})
 	}
 
-	prepared, err := executor.Prepare(
+	prepared, err := executor.prepare(
 		context.Background(),
-		request("-c", "probe-util "+commandRunnerUtilityFlag+" sleep-tree"),
+		request("-c", "grep "+commandRunnerUtilityFlag+" sleep-tree"),
+		verifiedCommandRunnerDiscovery,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -274,13 +308,6 @@ func copyStaticExecutableFixture(t *testing.T, source, destination string) strin
 		t.Fatal(err)
 	}
 	if err := output.Close(); err != nil {
-		t.Fatal(err)
-	}
-	pinned, err := pinExecutable(destination, digest, true, true, true)
-	if err != nil {
-		t.Fatalf("verify copied static fixture: %v", err)
-	}
-	if err := pinned.close(); err != nil {
 		t.Fatal(err)
 	}
 	return digest

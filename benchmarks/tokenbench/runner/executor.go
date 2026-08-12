@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/yapless/scopesifter/benchmarks/tokenbench/harness"
+	"github.com/yapless/scopesifter/benchmarks/tokenbench/internal/commandrunner"
 	"github.com/yapless/scopesifter/internal/processpolicy"
 )
 
@@ -442,6 +443,18 @@ func (executor *Executor) Prepare(
 	ctx context.Context,
 	request ExecutionRequest,
 ) (PreparedExecution, error) {
+	return executor.prepare(ctx, request, ordinaryExecutable)
+}
+
+// prepare accepts a private executable role so the privileged same-package
+// test can exercise the version-scoped Go command-runner discovery pathname.
+// Every production caller enters through Prepare and therefore uses the
+// ordinary, script-rejecting role.
+func (executor *Executor) prepare(
+	ctx context.Context,
+	request ExecutionRequest,
+	role executableRole,
+) (PreparedExecution, error) {
 	executor.mu.Lock()
 	defer executor.mu.Unlock()
 	if executor.closed {
@@ -472,8 +485,10 @@ func (executor *Executor) Prepare(
 	prepared := &preparedExecution{executor: executor, request: request}
 	executor.active[prepared] = struct{}{}
 	executable, err := openPinnedExecutable(
+		ctx,
 		request,
 		executor.construction == conformantCodexConstruction,
+		role,
 	)
 	if err != nil {
 		return prepared, NewIntegrityError("pin harness executable", err)
@@ -1099,15 +1114,26 @@ func (target *pinnedExecutionTarget) reverify() error {
 }
 
 func openPinnedExecutable(
+	ctx context.Context,
 	request ExecutionRequest,
 	requireStatic bool,
+	role executableRole,
 ) (*pinnedExecutionTarget, error) {
 	path := request.Process.Argv[0]
-	if err := processpolicy.ValidateExecutable(path); err != nil {
-		return nil, fmt.Errorf("approved executable violates process policy: %w", err)
-	}
 	if path != request.Invocation.Executable {
 		return nil, errors.New("approved process executable does not match invocation")
+	}
+	switch role {
+	case ordinaryExecutable:
+		if err := processpolicy.ValidateExecutable(path); err != nil {
+			return nil, fmt.Errorf("approved executable violates process policy: %w", err)
+		}
+	case verifiedCommandRunnerDiscovery:
+		if !commandrunner.Invoked(path, request.Process.Environment["PATH"]) {
+			return nil, errors.New("verified command-runner discovery path has an invalid argv0 or PATH shape")
+		}
+	default:
+		return nil, errors.New("approved executable has an unknown process role")
 	}
 	if !validSHA256(request.Invocation.ExecutableSHA256) {
 		return nil, errors.New("invocation executable digest is invalid")
@@ -1144,6 +1170,8 @@ func openPinnedExecutable(
 		if err := requireFSVerity(file); err != nil {
 			return nil, err
 		}
+	}
+	if requireStatic || role == verifiedCommandRunnerDiscovery {
 		if err := validateStaticELF(file); err != nil {
 			return nil, err
 		}
@@ -1163,11 +1191,23 @@ func openPinnedExecutable(
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
 		return nil, err
 	}
+	if role == verifiedCommandRunnerDiscovery {
+		if err := commandrunner.VerifyPinnedEntrypoint(ctx, path, file); err != nil {
+			return nil, fmt.Errorf("prove verified command-runner discovery image: %w", err)
+		}
+	}
 	valid = true
 	return &pinnedExecutionTarget{
 		file: file, path: path, digest: digest, info: opened, requireVerity: requireStatic,
 	}, nil
 }
+
+type executableRole uint8
+
+const (
+	ordinaryExecutable executableRole = iota
+	verifiedCommandRunnerDiscovery
+)
 
 func validSHA256(value string) bool {
 	if len(value) != sha256.Size*2 {

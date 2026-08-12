@@ -5,9 +5,10 @@ package commandrunner
 import (
 	"context"
 	"errors"
+	"os"
 )
 
-// VerifyEntrypoint is unavailable outside the Linux publishable runtime.
-func VerifyEntrypoint(context.Context, string) error {
+// VerifyPinnedEntrypoint is unavailable outside the Linux publishable runtime.
+func VerifyPinnedEntrypoint(context.Context, string, *os.File) error {
 	return errors.New("command-runner entrypoint probe requires Linux")
 }

@@ -38,6 +38,40 @@ func TestExecutorUsesExactEnvironmentAndStdin(t *testing.T) {
 	}
 }
 
+func TestExecutorRejectsNativeImageUnderScriptRuntimeBasename(t *testing.T) {
+	request := helperRequest(t, "echo")
+	source, err := os.Open(request.Invocation.Executable)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer source.Close()
+	destination := filepath.Join(t.TempDir(), "bash")
+	output, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o555)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(output, source); err != nil {
+		_ = output.Close()
+		t.Fatal(err)
+	}
+	if err := output.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request.Invocation.Executable = destination
+	request.Process.Argv[0] = destination
+	executor, err := New(Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prepared, prepareErr := executor.Prepare(t.Context(), request)
+	if prepared != nil {
+		_ = prepared.Abort(t.Context())
+	}
+	if prepareErr == nil || !strings.Contains(prepareErr.Error(), "prohibited script runtime") {
+		t.Fatalf("native image under reserved basename was not rejected: %v", prepareErr)
+	}
+}
+
 func TestExecutorBoundsOutputAndCancels(t *testing.T) {
 	executor, err := New(Config{MaxStdoutBytes: 32})
 	if err != nil {

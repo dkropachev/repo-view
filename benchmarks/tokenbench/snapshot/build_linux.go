@@ -321,9 +321,10 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 	if err := validateNativeExecutableABIs(allExecutablePaths); err != nil {
 		return nil, err
 	}
-	if err := commandrunner.VerifyEntrypoint(
+	if err := verifyCommandRunnerEntrypoint(
 		ctx,
 		filepath.Join(toolboxPath, "bash"),
+		request.Origins.Runner.SHA256,
 	); err != nil {
 		return nil, fmt.Errorf("prove copied Go command-runner entrypoint: %w", err)
 	}
@@ -669,6 +670,55 @@ func copyExecutable(
 	if requireStatic && (!identity.Static || identity.Interpreter != "" ||
 		identity.LoaderSHA256 != "" || len(identity.Needed) != 0) {
 		return errors.New("publishable executable origin is dynamically linked")
+	}
+	return nil
+}
+
+func verifyCommandRunnerEntrypoint(
+	ctx context.Context,
+	path string,
+	expectedSHA256 string,
+) (resultErr error) {
+	before, err := os.Lstat(path)
+	if err != nil || before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() ||
+		before.Mode().Perm()&0o111 == 0 || hasMultipleLinks(before) {
+		return errors.Join(
+			errors.New("command-runner discovery path is not a single-link executable regular file"),
+			err,
+		)
+	}
+	image, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, image.Close()) }()
+	opened, err := image.Stat()
+	if err != nil || !os.SameFile(before, opened) || before.Mode() != opened.Mode() ||
+		before.Size() != opened.Size() || !before.ModTime().Equal(opened.ModTime()) {
+		return errors.Join(errors.New("command-runner discovery path changed while opening"), err)
+	}
+	identity, isELF, err := inspectELF(image)
+	if err != nil {
+		return fmt.Errorf("inspect command-runner discovery image: %w", err)
+	}
+	if !isELF || !identity.Static || identity.Interpreter != "" ||
+		identity.LoaderSHA256 != "" || len(identity.Needed) != 0 {
+		return errors.New("command-runner discovery image is not a static ELF executable")
+	}
+	observedSHA256, err := hashOpenFile(image, opened.Size())
+	if err != nil {
+		return fmt.Errorf("hash command-runner discovery image: %w", err)
+	}
+	if !validSHA256(expectedSHA256) || observedSHA256 != expectedSHA256 {
+		return errors.New("command-runner discovery image digest differs from its runner origin")
+	}
+	if err := commandrunner.VerifyPinnedEntrypoint(ctx, path, image); err != nil {
+		return err
+	}
+	after, err := os.Lstat(path)
+	if err != nil || !os.SameFile(opened, after) || opened.Mode() != after.Mode() ||
+		opened.Size() != after.Size() || !opened.ModTime().Equal(after.ModTime()) {
+		return errors.Join(errors.New("command-runner discovery path changed during its probe"), err)
 	}
 	return nil
 }
