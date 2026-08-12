@@ -264,6 +264,27 @@ func TreeDigest(ctx context.Context, root string) (
 	return treeDigest(ctx, git, root)
 }
 
+// TreeDigestWithGit computes TreeDigest with the exact authenticated native
+// Git executable identified by an absolute canonical path and SHA-256. This
+// keeps a larger admission workflow on one executable identity instead of
+// resolving PATH independently for each phase.
+func TreeDigestWithGit(
+	ctx context.Context,
+	root, gitExecutable, gitExecutableSHA256 string,
+) (digest string, resultErr error) {
+	git, err := resolvePinnedGitRunner(gitExecutable, gitExecutableSHA256)
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		closeGitRunner(git, &resultErr)
+		if resultErr != nil {
+			digest = ""
+		}
+	}()
+	return treeDigest(ctx, git, root)
+}
+
 func treeDigest(ctx context.Context, git gitRunner, root string) (string, error) {
 	objectFormat, entries, err := verifiedTrackedEntries(ctx, git, root)
 	if err != nil {
@@ -285,8 +306,77 @@ func treeDigest(ctx context.Context, git gitRunner, root string) (string, error)
 		return "", errors.New("gitlink materialization changed while source was hashed")
 	}
 
+	digest, err := hashTreeDigest(
+		ctx,
+		directories,
+		entries,
+		func(ctx context.Context, entry trackedEntry) ([]byte, error) {
+			path := filepath.Join(root, filepath.FromSlash(entry.path))
+			content, info, err := readStableRegularContext(
+				ctx,
+				path,
+				maximumRegularFileBytes,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("hash tracked path %q: %w", entry.path, err)
+			}
+			if hasMultipleLinks(info) {
+				return nil, fmt.Errorf(
+					"tracked path %q is hard-linked outside the source",
+					entry.path,
+				)
+			}
+			executable := info.Mode().Perm()&0o111 != 0
+			if executable != (entry.mode == "100755") {
+				return nil, fmt.Errorf(
+					"tracked path %q executable mode differs from the Git index",
+					entry.path,
+				)
+			}
+			blobID, err := gitBlobID(objectFormat, content)
+			if err != nil {
+				return nil, err
+			}
+			if blobID != entry.objectID {
+				return nil, fmt.Errorf(
+					"tracked path %q raw bytes do not match indexed blob %s",
+					entry.path,
+					entry.objectID,
+				)
+			}
+			return content, nil
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	if err := git.verify(); err != nil {
+		return "", fmt.Errorf("reverify Git executable: %w", err)
+	}
+	return digest, nil
+}
+
+type treeDigestFileReader func(
+	context.Context,
+	trackedEntry,
+) ([]byte, error)
+
+// hashTreeDigest is the single production framing implementation used for
+// both admitted worktrees and authenticated immutable Git objects.
+func hashTreeDigest(
+	ctx context.Context,
+	directories []worktreeDirectory,
+	entries []trackedEntry,
+	readFile treeDigestFileReader,
+) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	hasher := sha256.New()
 	for _, directory := range directories {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		writeFrame(hasher, []byte("directory"))
 		writeFrame(hasher, []byte(directory.path))
 		writeFrame(hasher, []byte(directory.mode.String()))
@@ -303,14 +393,22 @@ func treeDigest(ctx context.Context, git gitRunner, root string) (string, error)
 			writeFrame(hasher, []byte(entry.objectID))
 			continue
 		}
-		path := filepath.Join(root, filepath.FromSlash(entry.path))
-		content, info, err := readStableRegularContext(
-			ctx,
-			path,
-			maximumRegularFileBytes,
-		)
+		if readFile == nil {
+			return "", errors.New("tree digest regular-file reader is missing")
+		}
+		content, err := readFile(ctx, entry)
 		if err != nil {
-			return "", fmt.Errorf("hash tracked path %q: %w", entry.path, err)
+			return "", err
+		}
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		if int64(len(content)) > maximumRegularFileBytes {
+			return "", fmt.Errorf(
+				"tracked path %q exceeds %d bytes",
+				entry.path,
+				maximumRegularFileBytes,
+			)
 		}
 		if trackedBytes > maximumTrackedTreeBytes-int64(len(content)) {
 			return "", fmt.Errorf(
@@ -319,37 +417,10 @@ func treeDigest(ctx context.Context, git gitRunner, root string) (string, error)
 			)
 		}
 		trackedBytes += int64(len(content))
-		if hasMultipleLinks(info) {
-			return "", fmt.Errorf(
-				"tracked path %q is hard-linked outside the source",
-				entry.path,
-			)
-		}
-		executable := info.Mode().Perm()&0o111 != 0
-		if executable != (entry.mode == "100755") {
-			return "", fmt.Errorf(
-				"tracked path %q executable mode differs from the Git index",
-				entry.path,
-			)
-		}
-		blobID, err := gitBlobID(objectFormat, content)
-		if err != nil {
-			return "", err
-		}
-		if blobID != entry.objectID {
-			return "", fmt.Errorf(
-				"tracked path %q raw bytes do not match indexed blob %s",
-				entry.path,
-				entry.objectID,
-			)
-		}
 		writeFrame(hasher, []byte("file"))
 		writeFrame(hasher, []byte(entry.mode))
 		writeFrame(hasher, []byte(entry.path))
 		writeFrame(hasher, content)
-	}
-	if err := git.verify(); err != nil {
-		return "", fmt.Errorf("reverify Git executable: %w", err)
 	}
 	return hex.EncodeToString(hasher.Sum(nil)), nil
 }
@@ -690,7 +761,11 @@ func validateObjectID(objectID string, expectedLength int) error {
 }
 
 func gitBlobID(objectFormat string, content []byte) (string, error) {
-	header := []byte("blob " + strconv.Itoa(len(content)) + "\x00")
+	return gitObjectID(objectFormat, "blob", content)
+}
+
+func gitObjectID(objectFormat, objectType string, content []byte) (string, error) {
+	header := []byte(objectType + " " + strconv.Itoa(len(content)) + "\x00")
 	switch objectFormat {
 	case "sha1":
 		hasher := sha1.New() //nolint:gosec // Git SHA-1 repositories require SHA-1 object IDs.

@@ -487,7 +487,17 @@ func TestReleaseArchivesCarryCompleteThirdPartyNotices(t *testing.T) {
 		}
 	}
 	if !strings.Contains(workflow, "shell: go run -mod=readonly ./internal/cmd/workflow-runner -- {0}") ||
+		strings.Count(workflow, "runs-on: ubuntu-24.04") != 2 ||
+		!strings.Contains(workflow, "go-version: \"1.26.5\"") ||
+		strings.Count(workflow, "uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e") != 1 ||
+		!strings.Contains(workflow, "needs: test") ||
+		!strings.Contains(workflow, "environment: release") ||
+		!strings.Contains(workflow, "container: golang:1.26.5-bookworm@sha256:0d327c83532d3cdeeeebab56ce85962bf09cb89545355b10207c7771b0c3713f") ||
 		!strings.Contains(workflow, "run: release-artifacts") ||
+		strings.Count(workflow, "uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6") != 2 ||
+		!strings.Contains(workflow, "subject-checksums: dist/SHA256SUMS") ||
+		!strings.Contains(workflow, "subject-path: dist/SHA256SUMS") ||
+		!strings.Contains(workflow, "GH_TOKEN: ${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}") ||
 		!strings.Contains(workflow, "run: release-publish") ||
 		!strings.Contains(releaseMakefile, "go run -mod=readonly ./internal/cmd/release-artifacts -mode build") ||
 		!strings.Contains(releaseMakefile, "go run -mod=readonly ./internal/cmd/release-artifacts -mode publish") {
