@@ -278,8 +278,11 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		// image commits all bytes it can execute without an untracked loader or
 		// shared-library surface.
 		{"verifier Git", request.Origins.Git, filepath.Join(toolsPath, "verifier-git"), true},
-		{"bash", request.Origins.Bash, filepath.Join(toolboxPath, "bash"), true},
 		{"runner/arm-init", request.Origins.Runner, filepath.Join(toolsPath, "runner-arm-init"), true},
+		// Codex v0.144.0 recognizes only a fixed set of shell basenames and has
+		// no CLI default-shell override. The compatibility pathname contains a
+		// second copy of the pinned Go runner image, never a Bash artifact.
+		{"Go command runner", request.Origins.Runner, filepath.Join(toolboxPath, "bash"), true},
 	}
 	for _, item := range toolCopies {
 		if err := copyExecutable(
@@ -399,24 +402,26 @@ func Build(ctx context.Context, request BuildRequest) (_ *Authority, resultErr e
 		return nil, err
 	}
 	inputs := ExecutionInputs{
-		SchemaVersion:          ExecutionSchemaVersion,
-		SnapshotRoot:           rootPath,
-		SourceRoot:             sourcePath,
-		GitMetadataRoot:        filepath.Join(sourcePath, ".git"),
-		CodexExecutable:        filepath.Join(toolsPath, "codex"),
-		ScopeSifterExecutable:  filepath.Join(toolsPath, "scopesifter"),
-		VerifierGitExecutable:  gitPath,
-		BashExecutable:         filepath.Join(toolboxPath, "bash"),
-		Utilities:              utilityPathsForRoot(toolboxPath),
-		ToolboxRoot:            toolboxPath,
-		RunnerExecutable:       filepath.Join(toolsPath, "runner-arm-init"),
-		ArmInitExecutable:      filepath.Join(toolsPath, "runner-arm-init"),
-		RunnerArmInitSameImage: true,
-		SourceRevision:         verified.Revision,
-		SourceBaseRevision:     verified.Base,
-		SourceTreeSHA256:       verified.TreeSHA256,
-		GitMetadataSHA256:      verified.GitMetadataSHA256,
-		OriginCommitment:       request.Origins.Commitment,
+		SchemaVersion:                ExecutionSchemaVersion,
+		SnapshotRoot:                 rootPath,
+		SourceRoot:                   sourcePath,
+		GitMetadataRoot:              filepath.Join(sourcePath, ".git"),
+		CodexExecutable:              filepath.Join(toolsPath, "codex"),
+		ScopeSifterExecutable:        filepath.Join(toolsPath, "scopesifter"),
+		VerifierGitExecutable:        gitPath,
+		CommandRunnerExecutable:      filepath.Join(toolboxPath, "bash"),
+		Utilities:                    utilityPathsForRoot(toolboxPath),
+		ToolboxRoot:                  toolboxPath,
+		RunnerExecutable:             filepath.Join(toolsPath, "runner-arm-init"),
+		ArmInitExecutable:            filepath.Join(toolsPath, "runner-arm-init"),
+		RunnerArmInitSameImage:       true,
+		CommandRunnerImplementation:  GoCommandRunnerImplementation,
+		CommandRunnerRunnerSameImage: true,
+		SourceRevision:               verified.Revision,
+		SourceBaseRevision:           verified.Base,
+		SourceTreeSHA256:             verified.TreeSHA256,
+		GitMetadataSHA256:            verified.GitMetadataSHA256,
+		OriginCommitment:             request.Origins.Commitment,
 		ChangedState: ChangedStateIdentity{
 			SchemaVersion:     ChangedStateSchemaVersion,
 			Path:              changedPath,

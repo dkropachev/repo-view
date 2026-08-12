@@ -23,9 +23,9 @@ import (
 const (
 	// ArtifactManifestSchemaVersion is the canonical authored execution bundle
 	// schema. The JSON encoding must exactly equal json.Marshal of this model.
-	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v2"
-	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v2"
-	ArtifactManifestFilename      = "tokenbench-artifacts-v2.json"
+	ArtifactManifestSchemaVersion = "tokenbench.artifact-manifest/v3"
+	ArtifactBundleAuditVersion    = "tokenbench.artifact-bundle-audit/v3"
+	ArtifactManifestFilename      = "tokenbench-artifacts-v3.json"
 
 	maximumArtifactManifestBytes = 64 << 10
 	maximumArtifactFileBytes     = int64(256 << 20)
@@ -76,7 +76,7 @@ type ArtifactUtilities struct {
 	Xargs   ArtifactFile `json:"xargs"`
 }
 
-// ArtifactManifest is the canonical strict v2 execution-artifact manifest.
+// ArtifactManifest is the canonical strict v3 execution-artifact manifest.
 // Every executable must be a distinct static ELF image.
 type ArtifactManifest struct {
 	SchemaVersion string             `json:"schema_version"`
@@ -84,7 +84,6 @@ type ArtifactManifest struct {
 	Codex         ArtifactFile       `json:"codex"`
 	ScopeSifter   ArtifactFile       `json:"scopesifter"`
 	StaticGit     ArtifactFile       `json:"static_git"`
-	StaticBash    ArtifactFile       `json:"static_bash"`
 	Utilities     ArtifactUtilities  `json:"utilities"`
 }
 
@@ -110,7 +109,6 @@ func (manifest ArtifactManifest) roles() []artifactRole {
 		{"codex", manifest.Codex},
 		{"scopesifter", manifest.ScopeSifter},
 		{"static Git", manifest.StaticGit},
-		{"static Bash", manifest.StaticBash},
 		{"rg", manifest.Utilities.Ripgrep},
 		{"sed", manifest.Utilities.Sed},
 		{"awk", manifest.Utilities.Awk},
@@ -249,7 +247,6 @@ type artifactOriginSet struct {
 	Codex       executionsnapshot.FileOrigin
 	ScopeSifter executionsnapshot.FileOrigin
 	Git         executionsnapshot.FileOrigin
-	Bash        executionsnapshot.FileOrigin
 	Utilities   executionsnapshot.UtilityOrigins
 }
 
@@ -436,7 +433,7 @@ func verifyArtifactFiles(
 	}
 	return artifactOriginSet{
 		Codex: verified["codex"], ScopeSifter: verified["scopesifter"],
-		Git: verified["static Git"], Bash: verified["static Bash"],
+		Git: verified["static Git"],
 		Utilities: executionsnapshot.UtilityOrigins{
 			Ripgrep: verified["rg"], Sed: verified["sed"], Awk: verified["awk"],
 			Find: verified["find"], Head: verified["head"], Tail: verified["tail"],
@@ -588,8 +585,8 @@ func (audit ArtifactBundleAudit) validateBinding(origins executionsnapshot.Origi
 	}
 	actual := map[string]executionsnapshot.FileOrigin{
 		"codex": origins.Codex, "scopesifter": origins.ScopeSifter,
-		"static Git": origins.Git, "static Bash": origins.Bash,
-		"rg": origins.Utilities.Ripgrep, "sed": origins.Utilities.Sed,
+		"static Git": origins.Git,
+		"rg":         origins.Utilities.Ripgrep, "sed": origins.Utilities.Sed,
 		"awk": origins.Utilities.Awk, "find": origins.Utilities.Find,
 		"head": origins.Utilities.Head, "tail": origins.Utilities.Tail,
 		"wc": origins.Utilities.WC, "sort": origins.Utilities.Sort,

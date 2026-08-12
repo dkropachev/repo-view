@@ -87,6 +87,28 @@ func TestValidateAndPlanRejectNonCodexAdapter(t *testing.T) {
 	}
 }
 
+func TestDispatchUsesGoCommandRunnerAtCodexCompatibilityPath(t *testing.T) {
+	t.Parallel()
+	var stdout, stderr bytes.Buffer
+	exitCode := dispatch(
+		context.Background(),
+		"/snapshot/toolbox/bash",
+		"/snapshot/toolbox",
+		[]string{"-c", "printf '%s\\n' go-native"},
+		strings.NewReader(""),
+		&stdout,
+		&stderr,
+	)
+	if exitCode != 0 || stdout.String() != "go-native\n" || stderr.Len() != 0 {
+		t.Fatalf(
+			"dispatch() exit=%d stdout=%q stderr=%q",
+			exitCode,
+			stdout.String(),
+			stderr.String(),
+		)
+	}
+}
+
 func TestValidateRejectsCandidateOverride(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()

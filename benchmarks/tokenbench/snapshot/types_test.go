@@ -61,6 +61,32 @@ func TestExecutionInputsPureValidationRejectsExecutableSurfaceAndMountForgeries(
 			want: "static image",
 		},
 		{
+			name: "command runner same-image assertion disabled",
+			mutate: func(value *ExecutionInputs) {
+				value.CommandRunnerRunnerSameImage = false
+			},
+			want: "same-image assertion",
+		},
+		{
+			name: "command runner implementation changed",
+			mutate: func(value *ExecutionInputs) {
+				value.CommandRunnerImplementation = "forged"
+			},
+			want: "implementation identity",
+		},
+		{
+			name: "command runner bytes differ from Go runner",
+			mutate: func(value *ExecutionInputs) {
+				for index := range value.Manifest {
+					if value.Manifest[index].SnapshotPath == value.CommandRunnerExecutable {
+						value.Manifest[index].SHA256 = strings.Repeat("9", 64)
+					}
+				}
+				value.ManifestSHA256, _ = manifestSHA256(value.Manifest)
+			},
+			want: "not the pinned Go runner image",
+		},
+		{
 			name: "mount writable",
 			mutate: func(value *ExecutionInputs) {
 				value.PathIsolation.ReadOnly = false
@@ -231,7 +257,7 @@ func originFixture(t *testing.T) OriginInputs {
 			Base: strings.Repeat("b", 40), TreeSHA256: strings.Repeat("c", 64),
 			GitMetadataSHA256: strings.Repeat("d", 64),
 		},
-		file("codex"), file("scopesifter"), file("git"), file("bash"),
+		file("codex"), file("scopesifter"), file("git"),
 		UtilityOrigins{
 			Ripgrep: file("rg"), Sed: file("sed"), Awk: file("awk"),
 			Find: file("find"), Head: file("head"), Tail: file("tail"),
@@ -324,17 +350,19 @@ func executionFixture(t *testing.T) ExecutionInputs {
 	mount.Commitment, _ = mountCommitment(mount)
 	inputs := ExecutionInputs{
 		SchemaVersion: ExecutionSchemaVersion, SnapshotRoot: root,
-		SourceRoot:            filepath.Join(root, "source"),
-		GitMetadataRoot:       filepath.Join(root, "source", ".git"),
-		CodexExecutable:       filepath.Join(root, "tools", "codex"),
-		ScopeSifterExecutable: filepath.Join(root, "tools", "scopesifter"),
-		VerifierGitExecutable: filepath.Join(root, "tools", "verifier-git"),
-		BashExecutable:        filepath.Join(root, "toolbox", "bash"),
-		Utilities:             utilities, ToolboxRoot: filepath.Join(root, "toolbox"),
-		RunnerExecutable:       filepath.Join(root, "tools", "runner-arm-init"),
-		ArmInitExecutable:      filepath.Join(root, "tools", "runner-arm-init"),
-		RunnerArmInitSameImage: true,
-		SourceRevision:         origins.Source.Revision, SourceBaseRevision: origins.Source.Base,
+		SourceRoot:              filepath.Join(root, "source"),
+		GitMetadataRoot:         filepath.Join(root, "source", ".git"),
+		CodexExecutable:         filepath.Join(root, "tools", "codex"),
+		ScopeSifterExecutable:   filepath.Join(root, "tools", "scopesifter"),
+		VerifierGitExecutable:   filepath.Join(root, "tools", "verifier-git"),
+		CommandRunnerExecutable: filepath.Join(root, "toolbox", "bash"),
+		Utilities:               utilities, ToolboxRoot: filepath.Join(root, "toolbox"),
+		RunnerExecutable:             filepath.Join(root, "tools", "runner-arm-init"),
+		ArmInitExecutable:            filepath.Join(root, "tools", "runner-arm-init"),
+		RunnerArmInitSameImage:       true,
+		CommandRunnerImplementation:  GoCommandRunnerImplementation,
+		CommandRunnerRunnerSameImage: true,
+		SourceRevision:               origins.Source.Revision, SourceBaseRevision: origins.Source.Base,
 		SourceTreeSHA256:  origins.Source.TreeSHA256,
 		GitMetadataSHA256: origins.Source.GitMetadataSHA256,
 		OriginCommitment:  origins.Commitment,

@@ -52,8 +52,8 @@ func TestDecodeArtifactManifestRejectsUnknownDuplicateAndTrailingData(t *testing
 		"unknown": append(append([]byte(nil), raw[:len(raw)-1]...), []byte(`,"unknown":true}`)...),
 		"duplicate": []byte(strings.Replace(
 			string(raw),
-			`"schema_version":"tokenbench.artifact-manifest/v2"`,
-			`"schema_version":"tokenbench.artifact-manifest/v2","schema_version":"tokenbench.artifact-manifest/v2"`,
+			`"schema_version":"tokenbench.artifact-manifest/v3"`,
+			`"schema_version":"tokenbench.artifact-manifest/v3","schema_version":"tokenbench.artifact-manifest/v3"`,
 			1,
 		)),
 		"trailing whitespace": append(append([]byte(nil), raw...), '\n'),
@@ -304,7 +304,7 @@ func newArtifactBundleFixture(t *testing.T) artifactBundleFixture {
 			BuilderImageDigest: "sha256:" + SHA256([]byte("builder-image")),
 		},
 		Codex: next("codex"), ScopeSifter: next("scopesifter"),
-		StaticGit: next("git"), StaticBash: next("bash"),
+		StaticGit: next("git"),
 		Utilities: ArtifactUtilities{
 			Ripgrep: next("rg"), Sed: next("sed"), Awk: next("awk"),
 			Find: next("find"), Head: next("head"), Tail: next("tail"),
@@ -370,7 +370,7 @@ func originInputsForArtifacts(t *testing.T, artifacts artifactOriginSet) executi
 			Root: "/source", Revision: strings.Repeat("a", 40), Base: strings.Repeat("b", 40),
 			TreeSHA256: SHA256([]byte("tree")), GitMetadataSHA256: SHA256([]byte("git-metadata")),
 		},
-		artifacts.Codex, artifacts.ScopeSifter, artifacts.Git, artifacts.Bash,
+		artifacts.Codex, artifacts.ScopeSifter, artifacts.Git,
 		artifacts.Utilities,
 		executionsnapshot.FileOrigin{Path: "/runner", SHA256: SHA256([]byte("runner"))},
 	)

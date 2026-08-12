@@ -69,7 +69,7 @@ The artifact build is a separate reproducible supply-chain step. Build all
 images from the provenance named in the manifest, then place this closed set
 below one canonical absolute directory:
 
-- Codex, scopesifter, static Git, and static Bash;
+- Codex, scopesifter, and static Git;
 - distinct `rg`, `sed`, `awk`, `find`, `head`, `tail`, `wc`, `sort`, `cut`,
   `tr`, `cat`, `ls`, `grep`, and `xargs` images.
 
@@ -80,9 +80,9 @@ applets, and cross-role byte aliases are rejected. Only listed roles enter the
 immutable snapshot; an extra bundle file grants no executable authority and
 should be excluded from a reproducible bundle.
 
-Write the fixed file `tokenbench-artifacts-v2.json` at the bundle root. Its
+Write the fixed file `tokenbench-artifacts-v3.json` at the bundle root. Its
 shape is defined by
-[`artifact-manifest-v2.schema.json`](../schemas/artifact-manifest-v2.schema.json),
+[`artifact-manifest-v3.schema.json`](../schemas/artifact-manifest-v3.schema.json),
 but schema validation alone is insufficient: the loader requires the exact
 compact bytes produced by Go `json.Marshal(tokenbench.ArtifactManifest)`, with
 no trailing newline. The exported `ArtifactManifest.Validate` method checks the
@@ -101,7 +101,7 @@ Build tokenbench at its final canonical path. A normal development build or
 `go run` has no artifact policy and cannot publish a live result.
 
 ```sh
-manifest=/absolute/artifacts/tokenbench-artifacts-v2.json
+manifest=/absolute/artifacts/tokenbench-artifacts-v3.json
 manifest_sha256="$(sha256sum "${manifest}" | awk '{print $1}')"
 
 CGO_ENABLED=0 go build -trimpath \
@@ -109,6 +109,12 @@ CGO_ENABLED=0 go build -trimpath \
   -o /absolute/bin/tokenbench \
   ./benchmarks/tokenbench/cmd/tokenbench
 ```
+
+Do not add a shell artifact. The resulting static Go tokenbench executable is
+also the command interpreter: immutable snapshot construction copies its exact
+bytes to the Codex v0.144.0 compatibility pathname and commits the same-image
+relationship. The interpreter accepts only `-c COMMAND`; it does not run Bash
+and does not claim complete Bash behavior.
 
 The executable itself becomes the runner/arm-init image in the immutable
 snapshot. It must therefore be a native static ELF executable at one real,
