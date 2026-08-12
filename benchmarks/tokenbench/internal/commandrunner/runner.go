@@ -67,7 +67,9 @@ func Run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			&synchronizedWriter{writer: stdout},
 			&synchronizedWriter{writer: stderr},
 		),
-		interp.ExecHandler(interp.DefaultExecHandler(-1)),
+		interp.ExecHandlers(func(_ interp.ExecHandlerFunc) interp.ExecHandlerFunc {
+			return interp.DefaultExecHandler(-1)
+		}),
 	)
 	if err != nil {
 		fmt.Fprintf(stderr, "tokenbench command runner: initialize: %v\n", err)
