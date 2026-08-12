@@ -21,6 +21,22 @@ type artifactBundleFixture struct {
 	loaded   LoadedSuite
 }
 
+func TestArtifactBundleAuditRejectsFrozenV2(t *testing.T) {
+	t.Parallel()
+	fixture := newArtifactBundleFixture(t)
+	audit := ArtifactBundleAudit{
+		SchemaVersion:  "tokenbench.artifact-bundle-audit/v2",
+		Root:           fixture.root,
+		Manifest:       fixture.manifest,
+		Provenance:     fixture.manifest.Provenance,
+		ManifestSHA256: fixture.digest,
+		RawManifest:    append([]byte(nil), fixture.raw...),
+	}
+	if err := audit.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected artifact bundle audit schema") {
+		t.Fatalf("artifact-bundle-audit/v2 rejection = %v", err)
+	}
+}
+
 func TestLoadArtifactBundleBindsExactStaticRoleSet(t *testing.T) {
 	fixture := newArtifactBundleFixture(t)
 	useArtifactBuildPolicyForTest(t, fixture.digest)

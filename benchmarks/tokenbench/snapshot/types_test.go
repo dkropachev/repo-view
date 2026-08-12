@@ -10,6 +10,22 @@ import (
 	"testing"
 )
 
+func TestFrozenInputSchemasAreRejected(t *testing.T) {
+	t.Parallel()
+
+	origins := originFixture(t)
+	origins.SchemaVersion = "tokenbench.origin-inputs/v2"
+	if err := origins.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected origin-input schema") {
+		t.Fatalf("origin-inputs/v2 rejection = %v", err)
+	}
+
+	execution := executionFixture(t)
+	execution.SchemaVersion = "tokenbench.execution-inputs/v2"
+	if err := execution.Validate(); err == nil || !strings.Contains(err.Error(), "unexpected execution-input schema") {
+		t.Fatalf("execution-inputs/v2 rejection = %v", err)
+	}
+}
+
 func TestOriginInputsRejectsSharedExecutableRole(t *testing.T) {
 	origins := originFixture(t)
 	origins.Utilities.Cat = origins.Utilities.Sed

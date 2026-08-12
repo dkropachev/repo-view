@@ -134,6 +134,16 @@ func TestFrozenEvidenceVersionsAreRejected(t *testing.T) {
 		t.Fatalf("capture/v5 rejection = %v", err)
 	}
 
+	oldPlanMediaCapture := capture.Manifest
+	oldPlanMediaCapture.Plan.MediaType = "application/vnd.tokenbench.plan.v4+json"
+	oldPlanMediaRoot := putTestAttestedSubject(
+		t, store, signer, CaptureBundle, captureMediaType, oldPlanMediaCapture, nil,
+	)
+	if _, err := LoadCapture(context.Background(), store, oldPlanMediaRoot, verifier); err == nil ||
+		!strings.Contains(err.Error(), "unexpected plan media type") {
+		t.Fatalf("plan.v4 media-type rejection = %v", err)
+	}
+
 	oldCaptureObservation := capture.Manifest
 	oldCaptureObservationRef := *oldCaptureObservation.Baseline.Observation
 	oldCaptureObservationRef.MediaType = "application/vnd.tokenbench.observation.v1+json"
