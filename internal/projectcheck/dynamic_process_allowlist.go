@@ -16,7 +16,7 @@ var approvedDynamicProcessFileSHA256 = map[string]string{
 	"internal/grammargen/runner.go":                   "3a63d6b844d541c1a6064de0bb369a341687e8e1e53e75eb4636085b4ca38e34",
 	"internal/grammargen/runner_test.go":              "4163aaae35594de3ecd13ee4c9379ac283d4da722e7ca00ab98ee1d6ad2b58b6",
 	"internal/processpolicy/native.go":                "a250c2408038b936ee33f4325d301f6ee6146d217a446fc69c36d874223f1a31",
-	"internal/projectcheck/check.go":                  "58e76c634f30cbfba54868bf2b07bc99a8717a0c44b98e82641dd9ec7e1eb9ab",
+	"internal/projectcheck/check.go":                  "33483263cd846361c6de94440c905e203c9231eacd8dde466fba43d035eb3935",
 	"internal/projectcheck/check_test.go":             "b54892061ef0e5585251b946495df4b1d5e1690df1b69fef3b4df2fc29301c09",
 	"internal/releaseartifacts/release.go":            "ea7a839576a744ec99ca22394e4823491ea36c12fd118ecb3f8e74cb18d5ae3c",
 	"internal/releaseartifacts/release_publish.go":    "e9e04148cc5ea4a0a656b2e09e11b3a4785aebed9817c8e3d42b0701c8868f34",
@@ -27,7 +27,7 @@ var approvedDynamicProcessFileSHA256 = map[string]string{
 	"navigator/git_identity.go":                       "797550ea84ca03e1493d624b1ed0743261160fbc72719fa3410e4b9c32edbb8d",
 	"navigator/git_revision.go":                       "a69f911aa8b5579e26679b70bd2a4eba3540bd0942fc7a3ec5fd3bacd5665a37",
 	"navigator/git_revision_test.go":                  "94bfdcf15d4c48407c717bc476c6aa35c35e7878aa4c3f3e13e52c739f61d96d",
-	"navigator/navigate.go":                           "bf5fe673697f0a87fb20d1e7e128d79d2867ab3d9069957f2e1f7c779b4da2c9",
+	"navigator/navigate.go":                           "adbfee4366199d23e02b18fa74091a81004c4698da9591262d88bdb2ede6cc57",
 	"navigator/navigate_test.go":                      "71c3b1fd69a06c4d853f2985df166a7472dc3f96b18e559c7c6c8e2e59e97bb4",
-	"navigator/testmain_test.go":                      "b0f01f0f518c28ba09ee6f10faeae897a33027a5de920a4e340e4af4f68ac181",
+	"navigator/testmain_test.go":                      "b20f58c3fc1ebab336d83151027911b98e963fe4d0c7c7d231d64062c0b008fa",
 }

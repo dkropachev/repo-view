@@ -541,8 +541,7 @@ func validateWorkflowAction(
 
 func validateWorkflowRunEnvironment(target string, environment map[string]string) error {
 	expected := map[string]string{}
-	switch target {
-	case "release-publish":
+	if target == "release-publish" {
 		expected["GH_TOKEN"] = "${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}"
 	}
 	if len(environment) != len(expected) {

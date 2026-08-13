@@ -1832,14 +1832,6 @@ func (r *View) changedPatch(
 	return string(patch.output), false, nil
 }
 
-func truncatePatchLines(patch string, maxLines int) (string, bool) {
-	lines := strings.Split(patch, "\n")
-	if maxLines > 0 && len(lines) > maxLines {
-		return strings.Join(lines[:maxLines], "\n"), true
-	}
-	return patch, false
-}
-
 func (r *View) untrackedFilePatch(
 	rel, gitDir string,
 	maxLines, maxBytes int,

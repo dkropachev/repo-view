@@ -116,22 +116,6 @@ func copyNavigatorTestExecutable(t *testing.T, path string) {
 	}
 }
 
-func assertNavigatorGitInterceptor(t *testing.T, executable, marker string) {
-	t.Helper()
-	err := exec.Command(executable).Run()
-	var exitError *exec.ExitError
-	if !errors.As(err, &exitError) || exitError.ExitCode() != 99 {
-		t.Fatalf("hostile Git fixture exit = %v, want 99", err)
-	}
-	content, err := os.ReadFile(marker)
-	if err != nil || string(content) != "intercepted" {
-		t.Fatalf("hostile Git fixture marker = %q, %v", content, err)
-	}
-	if err := os.Remove(marker); err != nil {
-		t.Fatal(err)
-	}
-}
-
 func assertNavigatorFSMonitor(t *testing.T, executable string) {
 	t.Helper()
 	if output, err := exec.Command(executable).CombinedOutput(); err != nil {
