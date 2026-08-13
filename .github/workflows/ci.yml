@@ -75,25 +75,3 @@ jobs:
 
       - name: Enforce no executable scripts
         run: ci-no-scripts
-
-  privileged-linux:
-    name: Privileged Linux kernel boundaries
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run fail-closed privileged kernel tests
-        env:
-          TOKENBENCH_PRIVILEGED_IMAGE: golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599
-        run: tokenbench-privileged-linux

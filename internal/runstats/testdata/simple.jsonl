@@ -1,4 +1,0 @@
-{"type":"thread.started","thread_id":"thread-1"}
-{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"/usr/bin/zsh -lc 'scopesifter changed --root . --base HEAD^ --json'","status":"in_progress"}}
-{"type":"item.completed","item":{"id":"item-1","type":"command_execution","command":"/usr/bin/zsh -lc 'scopesifter changed --root . --base HEAD^ --json'","aggregated_output":"{\"results\":[{\"path\":\"pkg/session.go\",\"line\":42}]}","exit_code":0,"status":"completed"}}
-{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":10,"reasoning_output_tokens":2}}

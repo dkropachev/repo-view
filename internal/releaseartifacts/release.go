@@ -37,12 +37,8 @@ const noticeName = "THIRD_PARTY_NOTICES.md"
 const releaseRepository = "yapless/scopesifter"
 
 const (
-	scopesifterProgramPath        = "github.com/yapless/scopesifter/cmd/scopesifter"
-	taskctlProgramPath            = "github.com/yapless/scopesifter/cmd/taskctl"
-	taskctlLauncherProgramPath    = "github.com/yapless/scopesifter/internal/cmd/taskctl-launcher"
-	taskctlArtifactPrefix         = "scopesifter-taskctl"
-	taskctlLauncherArtifactPrefix = "scopesifter-taskctl-launcher"
-	requiredReleaseGoVersion      = "go1.26.5"
+	scopesifterProgramPath   = "github.com/yapless/scopesifter/cmd/scopesifter"
+	requiredReleaseGoVersion = "go1.26.5"
 )
 
 const (
@@ -60,22 +56,12 @@ type target struct {
 	goarch string
 }
 
-type trustedProgram struct {
-	artifactPrefix string
-	packagePath    string
-}
-
 var targets = []target{
 	{goos: "linux", goarch: "amd64"},
 	{goos: "linux", goarch: "arm64"},
 	{goos: "darwin", goarch: "amd64"},
 	{goos: "darwin", goarch: "arm64"},
 	{goos: "windows", goarch: "amd64"},
-}
-
-var trustedPrograms = []trustedProgram{
-	{artifactPrefix: taskctlArtifactPrefix, packagePath: taskctlProgramPath},
-	{artifactPrefix: taskctlLauncherArtifactPrefix, packagePath: taskctlLauncherProgramPath},
 }
 
 // Build creates the complete release artifact set under root/dist. The
@@ -135,13 +121,6 @@ func Build(root, refName string) error {
 	for _, item := range targets {
 		if err := buildTarget(sourceRoot, workRoot, stagedDist, noticePath, version, commit, item); err != nil {
 			return err
-		}
-		if item.goos == "linux" {
-			for _, program := range trustedPrograms {
-				if err := buildTrustedProgram(sourceRoot, workRoot, stagedDist, version, commit, item, program); err != nil {
-					return err
-				}
-			}
 		}
 	}
 	if err := writeChecksums(stagedDist); err != nil {
@@ -367,7 +346,7 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 	if err != nil {
 		return fmt.Errorf("read %s/%s binary: %w", item.goos, item.goarch, err)
 	}
-	if err := validateExecutable(binary, item, commit, scopesifterProgramPath, false); err != nil {
+	if err := validateExecutable(binary, item, commit); err != nil {
 		return fmt.Errorf("validate built %s/%s binary: %w", item.goos, item.goarch, err)
 	}
 	notice, err := os.ReadFile(noticePath)
@@ -386,67 +365,6 @@ func buildTarget(root, workRoot, dist, noticePath, version, commit string, item 
 		return fmt.Errorf("remove staged %s/%s binary: %w", item.goos, item.goarch, err)
 	}
 	return nil
-}
-
-func buildTrustedProgram(
-	root, workRoot, dist, version, commit string,
-	item target,
-	program trustedProgram,
-) error {
-	if item.goos != "linux" {
-		return fmt.Errorf("trusted taskctl programs only support Linux, got %s/%s", item.goos, item.goarch)
-	}
-	binaryPath := filepath.Join(workRoot, program.artifactPrefix+"-"+item.goarch)
-	arguments := []string{
-		"build", "-mod=readonly", "-trimpath", "-buildvcs=false",
-		"-ldflags=-s -w -X main.releaseRevision=" + commit +
-			" -X main.releaseRevisionMarker=scopesifter.release-revision=" + commit,
-		"-o", binaryPath, "./" + strings.TrimPrefix(program.packagePath, "github.com/yapless/scopesifter/"),
-	}
-	command, goFile, err := processpolicy.NativeCommand("go", arguments...)
-	if err != nil {
-		return fmt.Errorf("pin native Go tool: %w", err)
-	}
-	command.Dir = root
-	command.Env = releaseBuildEnvironment(os.Environ(), item, workRoot)
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	runErr := command.Run()
-	closeErr := goFile.Close()
-	if runErr != nil {
-		return fmt.Errorf("build %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, runErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close native Go image: %w", closeErr)
-	}
-	binary, err := os.ReadFile(binaryPath)
-	if err != nil {
-		return fmt.Errorf("read built %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, err)
-	}
-	if err := validateExecutable(binary, item, commit, program.packagePath, true); err != nil {
-		return fmt.Errorf("validate built %s for %s/%s: %w", program.packagePath, item.goos, item.goarch, err)
-	}
-	artifactPath := filepath.Join(dist, trustedArtifactName(program, version, item))
-	artifact, err := os.OpenFile(artifactPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
-	if err != nil {
-		return fmt.Errorf("create trusted program artifact: %w", err)
-	}
-	writeErr := writeAll(artifact, binary)
-	closeArtifactErr := artifact.Close()
-	if writeErr != nil || closeArtifactErr != nil {
-		return errors.Join(
-			wrapReleaseError("write trusted program artifact", writeErr),
-			wrapReleaseError("close trusted program artifact", closeArtifactErr),
-		)
-	}
-	if err := os.Remove(binaryPath); err != nil {
-		return fmt.Errorf("remove staged trusted program: %w", err)
-	}
-	return nil
-}
-
-func trustedArtifactName(program trustedProgram, version string, item target) string {
-	return fmt.Sprintf("%s_%s_%s_%s", program.artifactPrefix, version, item.goos, item.goarch)
 }
 
 func wrapReleaseError(operation string, err error) error {
@@ -630,14 +548,7 @@ func readReleaseArtifactSet(dist string) (map[string][]byte, error) {
 }
 
 func expectedReleaseArtifactCount() int {
-	count := 1
-	for _, item := range targets {
-		count++
-		if item.goos == "linux" {
-			count += len(trustedPrograms)
-		}
-	}
-	return count
+	return len(targets) + 1
 }
 
 func expectedReleaseArtifactNamesFromDist(entries []os.DirEntry) map[string]struct{} {
@@ -665,11 +576,6 @@ func expectedReleaseArtifactNamesFromDist(entries []os.DirEntry) map[string]stru
 			extension = ".zip"
 		}
 		want[fmt.Sprintf("scopesifter_%s_%s_%s%s", version, item.goos, item.goarch, extension)] = struct{}{}
-		if item.goos == "linux" {
-			for _, program := range trustedPrograms {
-				want[trustedArtifactName(program, version, item)] = struct{}{}
-			}
-		}
 	}
 	return want
 }
@@ -682,11 +588,6 @@ func validateReleaseArtifactSet(set map[string][]byte, version, commit string, n
 			extension = ".zip"
 		}
 		want[fmt.Sprintf("scopesifter_%s_%s_%s%s", version, item.goos, item.goarch, extension)] = false
-		if item.goos == "linux" {
-			for _, program := range trustedPrograms {
-				want[trustedArtifactName(program, version, item)] = false
-			}
-		}
 	}
 	for name := range set {
 		if _, ok := want[name]; !ok {
@@ -711,18 +612,6 @@ func validateReleaseArtifactSet(set map[string][]byte, version, commit string, n
 		case strings.HasSuffix(name, ".zip"):
 			if err := validateZipBytes(name, set[name], notice, commit); err != nil {
 				return err
-			}
-		}
-	}
-	for _, item := range targets {
-		if item.goos != "linux" {
-			continue
-		}
-		for _, program := range trustedPrograms {
-			name := trustedArtifactName(program, version, item)
-			binary := set[name]
-			if err := validateExecutable(binary, item, commit, program.packagePath, true); err != nil {
-				return fmt.Errorf("validate trusted program artifact %s: %w", name, err)
 			}
 		}
 	}
@@ -842,7 +731,7 @@ func validateArchiveEntry(name string, mode fs.FileMode, size int64, reader io.R
 		if int64(len(binary)) != size {
 			return fmt.Errorf("%s content length = %d, want %d", name, len(binary), size)
 		}
-		if err := validateExecutable(binary, expected, commit, scopesifterProgramPath, false); err != nil {
+		if err := validateExecutable(binary, expected, commit); err != nil {
 			return fmt.Errorf("validate %s target: %w", name, err)
 		}
 	default:
@@ -865,8 +754,7 @@ func targetFromArchivePath(path string) target {
 func validateExecutable(
 	binary []byte,
 	expected target,
-	commit, expectedProgramPath string,
-	requireStatic bool,
+	commit string,
 ) error {
 	if expected.goos == "" || expected.goarch == "" {
 		return errors.New("archive filename does not identify a supported target")
@@ -883,26 +771,6 @@ func validateExecutable(
 			want = elf.EM_AARCH64
 		}
 		machine := file.Machine
-		if requireStatic {
-			if file.Type != elf.ET_EXEC {
-				_ = file.Close()
-				return fmt.Errorf("ELF type = %s, want executable", file.Type)
-			}
-			if file.Class != elf.ELFCLASS64 || file.Data != elf.ELFDATA2LSB {
-				_ = file.Close()
-				return fmt.Errorf("ELF encoding = %s/%s, want 64-bit little-endian", file.Class, file.Data)
-			}
-			if file.OSABI != elf.ELFOSABI_NONE && file.OSABI != elf.ELFOSABI_LINUX {
-				_ = file.Close()
-				return fmt.Errorf("ELF OS ABI = %s, want System V or Linux", file.OSABI)
-			}
-			for _, program := range file.Progs {
-				if program.Type == elf.PT_INTERP || program.Type == elf.PT_DYNAMIC {
-					_ = file.Close()
-					return fmt.Errorf("ELF contains dynamic program header %s", program.Type)
-				}
-			}
-		}
 		if err := file.Close(); err != nil {
 			return fmt.Errorf("close ELF: %w", err)
 		}
@@ -950,8 +818,8 @@ func validateExecutable(
 	if info.Main.Path != "github.com/yapless/scopesifter" {
 		return fmt.Errorf("go main module = %q, want github.com/yapless/scopesifter", info.Main.Path)
 	}
-	if info.Path != expectedProgramPath {
-		return fmt.Errorf("go program path = %q, want %q", info.Path, expectedProgramPath)
+	if info.Path != scopesifterProgramPath {
+		return fmt.Errorf("go program path = %q, want %q", info.Path, scopesifterProgramPath)
 	}
 	settings := make(map[string]string, len(info.Settings))
 	for _, setting := range info.Settings {

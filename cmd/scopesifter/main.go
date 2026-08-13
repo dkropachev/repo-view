@@ -15,7 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/yapless/scopesifter/internal/runstats"
+	"github.com/yapless/scopesifter/internal/navigationcommand"
 	"github.com/yapless/scopesifter/navigator"
 )
 
@@ -1096,7 +1096,7 @@ func navigationTranscriptStateFor(
 			event.Item.Type != "command_execution" {
 			continue
 		}
-		subcommand, shapeErr := runstats.ValidatedScopeSifterSubcommand(
+		subcommand, shapeErr := navigationcommand.ValidatedScopeSifterSubcommand(
 			event.Item.Command,
 		)
 		if shapeErr != nil {

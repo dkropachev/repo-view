@@ -73,13 +73,6 @@ func TestLoadConfigRejectsInvalidConfiguration(t *testing.T) {
 		{"invalid reasoning", []string{"SCOPESIFTER_REASONING_EFFORT=max"}, nil, "invalid SCOPESIFTER_REASONING_EFFORT"},
 		{"invalid guard", []string{"SCOPESIFTER_ANSWER_GUARD=yes"}, nil, "invalid SCOPESIFTER_ANSWER_GUARD"},
 		{"invalid policy", []string{"SCOPESIFTER_NAVIGATION_POLICY=unbounded"}, nil, "invalid SCOPESIFTER_NAVIGATION_POLICY"},
-		{"batched zero commands", []string{"SCOPESIFTER_NAVIGATION_POLICY=batched"}, nil, "COMMAND_CAP must be positive"},
-		{"batched zero context", []string{
-			"SCOPESIFTER_CHANGED_CONTEXT=0",
-			"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=0",
-			"SCOPESIFTER_NAVIGATION_POLICY=batched",
-			"SCOPESIFTER_NAVIGATION_COMMAND_CAP=1",
-		}, []string{"--json"}, "CONTEXT_CAP must be positive"},
 		{"incomplete semantics", []string{"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1"}, nil, "configuration is incomplete"},
 		{"semantics zero commands", replaceEnv(mechanical, "SCOPESIFTER_NAVIGATION_COMMAND_CAP=0"), nil, "require a positive command cap"},
 		{"invalid required context", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=many"), nil, "REQUIRED_CHANGED_CONTEXT must be a non-negative integer"},

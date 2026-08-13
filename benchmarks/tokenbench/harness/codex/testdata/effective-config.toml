@@ -1,5 +1,0 @@
-model = "gpt-5.4"
-sandbox_mode = "read-only"
-approval_policy = "never"
-[history]
-persistence = "none"

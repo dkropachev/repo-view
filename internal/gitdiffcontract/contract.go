@@ -1,7 +1,5 @@
-// Package gitdiffcontract defines the versioned Git diff behavior shared by
-// scopesifter's direct backend and tokenbench's precomputed changed-state cache.
-// It has no dependency on either consumer so semantic changes must be made in
-// one place.
+// Package gitdiffcontract defines deterministic Git invocation and diff
+// behavior shared by ScopeSifter and repository automation.
 package gitdiffcontract
 
 import (
@@ -49,8 +47,8 @@ func InvocationPrefix() []string {
 	}
 }
 
-// Environment returns the deterministic Git environment shared by both
-// consumers. Callers may append platform-required variables such as
+// Environment returns the deterministic Git environment used by repository
+// Git consumers. Callers may append platform-required variables such as
 // SystemRoot on Windows.
 func Environment(nullDevice string) []string {
 	if nullDevice == "" {
@@ -73,26 +71,11 @@ func Environment(nullDevice string) []string {
 	}
 }
 
-// NameStatusArguments returns the canonical metadata query used to preserve
-// additions, deletions, modifications, type changes, copies, and renames.
-func NameStatusArguments(base, head string) []string {
-	return metadataArguments("--name-status", base, head)
-}
-
 // NameOnlyArguments returns the direct backend's destination-oriented changed
 // path query under the same rename classification contract.
 func NameOnlyArguments(base, head string) []string {
-	return metadataArguments("--name-only", base, head)
-}
-
-// NumstatArguments returns the canonical binary-classification query.
-func NumstatArguments(base, head string) []string {
-	return metadataArguments("--numstat", base, head)
-}
-
-func metadataArguments(format, base, head string) []string {
 	return []string{
-		"diff", "--no-ext-diff", "--no-textconv", format, "-z",
+		"diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z",
 		"--ignore-submodules=dirty",
 		"--find-renames=" + strconv.Itoa(RenameSimilarity) + "%",
 		"-l" + strconv.Itoa(RenameLimit),

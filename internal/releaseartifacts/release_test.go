@@ -71,18 +71,6 @@ func TestBuildIsDeterministicClosedAndBoundToTag(t *testing.T) {
 		t.Fatalf("validate built artifact set: %v", err)
 	}
 	archive := filepath.Join(second, "scopesifter_1.2.3_linux_amd64.tar.gz")
-	for _, name := range []string{
-		"scopesifter-taskctl_1.2.3_linux_amd64",
-		"scopesifter-taskctl_1.2.3_linux_arm64",
-		"scopesifter-taskctl-launcher_1.2.3_linux_amd64",
-		"scopesifter-taskctl-launcher_1.2.3_linux_arm64",
-	} {
-		if info, err := os.Stat(filepath.Join(second, name)); err != nil {
-			t.Fatalf("stat trusted program artifact %s: %v", name, err)
-		} else if info.Mode().Perm() != 0o644 {
-			t.Fatalf("trusted program artifact %s mode = %04o, want 0644", name, info.Mode().Perm())
-		}
-	}
 	file, err := os.OpenFile(archive, os.O_WRONLY|os.O_APPEND, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -418,14 +406,6 @@ func newReleaseRepository(t *testing.T, tag string) (string, string) {
 	write(noticeName, "notice\n")
 	write(
 		"cmd/scopesifter/main.go",
-		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
-	)
-	write(
-		"cmd/taskctl/main.go",
-		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
-	)
-	write(
-		"internal/cmd/taskctl-launcher/main.go",
 		"package main\nvar releaseRevision = \"development\"\nvar releaseRevisionMarker = \"scopesifter.release-revision=development\"\nfunc main() { println(releaseRevision, releaseRevisionMarker) }\n",
 	)
 	gitRun(t, root, "init", "-q", "-b", "main")

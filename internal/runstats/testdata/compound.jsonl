@@ -1,3 +1,0 @@
-{"type":"item.started","item":{"id":"compound-1","type":"command_execution","command":"/usr/bin/zsh -lc 'mod_cache=$(go env GOMODCACHE)\nrg -n \"Reservation\" \"$mod_cache/rate.go\"\nsed -n \"120,180p\" \"$mod_cache/rate.go\"'","status":"in_progress"}}
-{"type":"item.completed","item":{"id":"compound-1","type":"command_execution","command":"/usr/bin/zsh -lc 'mod_cache=$(go env GOMODCACHE)\nrg -n \"Reservation\" \"$mod_cache/rate.go\"\nsed -n \"120,180p\" \"$mod_cache/rate.go\"'","aggregated_output":"result","exit_code":0,"status":"completed"}}
-{"type":"item.completed","item":{"id":"web-2","type":"web_search","name":"search","result":"result","status":"completed"}}
