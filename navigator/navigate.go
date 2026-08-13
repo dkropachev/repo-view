@@ -23,9 +23,12 @@ import (
 )
 
 const (
-	maximumPatchBytes      = 16 << 20
-	maximumGitStderrBytes  = 64 << 10
-	maximumHunkHeaderBytes = 512
+	maximumPatchBytes           = 16 << 20
+	maximumGitStderrBytes       = 64 << 10
+	maximumHunkHeaderBytes      = 512
+	maximumChangedSpansPerFile  = 100_000
+	maximumChangedLine          = 1_000_000_000
+	maximumExpandedChangedLines = 100_000
 )
 
 var errSnapshotBudget = errors.New("untracked patch snapshot exceeds byte limit")
@@ -678,20 +681,15 @@ func (r *View) Changed(opts Options) (ChangedResponse, error) {
 	if err != nil {
 		return ChangedResponse{}, err
 	}
-	var headCommit, headSubject string
-	if r.changedState != nil {
-		headCommit = r.changedState.HeadCommit
-		headSubject = r.changedState.HeadSubject
-	} else {
-		headCommit, err = r.resolveOptionalHead()
+	headCommit, err := r.resolveOptionalHead()
+	if err != nil {
+		return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
+	}
+	var headSubject string
+	if headCommit != "" {
+		headSubject, err = r.gitText("show", "-s", "--format=%s", headCommit)
 		if err != nil {
-			return ChangedResponse{}, fmt.Errorf("resolve git HEAD: %w", err)
-		}
-		if headCommit != "" {
-			headSubject, err = r.gitText("show", "-s", "--format=%s", headCommit)
-			if err != nil {
-				return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
-			}
+			return ChangedResponse{}, fmt.Errorf("read git HEAD subject: %w", err)
 		}
 	}
 	if baseCommit != "" && headCommit == "" {
@@ -746,7 +744,7 @@ changedFiles:
 		var lines []string
 		var cleanRel string
 		var readErr error
-		if baseCommit != "" && r.changedState == nil {
+		if baseCommit != "" {
 			lines, cleanRel, readErr = r.readGitLinesAtRevision(rel, response.HeadCommit)
 		} else {
 			lines, cleanRel, readErr = r.readRelativeLines(rel)
@@ -1536,16 +1534,6 @@ func (r *View) changedFileSet(opts Options) (map[string]bool, error) {
 }
 
 func (r *View) changedFiles(base, head string) ([]string, error) {
-	if r.changedState != nil {
-		if base != r.changedState.BaseCommit {
-			return nil, errors.New("changed-state cache is not bound to the requested base")
-		}
-		files := make([]string, len(r.changedState.ChangedFiles))
-		for index, file := range r.changedState.ChangedFiles {
-			files[index] = file.Path
-		}
-		return files, nil
-	}
 	if base != "" {
 		return r.gitFileList(gitdiffcontract.NameOnlyArguments(base, head)...)
 	}
@@ -1753,28 +1741,6 @@ func (r *View) changedPatch(
 ) (string, bool, error) {
 	if len(files) == 0 {
 		return "", false, nil
-	}
-	if r.changedState != nil {
-		if base != r.changedState.BaseCommit {
-			return "", false, errors.New(
-				"changed-state cache is not bound to the requested base",
-			)
-		}
-		outputs := make([]string, 0, len(files))
-		for _, path := range files {
-			file, ok := r.changedState.file(path)
-			if !ok {
-				return "", false, fmt.Errorf(
-					"changed-state cache has no record for selected path %q",
-					path,
-				)
-			}
-			if file.Patch != "" {
-				outputs = append(outputs, strings.TrimRight(file.Patch, "\n"))
-			}
-		}
-		patch, truncated := truncatePatchLines(strings.Join(outputs, "\n"), maxLines)
-		return patch, truncated, nil
 	}
 	patch := newPatchOutputCollector(maxLines, maximumPatchBytes)
 	staged := []string{
@@ -1986,19 +1952,6 @@ func (r *View) gitFileList(args ...string) ([]string, error) {
 }
 
 func (r *View) resolveBase(base string) (string, error) {
-	if r.changedState != nil {
-		if base == "" {
-			return "", errors.New("changed-state cache mode requires its bound base commit")
-		}
-		if base != r.changedState.BaseCommit {
-			return "", fmt.Errorf(
-				"changed-state cache base is %s, not %s",
-				r.changedState.BaseCommit,
-				base,
-			)
-		}
-		return base, nil
-	}
 	if base == "" {
 		return "", nil
 	}
@@ -2022,20 +1975,9 @@ func (r *View) resolveBase(base string) (string, error) {
 	return resolved, nil
 }
 
-// VerifyBaseCommit verifies that base names the view's configured base. Git
-// views additionally prove that it is an existing ancestor of HEAD; cache
-// views rely on the independently authenticated cache binding.
+// VerifyBaseCommit verifies that base resolves canonically and is an existing
+// ancestor of HEAD.
 func (r *View) VerifyBaseCommit(base string) error {
-	if r.changedState != nil {
-		if base != r.changedState.BaseCommit {
-			return fmt.Errorf(
-				"changed-state cache base is %s, not %s",
-				r.changedState.BaseCommit,
-				base,
-			)
-		}
-		return nil
-	}
 	resolved, err := r.resolveBase(base)
 	if err != nil {
 		return err
@@ -2050,9 +1992,6 @@ func (r *View) VerifyBaseCommit(base string) error {
 }
 
 func (r *View) resolveOptionalHead() (string, error) {
-	if r.changedState != nil {
-		return r.changedState.HeadCommit, nil
-	}
 	output, err := r.gitOutput(
 		"rev-parse",
 		"--verify",
@@ -2083,36 +2022,6 @@ func (r *View) changedLines(
 	rel, base, head string,
 	sourceLineCount int,
 ) ([]int, error) {
-	if r.changedState != nil {
-		if base != r.changedState.BaseCommit {
-			return nil, errors.New("changed-state cache is not bound to the requested base")
-		}
-		file, ok := r.changedState.file(rel)
-		if !ok {
-			return nil, fmt.Errorf("changed-state cache has no record for path %q", rel)
-		}
-		count := 0
-		for _, span := range file.Lines {
-			if span.End > sourceLineCount {
-				return nil, fmt.Errorf(
-					"changed-state lines for %q exceed the configured HEAD source",
-					rel,
-				)
-			}
-			width := span.End - span.Start + 1
-			if width < 0 || width > maximumExpandedChangedLines-count {
-				return nil, errors.New("changed-state line expansion exceeds its limit")
-			}
-			count += width
-		}
-		lines := make([]int, 0, count)
-		for _, span := range file.Lines {
-			for line := span.Start; line <= span.End; line++ {
-				lines = append(lines, line)
-			}
-		}
-		return lines, nil
-	}
 	if base == "" && head == "" {
 		if sourceLineCount > maximumExpandedChangedLines {
 			return nil, errors.New("changed-line expansion exceeds its limit")
@@ -2259,9 +2168,6 @@ func (r *View) gitCommand(args ...string) *exec.Cmd {
 		cmd.Err = err
 		return cmd
 	}
-	if r.changedState != nil {
-		return failedCommand(errors.New("git is disabled in changed-state cache mode"))
-	}
 	if err := r.verifyRootIdentity(); err != nil {
 		return failedCommand(err)
 	}
@@ -2343,9 +2249,6 @@ func (r *View) gitOutputContextLimitRaw(
 	limit int,
 	args ...string,
 ) (output []byte, resultErr error) {
-	if r.changedState != nil {
-		return nil, errors.New("git is disabled in changed-state cache mode")
-	}
 	if limit <= 0 || limit > maximumGitOutputBytes {
 		return nil, errors.New("git output limit is invalid")
 	}

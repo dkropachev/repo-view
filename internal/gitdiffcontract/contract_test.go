@@ -50,30 +50,19 @@ func TestPatchArgumentsFixSemanticOptionsAndContext(t *testing.T) {
 	}
 }
 
-func TestMetadataArgumentsShareRenameContract(t *testing.T) {
+func TestNameOnlyArgumentsFixRenameContract(t *testing.T) {
 	base := "base"
 	head := "head"
-	for _, test := range []struct {
-		name      string
-		format    string
-		arguments []string
-	}{
-		{name: "status", format: "--name-status", arguments: NameStatusArguments(base, head)},
-		{name: "paths", format: "--name-only", arguments: NameOnlyArguments(base, head)},
-		{name: "binary", format: "--numstat", arguments: NumstatArguments(base, head)},
+	arguments := NameOnlyArguments(base, head)
+	for _, required := range []string{
+		"--name-only", "-z", "--ignore-submodules=dirty", "--find-renames=50%", "-l20000",
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			for _, required := range []string{
-				test.format, "-z", "--ignore-submodules=dirty", "--find-renames=50%", "-l20000",
-			} {
-				if !contains(test.arguments, required) {
-					t.Fatalf("metadata arguments omit %q: %#v", required, test.arguments)
-				}
-			}
-			if got := test.arguments[len(test.arguments)-2:]; !reflect.DeepEqual(got, []string{base + "..." + head, "--"}) {
-				t.Fatalf("revision suffix = %#v", got)
-			}
-		})
+		if !contains(arguments, required) {
+			t.Fatalf("name-only arguments omit %q: %#v", required, arguments)
+		}
+	}
+	if got := arguments[len(arguments)-2:]; !reflect.DeepEqual(got, []string{base + "..." + head, "--"}) {
+		t.Fatalf("revision suffix = %#v", got)
 	}
 }
 

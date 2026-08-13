@@ -375,7 +375,7 @@ func TestQuoteLinkerArgument(t *testing.T) {
 
 func TestDeveloperInstructionsCoverAllPolicies(t *testing.T) {
 	t.Parallel()
-	for _, policy := range []string{"terminal", "adaptive", "batched"} {
+	for _, policy := range []string{"terminal", "adaptive"} {
 		c := config{
 			changedReturn:        "context",
 			changedContext:       "4",
@@ -395,32 +395,14 @@ func TestDeveloperInstructionsCoverAllPolicies(t *testing.T) {
 			"scopesifter inspect <PATH:LINE>...",
 			"scopesifter outline <PATH>...",
 		}
-		if policy == "batched" {
-			wantedInstructions = append(
-				wantedInstructions,
-				strings.ReplaceAll(batchedAnswerGuard, "<BACKTICK>", "`"),
-			)
-		} else {
-			wantedInstructions = append(wantedInstructions, standardAnswerGuard)
-		}
+		wantedInstructions = append(wantedInstructions, standardAnswerGuard)
 		for _, wanted := range wantedInstructions {
 			if !strings.Contains(instructions, wanted) {
 				t.Errorf("%s instructions omit %q", policy, wanted)
 			}
 		}
-		if strings.Contains(instructions, "{{") || strings.Contains(instructions, "<BACKTICK>") {
+		if strings.Contains(instructions, "{{") {
 			t.Errorf("%s instructions retain a template token", policy)
-		}
-		if policy == "batched" {
-			for _, wanted := range []string{
-				"Use at most 40 scopesifter invocations",
-				"time.Time.UTC strips the monotonic reading",
-				"11. Preserve unresolved out-of-repository risk",
-			} {
-				if !strings.Contains(instructions, wanted) {
-					t.Errorf("batched instructions omit %q", wanted)
-				}
-			}
 		}
 	}
 }

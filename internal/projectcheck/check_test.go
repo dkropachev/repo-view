@@ -295,40 +295,6 @@ func TestValidateNoScriptsAcceptsNarrowMakeGrammar(t *testing.T) {
 	}
 }
 
-func TestValidateMakeRecipeAcceptsExactTaskctlLauncherRoles(t *testing.T) {
-	t.Parallel()
-	roles := [][2]string{
-		{"inspect", "executable-sha256"},
-		{"generate", "source-audit"},
-		{"generate", "source-repository-bindings"},
-		{"generate", "source-selections"},
-		{"validate", "source-audit"},
-		{"validate", "source-repository-bindings"},
-		{"validate", "source-selections"},
-	}
-	for _, role := range roles {
-		recipe := taskctlLauncherExecutable + " " + role[0] + " " + role[1]
-		if err := validateMakeRecipe(recipe); err != nil {
-			t.Fatalf("reviewed taskctl launcher recipe %q rejected: %v", recipe, err)
-		}
-	}
-	for _, recipe := range []string{
-		taskctlLauncherExecutable + " generate checksums",
-		taskctlLauncherExecutable + " generate pointer-checksums",
-		taskctlLauncherExecutable + " validate checksums",
-		taskctlLauncherExecutable + " validate pointer-checksums",
-		taskctlLauncherExecutable + " generate unknown",
-		taskctlLauncherExecutable + " run checksums",
-		taskctlLauncherExecutable + " generate checksums --root=.",
-		"go run -mod=readonly ./internal/cmd/taskctl-launcher generate checksums",
-		"bin/taskctl-launcher generate checksums",
-	} {
-		if err := validateMakeRecipe(recipe); err == nil {
-			t.Fatalf("unreviewed taskctl launcher recipe %q accepted", recipe)
-		}
-	}
-}
-
 func TestValidateTrackedMakeTargetAcceptsCompleteSafeGraph(t *testing.T) {
 	t.Parallel()
 	root := newRepository(t)

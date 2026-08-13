@@ -31,11 +31,10 @@ const (
 var errRepositoryRootChanged = errors.New("repository root changed after opening")
 
 type View struct {
-	ctx          context.Context
-	pinnedGit    *gitExecutableIdentity
-	changedState *ChangedStateCache
-	rootInfo     os.FileInfo
-	root         string
+	ctx       context.Context
+	pinnedGit *gitExecutableIdentity
+	rootInfo  os.FileInfo
+	root      string
 }
 
 func New(root string) (*View, error) {

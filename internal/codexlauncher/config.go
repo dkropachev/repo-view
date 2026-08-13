@@ -112,14 +112,8 @@ func loadConfig(root string, environment []string, arguments []string) (config, 
 	if !oneOf(c.answerGuard, "on", "off") {
 		return config{}, fmt.Errorf("invalid SCOPESIFTER_ANSWER_GUARD: %s", c.answerGuard)
 	}
-	if !oneOf(c.navigationPolicy, "terminal", "adaptive", "batched") {
+	if !oneOf(c.navigationPolicy, "terminal", "adaptive") {
 		return config{}, fmt.Errorf("invalid SCOPESIFTER_NAVIGATION_POLICY: %s", c.navigationPolicy)
-	}
-	if c.navigationPolicy == "batched" && decimalIsZero(c.navigationCommandCap) {
-		return config{}, fmt.Errorf("SCOPESIFTER_NAVIGATION_COMMAND_CAP must be positive for batched navigation")
-	}
-	if c.navigationPolicy == "batched" && decimalIsZero(c.navigationContextCap) {
-		return config{}, fmt.Errorf("SCOPESIFTER_NAVIGATION_CONTEXT_CAP must be positive for batched navigation")
 	}
 
 	c.navigationSemanticsConfigured = c.requiredNavigationRoot != "" ||

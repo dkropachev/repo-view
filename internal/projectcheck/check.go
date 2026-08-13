@@ -33,8 +33,6 @@ import (
 // data and never executes it.
 const WorkflowShell = "go run -mod=readonly ./internal/cmd/workflow-runner -- {0}"
 
-const taskctlLauncherExecutable = "/usr/local/libexec/scopesifter/taskctl-launcher"
-
 var (
 	makeTargetPattern  = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_./-]*$`)
 	makeTokenPattern   = regexp.MustCompile(`^[A-Za-z0-9_./:=,+%-]+$`)
@@ -63,15 +61,14 @@ var approvedWorkflowActions = map[string][]map[string]string{
 }
 
 var approvedWorkflowTargets = map[string]struct{}{
-	"ci-build":                    {},
-	"ci-fieldalignment":           {},
-	"ci-json":                     {},
-	"ci-no-scripts":               {},
-	"ci-test":                     {},
-	"ci-vet":                      {},
-	"release-artifacts":           {},
-	"release-publish":             {},
-	"tokenbench-privileged-linux": {},
+	"ci-build":          {},
+	"ci-fieldalignment": {},
+	"ci-json":           {},
+	"ci-no-scripts":     {},
+	"ci-test":           {},
+	"ci-vet":            {},
+	"release-artifacts": {},
+	"release-publish":   {},
 }
 
 type trackedFile struct {
@@ -545,8 +542,6 @@ func validateWorkflowAction(
 func validateWorkflowRunEnvironment(target string, environment map[string]string) error {
 	expected := map[string]string{}
 	switch target {
-	case "tokenbench-privileged-linux":
-		expected["TOKENBENCH_PRIVILEGED_IMAGE"] = "golang:1.26.5-bookworm@sha256:6c5605ab3a9a9fb3c4eafe5b3d63cdbf3881caf113262b67862547b54a9db599"
 	case "release-publish":
 		expected["GH_TOKEN"] = "${{ secrets.SCOPESIFTER_RELEASE_TOKEN }}"
 	}
@@ -812,11 +807,6 @@ func validateMakeRecipe(recipe string) error {
 	switch fields[0] {
 	case "go":
 		return validateMakeGoCommand(fields[1:])
-	case taskctlLauncherExecutable:
-		if !reviewedTaskctlLauncherRole(fields[1:]) {
-			return errors.New("taskctl launcher arguments do not match a reviewed role")
-		}
-		return nil
 	case "golangci-lint":
 		if len(fields) != 3 || fields[1] != "run" ||
 			(fields[2] != "--config=.golangci.yml" && fields[2] != "--config=.golangci-fieldalignment.yml") {
@@ -901,7 +891,6 @@ func validateMakeGoCommand(arguments []string) error {
 
 func reviewedMakeGoRun(packagePath string, arguments []string) bool {
 	roles := map[string][][]string{
-		"./benchmarks/tokenbench/cmd/privileged-linux-tests": {nil},
 		"./internal/cmd/grammar-generator": {
 			{"-repo", "."},
 			{"-language", "csharp", "-repo", "."},
@@ -919,27 +908,6 @@ func reviewedMakeGoRun(packagePath string, arguments []string) bool {
 	}
 	for _, role := range roles[packagePath] {
 		if slices.Equal(arguments, role) {
-			return true
-		}
-	}
-	return false
-}
-
-func reviewedTaskctlLauncherRole(arguments []string) bool {
-	roles := [][2]string{
-		{"inspect", "executable-sha256"},
-		{"generate", "source-audit"},
-		{"generate", "source-repository-bindings"},
-		{"generate", "source-selections"},
-		{"validate", "source-audit"},
-		{"validate", "source-repository-bindings"},
-		{"validate", "source-selections"},
-	}
-	if len(arguments) != 2 {
-		return false
-	}
-	for _, role := range roles {
-		if arguments[0] == role[0] && arguments[1] == role[1] {
 			return true
 		}
 	}
