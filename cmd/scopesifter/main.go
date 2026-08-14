@@ -81,14 +81,15 @@ func runFind(args []string) int {
 	flags := flag.NewFlagSet("find", flag.ContinueOnError)
 	common := addCommonFlags(flags, navigator.ReturnScope)
 	flags.Usage = func() {
-		printCommandUsage(flags.Output(), "scopesifter find SYMBOL...", "Find definitions and references for one or more exact symbol names.")
+		printCommandUsage(flags.Output(), "scopesifter find QUERY...", "Locate exact source identifiers or literal repository paths. Each response reports which kind matched.")
 		flags.PrintDefaults()
 	}
 	include := flags.String("include", "both", "defs, refs, or both")
+	match := flags.String("match", "auto", "auto, symbol, or path")
 	if showCommandHelp(flags, args) {
 		return 0
 	}
-	symbols, flagArgs, ok := splitPositionals(args)
+	queries, flagArgs, ok := splitPositionals(args)
 	if !ok {
 		flags.Usage()
 		return 2
@@ -114,17 +115,24 @@ func runFind(args []string) int {
 		printCLIError(err)
 		return 2
 	}
+	options.Match = navigator.FindMatch(*match)
+	switch options.Match {
+	case navigator.FindMatchAuto, navigator.FindMatchSymbol, navigator.FindMatchPath:
+	default:
+		fmt.Fprintln(os.Stderr, "find --match must be one of: auto, symbol, path")
+		return 2
+	}
 	if err := common.enforceNavigationSemantics("find", options); err != nil {
 		printCLIError(err)
 		return 2
 	}
-	if options.Limit > 0 && options.Limit < len(symbols) {
+	if options.Limit > 0 && options.Limit < len(queries) {
 		fmt.Fprintf(
 			os.Stderr,
-			"find --limit %d is smaller than %d requested symbols; use at least --limit %d\n",
+			"find --limit %d is smaller than %d requested queries; use at least --limit %d\n",
 			options.Limit,
-			len(symbols),
-			len(symbols),
+			len(queries),
+			len(queries),
 		)
 		return 2
 	}
@@ -133,7 +141,7 @@ func runFind(args []string) int {
 		printCLIError(err)
 		return 2
 	}
-	responses, err := view.FindMany(symbols, options)
+	responses, err := view.FindMany(queries, options)
 	if err != nil {
 		printCLIError(err)
 		return 1
@@ -145,9 +153,21 @@ func runFind(args []string) int {
 		return printJSON(responses, *common.prettyJSON)
 	}
 	for _, response := range responses {
-		printResults(response.Results, options.Return)
+		printFindResponse(response, options.Return)
 	}
 	return 0
+}
+
+func printFindResponse(response navigator.FindResponse, returnMode navigator.Return) {
+	if len(response.Results) == 0 {
+		fmt.Printf("# %s: %s\n", safeOutputText(response.Query), response.MatchedAs)
+		if response.Hint != "" {
+			fmt.Printf("# %s\n", safeOutputText(response.Hint))
+		}
+		return
+	}
+	fmt.Printf("# %s: %s\n", safeOutputText(response.Query), response.MatchedAs)
+	printResults(response.Results, returnMode)
 }
 
 func fairResultLimit(remaining, remainingSymbols int) int {
@@ -1208,18 +1228,18 @@ func printUsage(out io.Writer) {
 	fmt.Fprintln(out, `scopesifter - Go code navigation with bounded source output
 
 Usage:
-  scopesifter find SYMBOL... [options]
+  scopesifter find QUERY... [options]
   scopesifter inspect PATH:LINE... [options]
   scopesifter outline PATH... [options]
   scopesifter changed [options]
   scopesifter mcp [options]
 
 Commands:
-  find      Exact symbol definitions and references; accepts multiple symbols.
+  find      Exact identifiers or literal repository paths; reports matched evidence kind.
   inspect   Enclosing scope, optionally imports or related results; accepts multiple locations.
   outline   Definitions in one or more files, in source order.
   changed   Git metadata, exact patch, and changed-source context.
-  mcp       Read-only stdio MCP server with changed, find, inspect, and outline tools.
+  mcp       Stdio MCP server with changed, find, inspect, and outline tools.
 
 Return values:
   --return locations   Result metadata without source code.
@@ -1267,7 +1287,7 @@ func flagTakesValue(flag string) bool {
 	name := strings.TrimLeft(strings.SplitN(flag, "=", 2)[0], "-")
 	switch name {
 	case "root", "return", "context", "limit", "path",
-		"exclude", "base", "include", "max-code-lines", "max-patch-lines":
+		"exclude", "base", "include", "match", "max-code-lines", "max-patch-lines":
 		return !strings.Contains(flag, "=")
 	default:
 		return false
@@ -1341,6 +1361,9 @@ func printResults(results []navigator.Result, returnMode navigator.Return) {
 			fmt.Printf(" %s", safeOutputText(result.Symbol))
 		}
 		fmt.Println()
+		if result.Finding == navigator.FindingFile && result.Code == "" {
+			continue
+		}
 		fence := markdownCodeFence(result.Code)
 		fmt.Printf("%s%s\n", fence, fenceLanguage(result.Path))
 		fmt.Println(result.Code)

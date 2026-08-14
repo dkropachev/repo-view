@@ -391,6 +391,7 @@ func validateRepo(root string, cases int) (int, error) {
 		want := locationsFor(index[symbol])
 		locations, err := view.Find(symbol, navigator.Options{
 			Include:      navigator.IncludeBoth,
+			Match:        navigator.FindMatchSymbol,
 			Return:       navigator.ReturnLocations,
 			Limit:        len(want) + 1,
 			MaxCodeLines: maxCodeLines,
@@ -404,6 +405,7 @@ func validateRepo(root string, cases int) (int, error) {
 
 		scope, err := view.Find(symbol, navigator.Options{
 			Include:      navigator.IncludeBoth,
+			Match:        navigator.FindMatchSymbol,
 			Return:       navigator.ReturnScope,
 			Limit:        len(want) + 1,
 			MaxCodeLines: maxCodeLines,

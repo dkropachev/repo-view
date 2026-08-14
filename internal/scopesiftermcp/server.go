@@ -1,5 +1,6 @@
-// Package scopesiftermcp exposes ScopeSifter navigation through a fixed read-only
-// Model Context Protocol tool surface.
+// Package scopesiftermcp exposes ScopeSifter navigation through a fixed Model
+// Context Protocol tool surface. Repository access is always read-only;
+// optional adaptive state is stored only in the OS user-cache directory.
 package scopesiftermcp
 
 import (
@@ -20,12 +21,12 @@ const (
 	// ImplementationName is the stable MCP implementation name.
 	ImplementationName = "scopesifter"
 	// ImplementationVersion changes when the public MCP tool contract changes.
-	ImplementationVersion = "scopesifter-mcp/v2"
+	ImplementationVersion = "scopesifter-mcp/v4"
 
-	changedDescription = "Return the Git patch and source context between the configured base commit and HEAD."
-	findDescription    = "Find exact symbol definitions and references in the configured repository."
-	inspectDescription = "Inspect an enclosing source scope and optional related symbol results at PATH:LINE."
-	outlineDescription = "List definitions in source order for one repository-relative file."
+	changedDescription = "Branch/commit/PR first: base-to-HEAD patch and source context."
+	findDescription    = "Exact identifier or path fragment; auto tries identifier then path."
+	inspectDescription = "Scope/imports/related identifiers at known PATH:LINE."
+	outlineDescription = "Source-ordered definitions for a known repository file."
 )
 
 // ToolSpecification is the code-owned provider-visible part of one scopesifter
@@ -57,6 +58,7 @@ type Config struct {
 	Base                string
 	GitExecutable       string
 	GitExecutableSHA256 string
+	AdaptiveOutputCache bool
 }
 
 // New creates a server with exactly the changed, find, inspect, and outline
@@ -91,7 +93,11 @@ func New(config Config) (*mcp.Server, error) {
 		return nil, fmt.Errorf("verify MCP base commit: %w", err)
 	}
 
-	service := &service{view: view, base: config.Base}
+	learner, err := newAdaptiveLearner(config.Root, config.AdaptiveOutputCache, slog.Default())
+	if err != nil {
+		return nil, err
+	}
+	service := &service{view: view, learner: learner, base: config.Base}
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    ImplementationName,
@@ -109,8 +115,9 @@ func New(config Config) (*mcp.Server, error) {
 		nondestructive := false
 		return &mcp.ToolAnnotations{
 			DestructiveHint: &nondestructive,
+			IdempotentHint:  false,
 			OpenWorldHint:   &closedWorld,
-			ReadOnlyHint:    true,
+			ReadOnlyHint:    !config.AdaptiveOutputCache,
 		}
 	}
 	mcp.AddTool(server, &mcp.Tool{
@@ -153,6 +160,7 @@ func Run(ctx context.Context, config Config, transport mcp.Transport) error {
 }
 
 type commonInput struct {
+	Response       string   `json:"response"`
 	Return         string   `json:"return"`
 	PathGlobs      []string `json:"path_globs"`
 	ExcludeGlobs   []string `json:"exclude_globs"`
@@ -169,7 +177,8 @@ type changedInput struct {
 }
 
 type findInput struct {
-	Symbol  string `json:"symbol"`
+	Query   string `json:"query"`
+	Match   string `json:"match"`
 	Include string `json:"include"`
 	commonInput
 	ChangedOnly     bool `json:"changed_only"`
@@ -187,6 +196,7 @@ type inspectInput struct {
 }
 
 type outlineInput struct {
+	Response       string `json:"response"`
 	Path           string `json:"path"`
 	Return         string `json:"return"`
 	Limit          int    `json:"limit"`
@@ -196,43 +206,51 @@ type outlineInput struct {
 }
 
 type service struct {
-	view *navigator.View
-	base string
+	view    *navigator.View
+	learner *adaptiveLearner
+	base    string
 }
 
 func (service *service) changed(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
 	input changedInput,
-) (*mcp.CallToolResult, navigator.ChangedResponse, error) {
+) (*mcp.CallToolResult, any, error) {
 	options := input.options(navigator.IncludeAll, navigator.ReturnContext, service.base)
 	options.MaxPatchLines = defaultInt(input.MaxPatchLines, defaultMaxPatchLines)
 	response, err := service.view.WithContext(ctx).Changed(options)
-	return nil, response, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.prepareResponse("changed", input.Response, input, response)
 }
 
 func (service *service) find(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
 	input findInput,
-) (*mcp.CallToolResult, navigator.FindResponse, error) {
+) (*mcp.CallToolResult, any, error) {
 	options := input.options(
 		navigator.Include(defaultString(input.Include, string(navigator.IncludeBoth))),
-		navigator.ReturnScope,
+		navigator.ReturnLocations,
 		service.base,
 	)
+	options.Match = navigator.FindMatch(defaultString(input.Match, string(navigator.FindMatchAuto)))
 	options.ChangedOnly = input.ChangedOnly
 	options.NoComments = !input.IncludeComments
 	options.NoStrings = !input.IncludeStrings
-	response, err := service.view.WithContext(ctx).Find(input.Symbol, options)
-	return nil, response, err
+	response, err := service.view.WithContext(ctx).Find(input.Query, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.prepareResponse("find", input.Response, input, response)
 }
 
 func (service *service) inspect(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
 	input inspectInput,
-) (*mcp.CallToolResult, navigator.InspectResponse, error) {
+) (*mcp.CallToolResult, any, error) {
 	options := input.options(
 		navigator.Include(defaultString(input.Include, string(navigator.IncludeScope))),
 		navigator.ReturnScope,
@@ -242,14 +260,17 @@ func (service *service) inspect(
 	options.NoComments = !input.IncludeComments
 	options.NoStrings = !input.IncludeStrings
 	response, err := service.view.WithContext(ctx).Inspect(input.Location, options)
-	return nil, response, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.prepareResponse("inspect", input.Response, input, response)
 }
 
 func (service *service) outline(
 	ctx context.Context,
 	_ *mcp.CallToolRequest,
 	input outlineInput,
-) (*mcp.CallToolResult, navigator.OutlineResponse, error) {
+) (*mcp.CallToolResult, any, error) {
 	options := navigator.Options{
 		Base:           service.base,
 		Include:        navigator.IncludeDefs,
@@ -261,7 +282,34 @@ func (service *service) outline(
 		DropDocstrings: input.DropDocstrings,
 	}
 	response, err := service.view.WithContext(ctx).Outline(input.Path, options)
-	return nil, response, err
+	if err != nil {
+		return nil, nil, err
+	}
+	return service.prepareResponse("outline", input.Response, input, response)
+}
+
+func (service *service) prepareResponse(
+	tool, mode string,
+	input, response any,
+) (*mcp.CallToolResult, any, error) {
+	request, err := newAdaptiveRequest(tool, input)
+	if err != nil {
+		return nil, nil, err
+	}
+	budget := service.learner.budget(request)
+	result, output, sizing, err := prepareToolResponse(tool, mode, response, budget)
+	if err != nil {
+		return nil, nil, err
+	}
+	switch {
+	case defaultString(mode, responseAuto) == responseFull:
+		service.learner.recordFull(request)
+	case sizing.Compacted:
+		service.learner.recordCompacted(request)
+	default:
+		service.learner.recordUncompacted(request)
+	}
+	return result, output, nil
 }
 
 func (input commonInput) options(

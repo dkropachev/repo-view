@@ -1213,6 +1213,91 @@ func TestFindHonorsPathFilterAndUsesEmptyArrays(t *testing.T) {
 	}
 }
 
+func TestFindCLIReportsPathFindingWithoutEmptyCodeFence(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "cmd", "scopesifter-validate", "settings.yaml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonOutput := captureStdout(t, func() {
+		if status := run([]string{
+			"find", "scopesifter-validate", "--root", root, "--json",
+		}); status != 0 {
+			t.Fatalf("status = %d", status)
+		}
+	})
+	var responses []navigator.FindResponse
+	if err := json.Unmarshal([]byte(jsonOutput), &responses); err != nil {
+		t.Fatalf("decode response: %v\n%s", err, jsonOutput)
+	}
+	if len(responses) != 1 || responses[0].Query != "scopesifter-validate" ||
+		responses[0].MatchedAs != navigator.FindOutcomeFile ||
+		len(responses[0].Results) != 1 ||
+		responses[0].Results[0].Finding != navigator.FindingFile ||
+		responses[0].Results[0].Kind != "file" ||
+		responses[0].Results[0].Path != "cmd/scopesifter-validate/settings.yaml" {
+		t.Fatalf("responses = %#v", responses)
+	}
+	if strings.Contains(jsonOutput, `"symbol":"scopesifter-validate"`) {
+		t.Fatalf("path query mislabeled as symbol: %s", jsonOutput)
+	}
+
+	plainOutput := captureStdout(t, func() {
+		if status := run([]string{
+			"find", "scopesifter-validate", "--root", root,
+		}); status != 0 {
+			t.Fatalf("status = %d", status)
+		}
+	})
+	if plainOutput != "# scopesifter-validate: file\n# cmd/scopesifter-validate/settings.yaml file\n" ||
+		strings.Contains(plainOutput, "```") {
+		t.Fatalf("plain output = %q", plainOutput)
+	}
+}
+
+func TestFindCLIPlainOutputReportsNoMatchAndHint(t *testing.T) {
+	root := t.TempDir()
+	output := captureStdout(t, func() {
+		if status := run([]string{"find", "missing", "--root", root}); status != 0 {
+			t.Fatalf("status = %d", status)
+		}
+	})
+	if !strings.HasPrefix(output, "# missing: none\n# No exact source identifier") {
+		t.Fatalf("plain output = %q", output)
+	}
+}
+
+func TestFindCLIPlainLocationsReportClassification(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "target.go"), []byte("package demo\n\nfunc Target() {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	output := captureStdout(t, func() {
+		if status := run([]string{
+			"find", "Target", "--root", root, "--return", "locations",
+		}); status != 0 {
+			t.Fatalf("status = %d", status)
+		}
+	})
+	if output != "# Target: symbol\ntarget.go:3\n" {
+		t.Fatalf("plain output = %q", output)
+	}
+}
+
+func TestFindCLIRejectsUnknownMatchMode(t *testing.T) {
+	status := 0
+	output := captureStderr(t, func() {
+		status = run([]string{"find", "Target", "--match", "text"})
+	})
+	if status != 2 || !strings.Contains(output, "auto, symbol, path") {
+		t.Fatalf("status = %d, want 2", status)
+	}
+}
+
 func TestFindFairLimitReturnsEveryRequestedSymbol(t *testing.T) {
 	root := t.TempDir()
 	source := `package demo

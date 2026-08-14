@@ -107,6 +107,13 @@ func NewWithGit(root, executable, expectedSHA256 string) (*View, error) {
 }
 
 func (r *View) sourceFiles() ([]string, error) {
+	return r.repositoryFiles(true)
+}
+
+// repositoryFiles returns every regular, non-symlink repository file when
+// sourceOnly is false. Source-only walks retain the language-extension and
+// byte-budget checks required before content scanning.
+func (r *View) repositoryFiles(sourceOnly bool) ([]string, error) {
 	extensions := defaultExtensions()
 	excludes := defaultExcludes()
 	type pendingDirectory struct {
@@ -190,7 +197,10 @@ func (r *View) sourceFiles() ([]string, error) {
 				}
 				continue
 			}
-			if info.Mode().IsRegular() && extensions[path.Ext(relative)] {
+			if !info.Mode().IsRegular() || (sourceOnly && !extensions[path.Ext(relative)]) {
+				continue
+			}
+			if sourceOnly {
 				if info.Size() < 0 || info.Size() > maximumSourceFileBytes {
 					_ = directory.Close()
 					return nil, fmt.Errorf(
@@ -207,8 +217,8 @@ func (r *View) sourceFiles() ([]string, error) {
 					)
 				}
 				sourceBytes += info.Size()
-				paths = append(paths, filepath.Join(r.root, filepath.FromSlash(relative)))
 			}
+			paths = append(paths, filepath.Join(r.root, filepath.FromSlash(relative)))
 		}
 		if err := directory.Close(); err != nil {
 			return nil, err

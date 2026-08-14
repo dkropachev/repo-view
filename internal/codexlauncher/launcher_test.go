@@ -391,7 +391,7 @@ func TestDeveloperInstructionsCoverAllPolicies(t *testing.T) {
 		wantedInstructions := []string{
 			"Use scopesifter as the primary code-navigation tool.",
 			"scopesifter changed --root . --base <BASE>",
-			"scopesifter find <SYMBOL>...",
+			"scopesifter find <QUERY>...",
 			"scopesifter inspect <PATH:LINE>...",
 			"scopesifter outline <PATH>...",
 		}

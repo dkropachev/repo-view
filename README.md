@@ -2,8 +2,9 @@
 
 [![CI](https://github.com/yapless/scopesifter/actions/workflows/ci.yml/badge.svg)](https://github.com/yapless/scopesifter/actions/workflows/ci.yml)
 
-`ScopeSifter` is a Go code navigation library and CLI. It finds where a function,
-class, method, type, or other symbol is used and can return:
+`ScopeSifter` is a Go code navigation library and CLI. It locates repository
+paths and finds where a function, class, method, type, or other exact source
+identifier is used. It can return:
 
 - `file:line`
 - `file:start-end` for the enclosing function/class/block
@@ -30,6 +31,7 @@ attestation for `SHA256SUMS` itself.
 
 ```console
 scopesifter find renderUser parseSession --root ./my-repo --include both --return scope --json
+scopesifter find scopesifter-validate --root ./my-repo --match path --return locations --json
 scopesifter inspect src/app.go:42 src/session.go:18 --root ./my-repo --include scope --return scope --json
 scopesifter outline src/app.go src/session.go --root ./my-repo --return scope --json
 scopesifter changed --root ./my-repo --base main --return context --json
@@ -39,7 +41,7 @@ Each command accepts one kind of input. Do not combine selectors:
 
 | Input already known | Command | Returned evidence | Default `--return` |
 | --- | --- | --- | --- |
-| One or more symbol names | `find SYMBOL...` | Definitions and references | `scope` |
+| One or more identifiers or path fragments | `find QUERY...` | Identifier definitions/references or matching repository files, with explicit finding classification | `scope` |
 | One or more exact source locations | `inspect PATH:LINE...` | Enclosing scope; optional imports and related symbol results | `scope` |
 | One or more source file paths | `outline PATH...` | Definitions in file order | `line` |
 | Git base revision | `changed --base REF` | Commit metadata, exact patch, and changed-source context | `context` |
@@ -78,6 +80,12 @@ Shared options:
 - `--json`: compact JSON output.
 - `--pretty`: pretty JSON output.
 
+Every result includes `finding`: `file` for repository-file evidence, `symbol`
+for an exact source definition or reference match, and `other` for structural
+evidence such as a scope, import block, or changed range. `kind` remains the more
+exact classification, including `file`, `def`, `ref`, `scope`, `imports`, or
+`changed`.
+
 JSON always includes `code_truncated`; it is `true` when `--max-code-lines`
 cuts a returned scope or context. Truncated snippets remain centered on the
 requested or matching line and include `code_start_line` and `code_end_line`
@@ -92,10 +100,21 @@ Path filters accept a plain path substring (`service/matching`), a basename
 glob (`*_test.go`), or a recursive directory prefix (`service/matching/**`).
 Multiple includes are ORed; any matching exclude wins.
 
-- `find`: `--include defs|refs|both`; default `both`. Default return is
-  `scope`. Its `--limit` is shared across all supplied symbols. Exact text such
-  as a dependency module path can be searched in `go.mod`, for example
+- `find`: `--match auto|symbol|path`; default `auto`. Auto first searches exact
+  source identifiers and falls back to literal, case-sensitive repository-path
+  fragments when no identifier result exists. Path lookup covers regular,
+  non-symlink files, including documentation, configuration, and extensionless
+  files, while retaining repository exclusions and path filters. Each response
+  includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
+  and an actionable `hint` when nothing matched. Identifier findings honor
+  `--include defs|refs|both`; default `both`.
+  CLI default return is `scope`; MCP v4 defaults to `locations`. Its `--limit`
+  is shared across all supplied queries. Exact text such as a dependency module
+  path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
+  `query` always reports the requested selector; source-match JSON also retains
+  the legacy `symbol` field. MCP v4 accepts `query` instead of the v2 `symbol`
+  input.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
   symbol results are all needed in one response.
@@ -114,6 +133,22 @@ Multiple includes are ORed; any matching exclude wins.
   `--max-patch-lines` cuts the exact patch or its 16 MiB safety ceiling is
   reached. The byte ceiling also bounds temporary snapshots used to diff
   untracked files.
+
+## MCP Adaptive Output
+
+The four MCP tools accept `response=auto|full`, defaulting to `auto`. Auto
+returns the normal v3 structured response when it fits the current repository
+region's budget. Oversized responses become bounded summaries with exact
+candidate locations, omission counts, and targeted follow-up calls; they never
+contain source or patch text. Use `response=full` when omitted evidence is
+required. Structured data is returned once, alongside only a short text hint.
+
+Regional budgets start at 1 KiB and adapt in memory from matching full retries,
+up to 3 KiB. To retain learned budgets between MCP processes, start the server
+with `scopesifter mcp --adaptive-output-cache` plus its required repository and
+Git identity options. Persistent state lives in the OS user-cache directory and
+contains only hashed region identifiers and bounded heuristic counters, never
+repository paths, queries, candidates, patches, or source.
 
 ## Codex Integration
 

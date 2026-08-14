@@ -581,3 +581,27 @@ func cppResultKinds(results []Result) []string {
 	}
 	return kinds
 }
+
+func TestCPPFindClassifiesSpacedOperatorReferencesAsSymbols(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "fixture.cpp", `struct Flag {
+    explicit operator bool() const { return true; }
+};
+bool enabled(Flag value) { return value.operator bool(); }
+`)
+
+	response, err := mustView(t, root).Find("operator bool", Options{
+		Include: IncludeBoth, Return: ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.MatchedAs != FindOutcomeSymbol || len(response.Results) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	for _, result := range response.Results {
+		if result.Finding != FindingSymbol {
+			t.Fatalf("operator finding = %#v", result)
+		}
+	}
+}
