@@ -37,7 +37,7 @@ func findInputSchema() map[string]any {
 func inspectInputSchema() map[string]any {
 	properties := commonInputProperties("scope")
 	for _, name := range []string{
-		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+		"response", "return", "context", "limit", "max_code_lines", "drop_comments", "drop_docstrings",
 	} {
 		delete(properties, name)
 	}

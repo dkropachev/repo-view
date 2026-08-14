@@ -1,6 +1,5 @@
-// Package scopesiftermcp exposes ScopeSifter navigation through a fixed Model
-// Context Protocol tool surface. Repository access is always read-only;
-// optional adaptive state is stored only in the OS user-cache directory.
+// Package scopesiftermcp exposes ScopeSifter navigation through a fixed,
+// read-only Model Context Protocol tool surface.
 package scopesiftermcp
 
 import (
@@ -21,7 +20,9 @@ const (
 	// ImplementationName is the stable MCP implementation name.
 	ImplementationName = "scopesifter"
 	// ImplementationVersion changes when the public MCP tool contract changes.
-	ImplementationVersion = "scopesifter-mcp/v4"
+	ImplementationVersion = "scopesifter-mcp/v5"
+
+	structuredOutputBudget = 1024
 
 	changedDescription = "Start bug/branch/PR work here; bounded base-to-HEAD changes."
 	findDescription    = "Exact identifier or path; file hits add matching changed PATH:LINE."
@@ -58,7 +59,6 @@ type Config struct {
 	Base                string
 	GitExecutable       string
 	GitExecutableSHA256 string
-	AdaptiveOutputCache bool
 }
 
 // New creates a server with exactly the changed, find, inspect, and outline
@@ -93,11 +93,7 @@ func New(config Config) (*mcp.Server, error) {
 		return nil, fmt.Errorf("verify MCP base commit: %w", err)
 	}
 
-	learner, err := newAdaptiveLearner(config.Root, config.AdaptiveOutputCache, slog.Default())
-	if err != nil {
-		return nil, err
-	}
-	service := &service{view: view, learner: learner, base: config.Base}
+	service := &service{view: view, base: config.Base}
 	server := mcp.NewServer(
 		&mcp.Implementation{
 			Name:    ImplementationName,
@@ -115,9 +111,9 @@ func New(config Config) (*mcp.Server, error) {
 		nondestructive := false
 		return &mcp.ToolAnnotations{
 			DestructiveHint: &nondestructive,
-			IdempotentHint:  false,
+			IdempotentHint:  true,
 			OpenWorldHint:   &closedWorld,
-			ReadOnlyHint:    !config.AdaptiveOutputCache,
+			ReadOnlyHint:    true,
 		}
 	}
 	mcp.AddTool(server, &mcp.Tool{
@@ -160,7 +156,6 @@ func Run(ctx context.Context, config Config, transport mcp.Transport) error {
 }
 
 type commonInput struct {
-	Response       string   `json:"response"`
 	Return         string   `json:"return"`
 	PathGlobs      []string `json:"path_globs"`
 	ExcludeGlobs   []string `json:"exclude_globs"`
@@ -201,9 +196,8 @@ type outlineInput struct {
 }
 
 type service struct {
-	view    *navigator.View
-	learner *adaptiveLearner
-	base    string
+	view *navigator.View
+	base string
 }
 
 func (service *service) changed(
@@ -211,13 +205,13 @@ func (service *service) changed(
 	_ *mcp.CallToolRequest,
 	input changedInput,
 ) (*mcp.CallToolResult, any, error) {
-	options := input.options(navigator.IncludeAll, navigator.ReturnContext, service.base)
+	options := input.options(navigator.IncludeAll, navigator.ReturnLocations, service.base)
 	options.MaxPatchLines = defaultInt(input.MaxPatchLines, defaultMaxPatchLines)
 	response, err := service.view.WithContext(ctx).Changed(options)
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.prepareResponse("changed", input.Response, input, response)
+	return service.prepareResponse("changed", response)
 }
 
 func (service *service) find(
@@ -238,20 +232,17 @@ func (service *service) find(
 	if err != nil {
 		return nil, nil, err
 	}
-	response, err = service.enrichFileFindWithChanges(ctx, input, response)
-	if err != nil {
-		return nil, nil, err
-	}
-	return service.prepareResponse("find", input.Response, input, response)
+	response = service.enrichFileFindWithChanges(ctx, input, response)
+	return service.prepareResponse("find", response)
 }
 
 func (service *service) enrichFileFindWithChanges(
 	ctx context.Context,
 	input findInput,
 	response navigator.FindResponse,
-) (navigator.FindResponse, error) {
+) navigator.FindResponse {
 	if response.MatchedAs != navigator.FindOutcomeFile || len(response.Results) == 0 {
-		return response, nil
+		return response
 	}
 	paths := make([]string, 0, len(response.Results))
 	wantedPaths := make(map[string]struct{}, len(response.Results))
@@ -267,7 +258,7 @@ func (service *service) enrichFileFindWithChanges(
 		paths = append(paths, path)
 	}
 	if len(paths) == 0 {
-		return response, nil
+		return response
 	}
 	limit := defaultInt(input.Limit, defaultLimit)
 	changed, err := service.view.WithContext(ctx).Changed(navigator.Options{
@@ -280,8 +271,17 @@ func (service *service) enrichFileFindWithChanges(
 		MaxPatchLines: 1,
 	})
 	if err != nil {
-		return navigator.FindResponse{}, err
+		return response
 	}
+	return mergeChangedFileResults(response, changed, wantedPaths, limit)
+}
+
+func mergeChangedFileResults(
+	response navigator.FindResponse,
+	changed navigator.ChangedResponse,
+	wantedPaths map[string]struct{},
+	limit int,
+) navigator.FindResponse {
 	changedPaths := make(map[string]struct{})
 	results := make([]navigator.Result, 0, len(changed.Results)+len(response.Results))
 	for index := range changed.Results {
@@ -293,11 +293,12 @@ func (service *service) enrichFileFindWithChanges(
 		result.CodeStartLine = 0
 		result.CodeEndLine = 0
 		result.CodeTruncated = false
+		result.Kind = "changed"
 		results = append(results, result)
 		changedPaths[result.Path] = struct{}{}
 	}
 	if len(results) == 0 {
-		return response, nil
+		return response
 	}
 	for index := range response.Results {
 		result := response.Results[index]
@@ -312,8 +313,7 @@ func (service *service) enrichFileFindWithChanges(
 	}
 	response.Results = results
 	response.ResultsTruncated = response.ResultsTruncated || changed.ResultsTruncated
-	response.MatchedAs = navigator.FindOutcomeOther
-	return response, nil
+	return response
 }
 
 func (service *service) inspect(
@@ -333,7 +333,7 @@ func (service *service) inspect(
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.prepareResponse("inspect", input.Response, input, response)
+	return service.prepareResponse("inspect", response)
 }
 
 func (service *service) outline(
@@ -353,41 +353,21 @@ func (service *service) outline(
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.prepareResponse("outline", responseAuto, input, response)
+	return service.prepareResponse("outline", response)
 }
 
 func (service *service) prepareResponse(
-	tool, mode string,
-	input, response any,
+	tool string,
+	response any,
 ) (*mcp.CallToolResult, any, error) {
-	request, err := newAdaptiveRequest(tool, input)
+	result, output, _, err := prepareToolResponse(
+		tool,
+		responseAuto,
+		response,
+		structuredOutputBudget,
+	)
 	if err != nil {
 		return nil, nil, err
-	}
-	budget := service.learner.budget(request)
-	if tool == "inspect" && budget < adaptiveMaximumBudget {
-		budget = adaptiveMaximumBudget
-	}
-	effectiveMode := defaultString(mode, responseAuto)
-	matchedFullRetry := false
-	if effectiveMode == responseFull {
-		matchedFullRetry = service.learner.recordFull(request)
-		if !matchedFullRetry {
-			effectiveMode = responseAuto
-		}
-	}
-	result, output, sizing, err := prepareToolResponse(tool, effectiveMode, response, budget)
-	if err != nil {
-		return nil, nil, err
-	}
-	switch {
-	case matchedFullRetry:
-		// recordFull already consumed matching compact evidence and persisted
-		// any resulting budget growth before the unrestricted retry was emitted.
-	case sizing.Compacted:
-		service.learner.recordCompacted(request)
-	default:
-		service.learner.recordUncompacted(request)
 	}
 	return result, output, nil
 }

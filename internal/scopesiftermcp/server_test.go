@@ -32,11 +32,7 @@ func TestServicePropagatesRequestCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	learner, err := newAdaptiveLearner(fixture.root, false, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &service{view: view, learner: learner, base: fixture.base}
+	service := &service{view: view, base: fixture.base}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -105,7 +101,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			"changed_only", "exclude_globs", "include", "limit", "match", "path_globs", "query",
 		},
 		"inspect": {
-			"changed_only", "exclude_globs", "include", "limit", "location", "path_globs",
+			"changed_only", "exclude_globs", "include", "location", "path_globs",
 		},
 		"outline": {
 			"limit", "path",
@@ -139,7 +135,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		if annotations == nil || !annotations.ReadOnlyHint ||
 			annotations.OpenWorldHint == nil || *annotations.OpenWorldHint ||
 			annotations.DestructiveHint == nil || *annotations.DestructiveHint ||
-			annotations.IdempotentHint {
+			!annotations.IdempotentHint {
 			t.Fatalf("tool %q annotations = %#v", tool.Name, annotations)
 		}
 		schema := normalizedObject(t, tool.InputSchema)
@@ -193,14 +189,16 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 				t.Fatalf("outline description = %q", tool.Description)
 			}
 		}
-		assertIntegerProperty(
-			t,
-			tool.Name,
-			properties,
-			"limit",
-			defaultLimit,
-			maximumLimit,
-		)
+		if tool.Name != "inspect" {
+			assertIntegerProperty(
+				t,
+				tool.Name,
+				properties,
+				"limit",
+				defaultLimit,
+				maximumLimit,
+			)
+		}
 	}
 
 	view, err := navigator.NewWithGit(
@@ -215,7 +213,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	assertToolOutput(t, client, "changed", map[string]any{}, func() (navigator.ChangedResponse, error) {
 		return view.Changed(navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeAll,
-			Return: navigator.ReturnContext, Context: defaultContext,
+			Return: navigator.ReturnLocations, Context: defaultContext,
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
 			MaxPatchLines: defaultMaxPatchLines,
 		})
@@ -292,6 +290,54 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	}
 }
 
+func TestServerChangedReturnsExactEditedLine(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "changed", Arguments: map[string]any{},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("changed = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed leanResponse
+	if err := json.Unmarshal(raw, &changed); err != nil {
+		t.Fatal(err)
+	}
+	if len(changed.Results) != 1 || changed.Results[0].Location != "demo.go:7" ||
+		changed.Next == nil || changed.Next.Tool != "inspect" ||
+		changed.Next.Arguments["location"] != "demo.go:7" {
+		t.Fatalf("changed action = %#v", changed)
+	}
+}
+
+func TestServerOutlineOmitsDefinitionSource(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "outline", Arguments: map[string]any{"path": "demo.go"},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("outline = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(raw, []byte(`"signature"`)) || bytes.Contains(raw, []byte("func Helper()")) {
+		t.Fatalf("outline leaked definition source: %s", raw)
+	}
+}
+
 func TestServerFindPathPrioritizesChangedLocation(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
@@ -308,52 +354,130 @@ func TestServerFindPathPrioritizesChangedLocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var found navigator.FindResponse
+	var found leanResponse
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.MatchedAs != navigator.FindOutcomeOther || len(found.Results) != 1 {
+	if found.Target != "demo.go" || found.Outcome != string(navigator.FindOutcomeFile) ||
+		len(found.Results) != 1 {
 		t.Fatalf("enriched path response = %#v", found)
 	}
 	result := found.Results[0]
-	if result.Path != "demo.go" || result.Line != 7 || result.Kind != "changed" ||
-		result.Finding != navigator.FindingOther || result.Scope != "Caller" ||
-		result.Code != "" {
+	if result.Location != "demo.go:7" || result.Kind != "changed" ||
+		result.Scope != "Caller" {
 		t.Fatalf("changed path candidate = %#v", result)
 	}
-	if len(raw) > adaptiveDefaultBudget {
-		t.Fatalf("enriched path response = %d bytes, want at most %d", len(raw), adaptiveDefaultBudget)
+	if found.Next == nil || found.Next.Tool != "inspect" ||
+		found.Next.Arguments["location"] != "demo.go:7" {
+		t.Fatalf("changed path next = %#v", found.Next)
+	}
+	if len(raw) > structuredOutputBudget {
+		t.Fatalf("enriched path response = %d bytes, want at most %d", len(raw), structuredOutputBudget)
 	}
 }
 
-func TestPersistentServerAdvertisesStatefulTools(t *testing.T) {
+func TestServerFindRelatedActionIsAcceptedAndUseful(t *testing.T) {
 	fixture := newFixture(t)
-	cacheRoot := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-	t.Setenv("LOCALAPPDATA", cacheRoot)
-	t.Setenv("HOME", cacheRoot)
-	server, err := New(Config{
-		AdaptiveOutputCache: true,
-		Root:                fixture.root,
-		Base:                fixture.base,
-		GitExecutable:       fixture.git,
-		GitExecutableSHA256: fixture.gitSHA256,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
 	defer closeSessions()
-	result, err := client.ListTools(context.Background(), nil)
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{"query": "demo", "match": "path"},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("path find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tool := range result.Tools {
-		annotations := tool.Annotations
-		if annotations == nil || annotations.ReadOnlyHint || annotations.IdempotentHint ||
-			annotations.DestructiveHint == nil || *annotations.DestructiveHint {
-			t.Fatalf("persistent tool %q annotations = %#v", tool.Name, annotations)
-		}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Related == nil || found.Related.Tool != "find" {
+		t.Fatalf("related action = %#v in %#v", found.Related, found)
+	}
+	related, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: found.Related.Tool, Arguments: found.Related.Arguments,
+	})
+	if err != nil || related.IsError {
+		t.Fatalf("related find = %#v, %v", related, err)
+	}
+	relatedRaw, err := json.Marshal(related.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var references leanResponse
+	if err := json.Unmarshal(relatedRaw, &references); err != nil {
+		t.Fatal(err)
+	}
+	if len(references.Results) != 1 ||
+		references.Results[0].Location != "demo_test.go:3" ||
+		references.Results[0].Kind != "ref" {
+		t.Fatalf("related references = %#v", references)
+	}
+}
+
+func TestFileEnrichmentFailureFallsBackToOriginalResult(t *testing.T) {
+	fixture := newFixture(t)
+	view, err := navigator.NewWithGit(
+		fixture.root,
+		fixture.git,
+		fixture.gitSHA256,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &service{view: view, base: fixture.base}
+	original := navigator.FindResponse{
+		Query:     "demo.go",
+		MatchedAs: navigator.FindOutcomeFile,
+		Results: []navigator.Result{{
+			Path: "demo.go", Kind: "file", Finding: navigator.FindingFile,
+		}},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := service.enrichFileFindWithChanges(ctx, findInput{}, original)
+	if !reflect.DeepEqual(got, original) {
+		t.Fatalf("failed optional enrichment = %#v, want %#v", got, original)
+	}
+}
+
+func TestChangedFileEnrichmentPreservesOutcomeAndLimit(t *testing.T) {
+	original := navigator.FindResponse{
+		Query:            "*.go",
+		MatchedAs:        navigator.FindOutcomeFile,
+		ResultsTruncated: false,
+		Results: []navigator.Result{
+			{Path: "a.go", Kind: "file", Finding: navigator.FindingFile},
+			{Path: "b.go", Kind: "file", Finding: navigator.FindingFile},
+		},
+	}
+	changed := navigator.ChangedResponse{
+		ResultsTruncated: true,
+		Results: []navigator.Result{
+			{Path: "a.go", Line: 4, Kind: "", Code: "source", CodeStartLine: 4},
+			{Path: "a.go", Line: 9, Kind: "other"},
+			{Path: "outside.go", Line: 2, Kind: "changed"},
+		},
+	}
+	got := mergeChangedFileResults(
+		original,
+		changed,
+		map[string]struct{}{"a.go": {}, "b.go": {}},
+		1,
+	)
+	if got.MatchedAs != navigator.FindOutcomeFile || len(got.Results) != 1 ||
+		!got.ResultsTruncated {
+		t.Fatalf("bounded enriched response = %#v", got)
+	}
+	result := got.Results[0]
+	if result.Path != "a.go" || result.Line != 4 || result.Kind != "changed" ||
+		result.Code != "" || result.CodeStartLine != 0 {
+		t.Fatalf("enriched result = %#v", result)
 	}
 }
 
@@ -380,7 +504,7 @@ func TestServerAutoUsesLeanEvidenceWithinBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(autoJSON) > adaptiveDefaultBudget ||
+	if len(autoJSON) > structuredOutputBudget ||
 		!bytes.Contains(autoJSON, []byte(`"target":"demo.go:6"`)) ||
 		!bytes.Contains(autoJSON, []byte(`"evidence"`)) ||
 		bytes.Contains(autoJSON, []byte(`"original_bytes"`)) ||
@@ -408,37 +532,6 @@ func TestServerRejectsPublicFullResponse(t *testing.T) {
 	}
 	if !response.IsError {
 		t.Fatalf("public response=full succeeded: %#v", response)
-	}
-}
-
-func TestServerInspectUsesThreeKiBBudgetForUsefulScope(t *testing.T) {
-	fixture := newFixture(t)
-	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
-	for index := range 80 {
-		large += fmt.Sprintf("\tprintln(%d)\n", index)
-	}
-	large += "\tHelper()\n}\n"
-	writeFixtureFile(t, fixture.root, large)
-	server := newFixtureServer(t, fixture)
-	client, closeSessions := connect(t, server)
-	defer closeSessions()
-
-	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name:      "inspect",
-		Arguments: map[string]any{"location": "demo.go:40"},
-	})
-	if err != nil || response.IsError {
-		t.Fatalf("inspect = %#v, %v", response, err)
-	}
-	raw, err := json.Marshal(response.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Logf("useful inspect structured output: %d bytes", len(raw))
-	if len(raw) <= adaptiveDefaultBudget || len(raw) > adaptiveMaximumBudget ||
-		bytes.Contains(raw, []byte(`"compact":true`)) ||
-		!bytes.Contains(raw, []byte("println(40)")) {
-		t.Fatalf("three-KiB inspect (%d bytes) = %s", len(raw), raw)
 	}
 }
 
@@ -557,7 +650,14 @@ func Caller() {
 	Helper()
 }
 `)
-	gitRun(t, gitPath, root, "add", "demo.go")
+	if err := os.WriteFile(
+		filepath.Join(root, "demo_test.go"),
+		[]byte("package demo\n\nfunc TestCaller() { Caller() }\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, gitPath, root, "add", "demo.go", "demo_test.go")
 	gitRun(t, gitPath, root, "commit", "-q", "-m", "base")
 	base := gitOutput(t, gitPath, root, "rev-parse", "HEAD")
 	writeFixtureFile(t, root, `package demo
@@ -646,12 +746,19 @@ func assertToolOutput[T any](
 	if err != nil {
 		t.Fatal(err)
 	}
-	var actual T
+	var actual leanResponse
 	if err := json.Unmarshal(raw, &actual); err != nil {
 		t.Fatalf("decode %s structured output: %v", name, err)
 	}
-	if !reflect.DeepEqual(actual, expected) {
-		t.Fatalf("%s output = %#v, want %#v", name, actual, expected)
+	plan, err := leanResponseFor(name, expected)
+	if err != nil {
+		t.Fatalf("plan expected %s output: %v", name, err)
+	}
+	if !fitLeanResponse(&plan, name, structuredOutputBudget) {
+		t.Fatalf("expected %s output cannot fit fixed budget", name)
+	}
+	if !reflect.DeepEqual(actual, plan.response) {
+		t.Fatalf("%s output = %#v, want %#v", name, actual, plan.response)
 	}
 	if text == string(raw) || strings.Contains(text, string(raw)) {
 		t.Fatalf("%s duplicated structured JSON in text content", name)

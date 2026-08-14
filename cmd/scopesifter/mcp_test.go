@@ -65,6 +65,11 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		!strings.Contains(string(invalidOutput), "--root is required") {
 		t.Fatalf("invalid command = %v, output = %s", invalidErr, invalidOutput)
 	}
+	help := exec.Command(binary, "mcp", "--help")
+	helpOutput, helpErr := help.CombinedOutput()
+	if helpErr != nil || strings.Contains(string(helpOutput), "adaptive-output-cache") {
+		t.Fatalf("MCP help retained adaptive cache flag: %v\n%s", helpErr, helpOutput)
+	}
 
 	var serverStderr bytes.Buffer
 	command := exec.Command(
@@ -102,7 +107,8 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	for index, want := range []string{"changed", "find", "inspect", "outline"} {
 		tool := tools.Tools[index]
 		if tool.Name != want || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint ||
-			tool.OutputSchema != nil {
+			!tool.Annotations.IdempotentHint || tool.Annotations.DestructiveHint == nil ||
+			*tool.Annotations.DestructiveHint || tool.OutputSchema != nil {
 			_ = session.Close()
 			t.Fatalf("tool %d = %#v", index, tool)
 		}
@@ -124,8 +130,9 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		t.Fatalf("find path = %#v, %v", response, err)
 	}
 	structured, err := json.Marshal(response.StructuredContent)
-	if err != nil || !bytes.Contains(structured, []byte(`"matched_as":"file"`)) ||
-		!bytes.Contains(structured, []byte(`"finding":"file"`)) {
+	if err != nil || !bytes.Contains(structured, []byte(`"outcome":"file"`)) ||
+		!bytes.Contains(structured, []byte(`"kind":"file"`)) ||
+		!bytes.Contains(structured, []byte(`"location":"demo.go"`)) {
 		_ = session.Close()
 		t.Fatalf("find path structured output = %s, %v", structured, err)
 	}

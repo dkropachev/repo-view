@@ -108,12 +108,12 @@ Multiple includes are ORed; any matching exclude wins.
   includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
   and an actionable `hint` when nothing matched. Identifier findings honor
   `--include defs|refs|both`; default `both`.
-  CLI default return is `scope`; MCP v4 defaults to `locations`. Its `--limit`
+  CLI default return is `scope`; MCP v5 defaults to `locations`. Its `--limit`
   is shared across all supplied queries. Exact text such as a dependency module
   path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
   `query` always reports the requested selector; source-match JSON also retains
-  the legacy `symbol` field. MCP v4 accepts `query` instead of the v2 `symbol`
+  the legacy `symbol` field. MCP v5 accepts `query` instead of the v2 `symbol`
   input.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
@@ -134,21 +134,22 @@ Multiple includes are ORed; any matching exclude wins.
   reached. The byte ceiling also bounds temporary snapshots used to diff
   untracked files.
 
-## MCP Adaptive Output
+## MCP Lean Output
 
-The four MCP tools accept `response=auto|full`, defaulting to `auto`. Auto
-returns the normal v3 structured response when it fits the current repository
-region's budget. Oversized responses become bounded summaries with exact
-candidate locations, omission counts, and targeted follow-up calls; they never
-contain source or patch text. Use `response=full` when omitted evidence is
-required. Structured data is returned once, alongside only a short text hint.
+MCP v5 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
+and `outline`) but exposes only routing-critical inputs. Every successful call
+returns one stable structured envelope containing `target`, `outcome`, bounded
+`results`, semantic `truncated` fields, and at most one exact `next` action.
+When a changed Go source has its exact `_test.go` counterpart, a complete
+`next_related` action can point directly to focused symbol references there.
+Results retain complete `PATH:LINE` locations and prefer distinct files.
 
-Regional budgets start at 1 KiB and adapt in memory from matching full retries,
-up to 3 KiB. To retain learned budgets between MCP processes, start the server
-with `scopesifter mcp --adaptive-output-cache` plus its required repository and
-Git identity options. Persistent state lives in the OS user-cache directory and
-contains only hashed region identifiers and bounded heuristic counters, never
-repository paths, queries, candidates, patches, or source.
+Structured output is fixed at no more than 1 KiB. `inspect` spends available
+space on complete source lines in `evidence`; the other tools return locations
+without source or patch text. A separate non-JSON text hint is at most 160 bytes
+and names the first exact follow-up when one exists. There is no public full
+response or adaptive cache: progressive disclosure uses a targeted `inspect` or
+`outline` call. CLI and Go navigator response shapes are unchanged.
 
 ## Codex Integration
 

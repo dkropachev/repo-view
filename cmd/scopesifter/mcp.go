@@ -24,11 +24,6 @@ func runMCP(args []string) int {
 	base := flags.String("base", "", "canonical full Git base commit (required)")
 	gitExecutable := flags.String("git", "", "absolute canonical Git executable (required)")
 	gitSHA256 := flags.String("git-sha256", "", "lowercase SHA-256 of --git (required)")
-	adaptiveOutputCache := flags.Bool(
-		"adaptive-output-cache",
-		false,
-		"persist adaptive MCP output budgets in the OS user-cache directory",
-	)
 	if showCommandHelp(flags, args) {
 		return 0
 	}
@@ -60,7 +55,6 @@ func runMCP(args []string) int {
 	err := scopesiftermcp.Run(
 		context.Background(),
 		scopesiftermcp.Config{
-			AdaptiveOutputCache: *adaptiveOutputCache,
 			Root:                *root,
 			Base:                *base,
 			GitExecutable:       *gitExecutable,
