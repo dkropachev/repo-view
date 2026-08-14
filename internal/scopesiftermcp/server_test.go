@@ -357,7 +357,7 @@ func TestPersistentServerAdvertisesStatefulTools(t *testing.T) {
 	}
 }
 
-func TestServerAutoCompactsWithinToolBudget(t *testing.T) {
+func TestServerAutoUsesLeanEvidenceWithinBudget(t *testing.T) {
 	fixture := newFixture(t)
 	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
 	for index := range 200 {
@@ -380,8 +380,11 @@ func TestServerAutoCompactsWithinToolBudget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(autoJSON) > adaptiveMaximumBudget || !bytes.Contains(autoJSON, []byte(`"compact":true`)) ||
-		bytes.Contains(autoJSON, []byte(strings.Repeat("x", 96))) {
+	if len(autoJSON) > adaptiveDefaultBudget ||
+		!bytes.Contains(autoJSON, []byte(`"target":"demo.go:6"`)) ||
+		!bytes.Contains(autoJSON, []byte(`"evidence"`)) ||
+		bytes.Contains(autoJSON, []byte(`"original_bytes"`)) ||
+		bytes.Contains(autoJSON, []byte("println(100)")) {
 		t.Fatalf("auto structured output (%d bytes) = %s", len(autoJSON), autoJSON)
 	}
 	if text := toolText(auto); text == "" || len(text) > maximumCompactTextBytes ||

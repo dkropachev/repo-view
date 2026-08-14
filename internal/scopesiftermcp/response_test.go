@@ -12,127 +12,41 @@ import (
 	"github.com/yapless/scopesifter/navigator"
 )
 
-func TestPrepareToolResponseSwitchesOnlyAboveBudget(t *testing.T) {
-	responses := []struct {
-		name     string
-		tool     string
-		response any
-	}{
-		{
-			name: "changed",
-			tool: "changed",
-			response: navigator.ChangedResponse{
-				BaseCommit: "base", HeadCommit: "head", Patch: strings.Repeat("patch\n", 400),
-				Results: largeResponseResults(),
-			},
-		},
-		{
-			name: "find",
-			tool: "find",
-			response: navigator.FindResponse{
-				Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
-				Results: largeResponseResults(),
-			},
-		},
-		{
-			name: "inspect",
-			tool: "inspect",
-			response: navigator.InspectResponse{
-				Location: "first.go:7", Symbol: "Target", Results: largeResponseResults(),
-			},
-		},
-		{
-			name: "outline",
-			tool: "outline",
-			response: navigator.OutlineResponse{
-				Path: "first.go", Results: largeResponseResults(),
-			},
-		},
-	}
-	for _, testCase := range responses {
-		t.Run(testCase.name, func(t *testing.T) {
-			fullJSON := mustMarshalResponse(t, testCase.response)
-			result, output, sizing, err := prepareToolResponse(
-				testCase.tool,
-				responseAuto,
-				testCase.response,
-				len(fullJSON),
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sizing.Compacted || sizing.OriginalBytes != len(fullJSON) ||
-				sizing.StructuredBytes != len(fullJSON) {
-				t.Fatalf("within-budget sizing = %#v", sizing)
-			}
-			if reflect.TypeOf(output) != reflect.TypeOf(testCase.response) {
-				t.Fatalf("within-budget type = %T, want %T", output, testCase.response)
-			}
-			if got := mustMarshalResponse(t, output); string(got) != string(fullJSON) {
-				t.Fatalf("within-budget output changed:\n%s\nwant:\n%s", got, fullJSON)
-			}
-			assertBoundedNonJSONHint(t, result, fullJSON)
-
-			result, output, sizing, err = prepareToolResponse(
-				testCase.tool,
-				responseAuto,
-				testCase.response,
-				len(fullJSON)-1,
-			)
-			if err != nil {
-				t.Fatal(err)
-			}
-			compact, ok := output.(compactToolResponse)
-			if !ok || !compact.Compact || !sizing.Compacted {
-				t.Fatalf("over-budget output = %T %#v, sizing %#v", output, output, sizing)
-			}
-			compactJSON := mustMarshalResponse(t, compact)
-			if len(compactJSON) > len(fullJSON)-1 || sizing.StructuredBytes != len(compactJSON) {
-				t.Fatalf("compact bytes = %d, sizing %#v, budget %d", len(compactJSON), sizing, len(fullJSON)-1)
-			}
-			assertBoundedNonJSONHint(t, result, compactJSON)
-		})
-	}
-}
-
-func TestPrepareToolResponseAtEveryAdaptiveBudgetBoundary(t *testing.T) {
+func TestAutoUsesStableLeanShapeAcrossOriginalSizeBoundary(t *testing.T) {
 	for _, budget := range []int{1024, 1536, 2048, 2560, 3072} {
-		t.Run(fmt.Sprintf("%d", budget), func(t *testing.T) {
-			belowBoundary := findResponseWithSerializedBytes(t, budget-1)
-			_, output, sizing, err := prepareToolResponse("find", responseAuto, belowBoundary, budget)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sizing.Compacted || reflect.TypeOf(output) != reflect.TypeOf(belowBoundary) {
-				t.Fatalf("%d-byte response compacted below %d-byte budget: %T %#v", budget-1, budget, output, sizing)
-			}
-
-			atBoundary := findResponseWithSerializedBytes(t, budget)
-			_, output, sizing, err = prepareToolResponse("find", responseAuto, atBoundary, budget)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sizing.Compacted || reflect.TypeOf(output) != reflect.TypeOf(atBoundary) {
-				t.Fatalf("%d-byte response compacted at %d-byte budget: %T %#v", budget, budget, output, sizing)
-			}
-
-			overBoundary := findResponseWithSerializedBytes(t, budget+1)
-			_, output, sizing, err = prepareToolResponse("find", responseAuto, overBoundary, budget)
-			if err != nil {
-				t.Fatal(err)
-			}
-			compact, ok := output.(compactToolResponse)
-			if !ok || !sizing.Compacted {
-				t.Fatalf("%d-byte response did not compact above %d-byte budget: %T %#v", budget+1, budget, output, sizing)
-			}
-			if got := len(mustMarshalResponse(t, compact)); got > budget {
-				t.Fatalf("compact boundary response = %d bytes, budget %d", got, budget)
+		t.Run(fmt.Sprintf("budget-%d", budget), func(t *testing.T) {
+			var previousKeys []string
+			for _, originalBytes := range []int{budget - 1, budget, budget + 1} {
+				response := findResponseWithSerializedBytes(t, originalBytes)
+				result, output, sizing, err := prepareToolResponse(
+					"find", responseAuto, response, budget,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				lean, ok := output.(leanResponse)
+				if !ok {
+					t.Fatalf("auto output = %T, want leanResponse", output)
+				}
+				encoded := mustMarshalResponse(t, lean)
+				if len(encoded) > budget || sizing.StructuredBytes != len(encoded) {
+					t.Fatalf("lean bytes = %d, sizing %#v, budget %d", len(encoded), sizing, budget)
+				}
+				if got := sizing.Compacted; got != (originalBytes > budget) {
+					t.Fatalf("original=%d compacted=%v", originalBytes, got)
+				}
+				keys := sortedTopLevelKeys(t, encoded)
+				if previousKeys != nil && !reflect.DeepEqual(keys, previousKeys) {
+					t.Fatalf("auto keys changed with size: %q then %q", previousKeys, keys)
+				}
+				previousKeys = keys
+				assertBoundedNonJSONHint(t, result, encoded)
 			}
 		})
 	}
 }
 
-func TestPrepareToolResponseFullPreservesV3ShapeAndIgnoresAdaptiveBudget(t *testing.T) {
+func TestFullPreservesExactV3ShapeAndIgnoresBudget(t *testing.T) {
 	response := navigator.FindResponse{
 		NavigationBudget: &navigator.NavigationBudget{Used: 2, Limit: 20, Remaining: 18},
 		Query:            "Target",
@@ -144,383 +58,267 @@ func TestPrepareToolResponseFullPreservesV3ShapeAndIgnoresAdaptiveBudget(t *test
 		Results:          largeResponseResults(),
 		ResultsTruncated: true,
 	}
-	wantJSON := mustMarshalResponse(t, response)
+	want := mustMarshalResponse(t, response)
 	result, output, sizing, err := prepareToolResponse("find", responseFull, response, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sizing.Compacted || sizing.OriginalBytes != len(wantJSON) ||
-		sizing.StructuredBytes != len(wantJSON) {
-		t.Fatalf("full sizing = %#v", sizing)
-	}
 	actual, ok := output.(navigator.FindResponse)
 	if !ok || !reflect.DeepEqual(actual, response) {
-		t.Fatalf("full output = %T %#v, want exact navigator.FindResponse", output, output)
+		t.Fatalf("full output = %T %#v", output, output)
 	}
-	if gotJSON := mustMarshalResponse(t, output); string(gotJSON) != string(wantJSON) {
-		t.Fatalf("full JSON changed:\n%s\nwant:\n%s", gotJSON, wantJSON)
+	if got := mustMarshalResponse(t, output); string(got) != string(want) {
+		t.Fatalf("full JSON changed:\n%s\nwant:\n%s", got, want)
 	}
-	assertBoundedNonJSONHint(t, result, wantJSON)
+	if sizing != (responseSizing{OriginalBytes: len(want), StructuredBytes: len(want)}) {
+		t.Fatalf("full sizing = %#v", sizing)
+	}
+	assertBoundedNonJSONHint(t, result, want)
 }
 
-func TestCompactResponseFitsOneKiBBudgetAndSummarizesAllResults(t *testing.T) {
-	const (
-		budget      = 1024
-		secretCode  = "SOURCE-MUST-NOT-APPEAR"
-		secretPatch = "PATCH-MUST-NOT-APPEAR"
-	)
-	results := []navigator.Result{
-		compactTestResult("a.go", 3, navigator.FindingSymbol, "def", "Alpha", "Package", secretCode),
-		compactTestResult("a.go", 8, navigator.FindingOther, "imports", "", "", secretCode),
-		compactTestResult("b.go", 9, navigator.FindingFile, "changed", "", "Beta", secretCode),
-		compactTestResult("c.go", 12, navigator.FindingSymbol, "ref", "Alpha", "Caller", secretCode),
-		compactTestResult("d.go", 15, navigator.FindingSymbol, "ref", "Alpha", "Caller", secretCode),
-		compactTestResult("e.go", 18, navigator.FindingSymbol, "ref", "Alpha", "Caller", secretCode),
-		compactTestResult("f.go", 21, navigator.FindingOther, "changed", "", "", secretCode),
-	}
-	results[0].Signature = "func Alpha()"
-	results[3].CodeTruncated = true
-	response := navigator.ChangedResponse{
-		Root:             "/repository",
-		Base:             "main",
-		BaseCommit:       strings.Repeat("a", 40),
-		HeadCommit:       strings.Repeat("b", 40),
-		HeadSubject:      "compact output",
-		Patch:            strings.Repeat(secretPatch, 200),
-		Results:          results,
-		PatchTruncated:   true,
-		ResultsTruncated: true,
-	}
-	result, output, sizing, err := prepareToolResponse("changed", responseAuto, response, budget)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact, ok := output.(compactToolResponse)
-	if !ok {
-		t.Fatalf("output type = %T, want compactToolResponse", output)
-	}
-	encoded := mustMarshalResponse(t, compact)
-	if len(encoded) > budget || sizing.StructuredBytes != len(encoded) {
-		t.Fatalf("compact size = %d, sizing %#v, budget %d", len(encoded), sizing, budget)
-	}
-	if !sizing.Compacted || compact.OriginalBytes != sizing.OriginalBytes ||
-		compact.BudgetBytes != budget {
-		t.Fatalf("compact metadata = %#v, sizing %#v", compact, sizing)
-	}
-	wantCounts := compactCounts{
-		ReturnedResults: 7,
-		UniqueFiles:     6,
-		Findings: compactFindingCounts{
-			File: 1, Symbol: 4, Other: 2,
-		},
-	}
-	if compact.Counts != wantCounts {
-		t.Fatalf("counts = %#v, want %#v", compact.Counts, wantCounts)
-	}
-	if compact.OmittedBytes.Code != len(secretCode)*len(results) ||
-		compact.OmittedBytes.Patch != len(response.Patch) ||
-		compact.OmittedBytes.Candidates <= 0 {
-		t.Fatalf("omissions = %#v", compact.OmittedBytes)
-	}
-	if compact.Truncated != (compactTruncation{Results: true, Code: true, Patch: true}) {
-		t.Fatalf("truncation = %#v", compact.Truncated)
-	}
-	if compact.BaseCommit != response.BaseCommit || compact.HeadCommit != response.HeadCommit ||
-		compact.HeadSubject != response.HeadSubject {
-		t.Fatalf("changed outcome metadata = %#v", compact)
-	}
-	if strings.Contains(string(encoded), secretCode) || strings.Contains(string(encoded), secretPatch) ||
-		strings.Contains(string(encoded), response.Root) {
-		t.Fatalf("compact response leaked omitted content: %s", encoded)
-	}
-	if len(compact.Candidates) == 0 || len(compact.Candidates) > maximumCompactCandidates {
-		t.Fatalf("candidates = %#v", compact.Candidates)
-	}
-	seen := make(map[string]bool)
-	for _, candidate := range compact.Candidates {
-		if !validCompactLocation(candidate.Location) {
-			t.Fatalf("candidate has incomplete actionable location: %#v", candidate)
-		}
-		if seen[candidate.Location] {
-			t.Fatalf("duplicate candidate = %#v", candidate)
-		}
-		seen[candidate.Location] = true
-	}
-	if compact.Candidates[0].Location != "a.go:3" {
-		t.Fatalf("first candidate = %#v, want highest-ranked result", compact.Candidates[0])
-	}
-	assertExactFollowups(t, compact.Followups)
-	if !strings.Contains(compact.FullResponse, `response="full"`) {
-		t.Fatalf("full-response instruction = %q", compact.FullResponse)
-	}
-	assertBoundedNonJSONHint(t, result, encoded)
-}
-
-func TestCompactCandidatesPreferDistinctFilesInRankOrder(t *testing.T) {
-	largeCode := strings.Repeat("code ", 200)
-	results := []navigator.Result{
-		compactTestResult("a.go", 1, navigator.FindingSymbol, "def", "A", "", largeCode),
-		compactTestResult("a.go", 1, navigator.FindingSymbol, "def", "A", "", largeCode),
-		compactTestResult("a.go", 2, navigator.FindingSymbol, "ref", "A", "", largeCode),
-		compactTestResult("b.go", 3, navigator.FindingSymbol, "ref", "A", "", largeCode),
-		compactTestResult("c.go", 4, navigator.FindingSymbol, "ref", "A", "", largeCode),
-		compactTestResult("d.go", 5, navigator.FindingSymbol, "ref", "A", "", largeCode),
-		compactTestResult("e.go", 6, navigator.FindingSymbol, "ref", "A", "", largeCode),
-	}
-	response := navigator.FindResponse{
-		Query: "A", MatchedAs: navigator.FindOutcomeSymbol, Results: results,
-	}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 3<<10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact := output.(compactToolResponse)
-	want := []string{"a.go:1", "b.go:3", "c.go:4", "d.go:5", "e.go:6"}
-	got := make([]string, 0, len(compact.Candidates))
-	for _, candidate := range compact.Candidates {
-		got = append(got, candidate.Location)
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("candidate locations = %q, want distinct paths in rank order %q", got, want)
-	}
-}
-
-func TestCompactResponseAlwaysFitsOneKiBWithWorstCaseMetadata(t *testing.T) {
-	longValue := strings.Repeat("界\"\n", 1400)
-	response := navigator.InspectResponse{
-		Location: longValue,
-		Symbol:   longValue,
-		Error:    longValue,
-		Results: []navigator.Result{
-			compactTestResult(longValue, 42, navigator.FindingSymbol, "ref", longValue, longValue, strings.Repeat("source", 1000)),
-		},
-	}
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
-	if err != nil {
-		t.Fatalf("worst-case compact response failed: %v", err)
-	}
-	compact := output.(compactToolResponse)
-	encoded := mustMarshalResponse(t, compact)
-	if len(encoded) > 1024 || sizing.StructuredBytes != len(encoded) {
-		t.Fatalf("worst-case compact size = %d, sizing %#v", len(encoded), sizing)
-	}
-	if !compact.MetadataTruncated {
-		t.Fatalf("metadata truncation was not exposed: %#v", compact)
-	}
-	if len(compact.Candidates) != 0 || len(compact.Followups) != 0 {
-		t.Fatalf("incomplete oversized actions survived: candidates=%#v followups=%#v", compact.Candidates, compact.Followups)
-	}
-}
-
-func TestCompactCandidateRetainsLocationBeforeOversizedAncillaryFields(t *testing.T) {
-	longValue := strings.Repeat("界\"\n", 400)
-	result := compactTestResult(
-		"small.go",
-		17,
-		navigator.FindingSymbol,
-		"ref",
-		longValue,
-		longValue,
-		strings.Repeat("source", 1000),
-	)
-	result.Signature = longValue
-	response := navigator.FindResponse{
-		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
-		Results: []navigator.Result{result},
-	}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact := output.(compactToolResponse)
-	if len(compact.Candidates) != 1 || compact.Candidates[0].Location != "small.go:17" {
-		t.Fatalf("actionable candidate was lost: %#v", compact.Candidates)
-	}
-	if compact.OmittedBytes.Candidates <= len(mustMarshalResponse(t, compact.Candidates[0])) {
-		t.Fatalf("truncated ancillary bytes were not counted: %#v", compact.OmittedBytes)
-	}
-	if strings.Contains(string(mustMarshalResponse(t, compact)), longValue) {
-		t.Fatal("unbounded ancillary candidate content survived")
-	}
-}
-
-func TestMetadataTruncationIncludesOptionalOutcomeFields(t *testing.T) {
-	longValue := strings.Repeat("error\"\n", 300)
-	responses := []struct {
-		tool     string
-		response any
+func TestLeanGoldenToolMappings(t *testing.T) {
+	base := strings.Repeat("a", 40)
+	head := strings.Repeat("b", 40)
+	tests := []struct {
+		name string
+		tool string
+		full any
+		want string
 	}{
 		{
-			tool: "inspect",
-			response: navigator.InspectResponse{
-				Location: "small.go:1", Symbol: longValue, Error: longValue,
-				Results: []navigator.Result{},
+			name: "changed", tool: "changed",
+			full: navigator.ChangedResponse{
+				BaseCommit: base, HeadCommit: head, Patch: "+line\n",
+				Results: []navigator.Result{{Path: "b.go", Line: 9, Kind: "changed", Finding: navigator.FindingOther}},
 			},
+			want: `{"target":"` + base + `..` + head + `","outcome":"changed","results":[{"location":"b.go:9","kind":"changed"}],"truncated":["patch"],"next":{"tool":"inspect","arguments":{"location":"b.go:9"}}}`,
 		},
 		{
-			tool: "outline",
-			response: navigator.OutlineResponse{
-				Path: "small.go", Error: longValue, Results: []navigator.Result{},
+			name: "find", tool: "find",
+			full: navigator.FindResponse{
+				Query: "Serve", MatchedAs: navigator.FindOutcomeSymbol,
+				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Scope: "Serve", Signature: "func Serve()"}},
 			},
+			want: `{"target":"Serve","outcome":"symbol","results":[{"location":"a.go:7","kind":"def","symbol":"Serve","scope":"Serve","signature":"func Serve()"}],"truncated":[],"next":{"tool":"inspect","arguments":{"location":"a.go:7"}}}`,
+		},
+		{
+			name: "inspect", tool: "inspect",
+			full: navigator.InspectResponse{
+				Location: "a.go:7", Symbol: "Serve",
+				Results: []navigator.Result{{Path: "a.go", Line: 7, StartLine: 7, Kind: "scope", Finding: navigator.FindingOther, Symbol: "Serve", Code: "func Serve() {\n\twork()\n}"}},
+			},
+			want: `{"target":"a.go:7","outcome":"Serve","evidence":{"kind":"source","start":"a.go:7","text":"func Serve() {\n\twork()\n}"},"results":[],"truncated":[]}`,
+		},
+		{
+			name: "outline", tool: "outline",
+			full: navigator.OutlineResponse{
+				Path:    "a.go",
+				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Code: "func Serve()"}},
+			},
+			want: `{"target":"a.go","outcome":"definitions","results":[{"location":"a.go:7","kind":"def","symbol":"Serve"}],"truncated":["source"],"next":{"tool":"inspect","arguments":{"location":"a.go:7"}}}`,
 		},
 	}
-	for _, testCase := range responses {
-		t.Run(testCase.tool, func(t *testing.T) {
-			_, output, _, err := prepareToolResponse(testCase.tool, responseAuto, testCase.response, 1024)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, output, _, err := prepareToolResponse(test.tool, responseAuto, test.full, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
-			compact := output.(compactToolResponse)
-			if !compact.MetadataTruncated {
-				t.Fatalf("optional outcome truncation was not exposed: %#v", compact)
+			got := string(mustMarshalResponse(t, output))
+			if got != test.want {
+				t.Fatalf("lean golden changed:\n%s\nwant:\n%s", got, test.want)
 			}
 		})
 	}
 }
 
-func TestCompactResponseRejectsIncompleteCandidateLocation(t *testing.T) {
-	longPath := strings.Repeat("deep/", 300) + "file.go"
-	result := navigator.Result{
-		Path: longPath, Finding: navigator.FindingSymbol, Kind: "ref", Symbol: "Target",
-		Line: 4, StartLine: 4, EndLine: 4, Code: strings.Repeat("source", 300),
-	}
-	response := navigator.FindResponse{
-		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol, Results: []navigator.Result{result},
-	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact := output.(compactToolResponse)
-	encoded := mustMarshalResponse(t, compact)
-	if len(encoded) > 1024 || !sizing.Compacted {
-		t.Fatalf("compact size = %d, sizing %#v", len(encoded), sizing)
-	}
-	if len(compact.Candidates) != 0 || len(compact.Followups) != 0 {
-		t.Fatalf("oversize actionable locations retained: candidates=%#v followups=%#v", compact.Candidates, compact.Followups)
-	}
-	if strings.Contains(string(encoded), longPath) || compact.OmittedBytes.Candidates == 0 {
-		t.Fatalf("oversize path was not wholly omitted: %s", encoded)
-	}
-}
-
-func TestCompactCandidateFallsBackToChangedLine(t *testing.T) {
+func TestLeanResponseRemovesFormatterTelemetryAndDuplicateFinding(t *testing.T) {
 	response := navigator.ChangedResponse{
-		Patch: strings.Repeat("patch", 400),
-		Results: []navigator.Result{{
-			Path:         "changed.go",
-			Finding:      navigator.FindingOther,
-			Kind:         "changed",
-			ChangedLines: []int{0, 23, 24},
-			Code:         strings.Repeat("source", 400),
-		}},
+		Root: "/secret/root", BaseCommit: "base", HeadCommit: "head",
+		HeadSubject: "subject", Patch: strings.Repeat("patch", 300),
+		Results: largeResponseResults(), PatchTruncated: true, ResultsTruncated: true,
+		NavigationBudget: &navigator.NavigationBudget{Used: 3, Limit: 20, Remaining: 17},
 	}
 	_, output, _, err := prepareToolResponse("changed", responseAuto, response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compact := output.(compactToolResponse)
-	if len(compact.Candidates) != 1 || compact.Candidates[0].Location != "changed.go:23" {
-		t.Fatalf("changed-lines candidate = %#v", compact.Candidates)
+	encoded := mustMarshalResponse(t, output)
+	var topLevel map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &topLevel); err != nil {
+		t.Fatal(err)
 	}
-	if len(compact.Followups) == 0 || compact.Followups[0].Tool != "inspect" ||
-		compact.Followups[0].Arguments["location"] != "changed.go:23" {
-		t.Fatalf("changed-lines followup = %#v", compact.Followups)
+	if _, exists := topLevel["tool"]; exists {
+		t.Fatalf("lean response retained formatter tool field: %s", encoded)
+	}
+	for _, forbidden := range []string{
+		`"root"`, `"searched_as"`, `"counts"`, `"omitted_bytes"`,
+		`"original_bytes"`, `"budget_bytes"`, `"compact"`, `"full_response"`,
+		`"metadata_truncated"`, `"finding"`, `"navigation_budget"`, "subject", "/secret/root",
+	} {
+		if strings.Contains(string(encoded), forbidden) {
+			t.Fatalf("lean response retained %q: %s", forbidden, encoded)
+		}
 	}
 }
 
-func TestCompactPathFindingOffersExactOutlineFollowup(t *testing.T) {
+func TestInspectEvidenceUsesOnlyCompleteUTF8LinesWithinBudget(t *testing.T) {
+	lines := []string{
+		"func Serve() {",
+		"\tfirst := \"界界界\"",
+		"\tsecond := \"" + strings.Repeat("界", 120) + "\"",
+		"\tthird()",
+		"}",
+	}
+	code := strings.Join(lines, "\n")
+	response := navigator.InspectResponse{
+		Location: "internal/service.go:40", Symbol: "Serve",
+		Results: []navigator.Result{
+			{Path: "internal/service.go", Line: 40, StartLine: 38, EndLine: 90, CodeStartLine: 38, CodeEndLine: 90, Kind: "scope", Finding: navigator.FindingOther, Symbol: "Serve", Code: code},
+			{Path: "internal/service_test.go", Line: 12, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Serve", Scope: "TestServe"},
+		},
+	}
+	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 420)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	encoded := mustMarshalResponse(t, lean)
+	if len(encoded) > 420 || sizing.StructuredBytes != len(encoded) || !utf8.Valid(encoded) {
+		t.Fatalf("lean evidence bytes = %d, sizing %#v", len(encoded), sizing)
+	}
+	if lean.Evidence == nil || lean.Evidence.Start != "internal/service.go:38" {
+		t.Fatalf("evidence = %#v", lean.Evidence)
+	}
+	if lean.Evidence.Text == code || !strings.HasPrefix(code, lean.Evidence.Text+"\n") {
+		t.Fatalf("evidence cut through line or was not bounded: %q", lean.Evidence.Text)
+	}
+	for _, line := range lines {
+		if strings.HasPrefix(line, lean.Evidence.Text) && line != lean.Evidence.Text {
+			t.Fatalf("partial source line survived: %q", lean.Evidence.Text)
+		}
+	}
+	if !containsString(lean.Truncated, "source") {
+		t.Fatalf("source omission not exposed: %#v", lean.Truncated)
+	}
+	for _, result := range lean.Results {
+		if result.Location == "internal/service.go:40" {
+			t.Fatalf("primary inspect result duplicated evidence: %#v", lean.Results)
+		}
+	}
+}
+
+func TestInspectEvidenceDropsSingleOversizedLineWhole(t *testing.T) {
+	line := "const payload = \"" + strings.Repeat("界", 600) + "\""
+	response := navigator.InspectResponse{
+		Location: "a.go:1", Symbol: "payload",
+		Results: []navigator.Result{{Path: "a.go", Line: 1, StartLine: 1, Kind: "scope", Code: line}},
+	}
+	_, output, _, err := prepareToolResponse("inspect", responseAuto, response, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") {
+		t.Fatalf("oversized single line was split: %#v", lean)
+	}
+	if strings.Contains(string(mustMarshalResponse(t, lean)), "const payload") {
+		t.Fatal("partial oversized line leaked")
+	}
+}
+
+func TestLeanResultsDefinitionFirstWithExactlyOneExactNext(t *testing.T) {
 	response := navigator.FindResponse{
-		Query: "service", MatchedAs: navigator.FindOutcomeFile,
-		Results: []navigator.Result{{
-			Path: "src/service.go", Finding: navigator.FindingFile, Kind: "file",
-		}},
-		Hint: strings.Repeat("large legacy hint ", 100),
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{
+			{Path: "caller.go", Line: 9, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Target"},
+			{Path: "target.go", Line: 3, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Target"},
+			{Path: "other.go", Line: 12, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Target"},
+		},
+	}
+	result, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if len(lean.Results) != 3 || lean.Results[0].Location != "target.go:3" {
+		t.Fatalf("definition-first results = %#v", lean.Results)
+	}
+	if lean.Next == nil || lean.Next.Tool != "inspect" ||
+		lean.Next.Arguments["location"] != "target.go:3" {
+		t.Fatalf("next = %#v", lean.Next)
+	}
+	text := toolResultText(t, result)
+	if !strings.Contains(text, "Inspect target.go:3;") || len(text) > maximumCompactTextBytes {
+		t.Fatalf("actionable text hint = %q", text)
+	}
+}
+
+func TestOutlinePreservesDefinitionSourceOrder(t *testing.T) {
+	response := navigator.OutlineResponse{
+		Path: "a.go",
+		Results: []navigator.Result{
+			{Path: "a.go", Line: 20, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Later"},
+			{Path: "a.go", Line: 4, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Earlier"},
+		},
+	}
+	_, output, _, err := prepareToolResponse("outline", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	got := []string{lean.Results[0].Location, lean.Results[1].Location}
+	want := []string{"a.go:20", "a.go:4"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("outline order = %q, want %q", got, want)
+	}
+}
+
+func TestLeanNeverShortensExactLocationsOrActions(t *testing.T) {
+	longPath := strings.Repeat("deep/", 80) + "file.go"
+	location := longPath + ":42"
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{Path: longPath, Line: 42, Kind: "def", Finding: navigator.FindingSymbol}},
 	}
 	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
-	compact := output.(compactToolResponse)
-	if compact.Query != response.Query || compact.MatchedAs != navigator.FindOutcomeFile {
-		t.Fatalf("find metadata = %#v", compact)
+	lean := output.(leanResponse)
+	if len(lean.Results) != 1 || lean.Results[0].Location != location ||
+		lean.Next == nil || lean.Next.Arguments["location"] != location {
+		t.Fatalf("location/action changed: %#v", lean)
 	}
-	if len(compact.Candidates) != 0 {
-		t.Fatalf("path-only result became inactionable line candidate: %#v", compact.Candidates)
-	}
-	if compact.OmittedBytes.Candidates == 0 {
-		t.Fatalf("path-only result omission was not exposed: %#v", compact.OmittedBytes)
-	}
-	want := []compactFollowup{{
-		Tool: "outline", Arguments: map[string]any{"path": "src/service.go"},
-	}}
-	if !reflect.DeepEqual(compact.Followups, want) {
-		t.Fatalf("path followups = %#v, want %#v", compact.Followups, want)
+
+	tooLong := strings.Repeat("deep/", 300) + "file.go:42"
+	inspect := navigator.InspectResponse{Location: tooLong, Symbol: "Target", Results: []navigator.Result{}}
+	if _, _, _, err := prepareToolResponse("inspect", responseAuto, inspect, 1024); err == nil {
+		t.Fatal("impossible exact inspect target was silently shortened")
 	}
 }
 
-func TestCompactResponseToolSpecificTargetsAndBoundedMetadata(t *testing.T) {
-	longValue := strings.Repeat("界\"\n", 200)
-	responses := []struct {
-		tool     string
-		response any
-		assert   func(*testing.T, compactToolResponse)
-	}{
-		{
-			tool: "find",
-			response: navigator.FindResponse{
-				Query: longValue, MatchedAs: navigator.FindOutcomeOther,
-				Hint: strings.Repeat("inflate", 300), Results: []navigator.Result{},
-			},
-			assert: func(t *testing.T, compact compactToolResponse) {
-				t.Helper()
-				if compact.Query == "" || compact.MatchedAs != navigator.FindOutcomeOther {
-					t.Fatalf("find compact metadata = %#v", compact)
-				}
-			},
-		},
-		{
-			tool: "inspect",
-			response: navigator.InspectResponse{
-				Location: longValue, Symbol: "Target", Error: strings.Repeat("error", 400),
-				Results: []navigator.Result{},
-			},
-			assert: func(t *testing.T, compact compactToolResponse) {
-				t.Helper()
-				if compact.Location == "" || compact.Symbol != "Target" || compact.Error == "" {
-					t.Fatalf("inspect compact metadata = %#v", compact)
-				}
-			},
-		},
-		{
-			tool: "outline",
-			response: navigator.OutlineResponse{
-				Path: longValue, Error: strings.Repeat("error", 400), Results: []navigator.Result{},
-			},
-			assert: func(t *testing.T, compact compactToolResponse) {
-				t.Helper()
-				if compact.Path == "" || compact.Error == "" {
-					t.Fatalf("outline compact metadata = %#v", compact)
-				}
-			},
-		},
+func TestLongQueryIsUTF8BoundedAndExposedAsTruncated(t *testing.T) {
+	query := strings.Repeat("界\"\n", 1200)
+	response := navigator.FindResponse{Query: query, MatchedAs: navigator.FindOutcomeNone, Results: []navigator.Result{}}
+	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, testCase := range responses {
-		t.Run(testCase.tool, func(t *testing.T) {
-			_, output, _, err := prepareToolResponse(testCase.tool, responseAuto, testCase.response, 1024)
-			if err != nil {
-				t.Fatal(err)
-			}
-			compact := output.(compactToolResponse)
-			testCase.assert(t, compact)
-			if !compact.MetadataTruncated {
-				t.Fatalf("metadata truncation not exposed: %#v", compact)
-			}
-			encoded := mustMarshalResponse(t, compact)
-			if len(encoded) > 1024 || !utf8.Valid(encoded) {
-				t.Fatalf("compact metadata encoding is invalid or oversized: %d bytes", len(encoded))
-			}
-		})
+	lean := output.(leanResponse)
+	encoded := mustMarshalResponse(t, lean)
+	if len(encoded) > 1024 || !utf8.Valid(encoded) || lean.Target == query ||
+		!containsString(lean.Truncated, "target") {
+		t.Fatalf("bounded query = %#v (%d bytes)", lean, len(encoded))
+	}
+}
+
+func TestActionHintFallsBackInsteadOfTruncatingLocation(t *testing.T) {
+	location := strings.Repeat("deep/", 40) + "file.go:1"
+	next := &leanNext{Tool: "inspect", Arguments: map[string]any{"location": location}}
+	hint := leanNextHint(next)
+	if hint != fullResponseTextHint || strings.Contains(hint, location[:20]) {
+		t.Fatalf("long action hint was partially emitted: %q", hint)
 	}
 }
 
@@ -534,6 +332,10 @@ func TestPrepareToolResponseRejectsInvalidRequests(t *testing.T) {
 	}
 	if _, _, _, err := prepareToolResponse("changed", responseAuto, response, 1024); err == nil {
 		t.Fatal("mismatched response type succeeded")
+	}
+	var nilFind *navigator.FindResponse
+	if _, _, _, err := prepareToolResponse("find", responseAuto, nilFind, 1024); err == nil {
+		t.Fatal("nil response succeeded")
 	}
 }
 
@@ -583,59 +385,53 @@ func mustMarshalResponse(t *testing.T, value any) []byte {
 	return encoded
 }
 
+func sortedTopLevelKeys(t *testing.T, encoded []byte) []string {
+	t.Helper()
+	var decoded map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	keys := make([]string, 0, len(decoded))
+	for _, candidate := range []string{"target", "outcome", "evidence", "results", "truncated", "next", "error"} {
+		if _, ok := decoded[candidate]; ok {
+			keys = append(keys, candidate)
+		}
+	}
+	if len(keys) != len(decoded) {
+		t.Fatalf("unexpected top-level keys: %#v", decoded)
+	}
+	return keys
+}
+
 func assertBoundedNonJSONHint(t *testing.T, result *mcp.CallToolResult, structuredJSON []byte) {
+	t.Helper()
+	text := toolResultText(t, result)
+	if text == "" || len(text) > maximumCompactTextBytes || !utf8.ValidString(text) {
+		t.Fatalf("text hint = %q", text)
+	}
+	if text == string(structuredJSON) || strings.Contains(text, string(structuredJSON)) ||
+		strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("text duplicated structured JSON: %q", text)
+	}
+}
+
+func toolResultText(t *testing.T, result *mcp.CallToolResult) string {
 	t.Helper()
 	if result == nil || len(result.Content) != 1 {
 		t.Fatalf("content = %#v, want one text hint", result)
 	}
 	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok || text.Text == "" || len(text.Text) > maximumCompactTextBytes {
-		t.Fatalf("text hint = %#v", result.Content[0])
+	if !ok {
+		t.Fatalf("content = %T, want TextContent", result.Content[0])
 	}
-	if text.Text == string(structuredJSON) || strings.Contains(text.Text, string(structuredJSON)) ||
-		strings.HasPrefix(strings.TrimSpace(text.Text), "{") {
-		t.Fatalf("text duplicated structured JSON: %q", text.Text)
-	}
+	return text.Text
 }
 
-func assertExactFollowups(t *testing.T, followups []compactFollowup) {
-	t.Helper()
-	if len(followups) == 0 || len(followups) > maximumCompactFollowups {
-		t.Fatalf("followups = %#v", followups)
-	}
-	for _, followup := range followups {
-		switch followup.Tool {
-		case "inspect":
-			if len(followup.Arguments) != 1 {
-				t.Fatalf("inspect followup arguments = %#v", followup.Arguments)
-			}
-			location, ok := followup.Arguments["location"].(string)
-			if !ok || !validCompactLocation(location) {
-				t.Fatalf("inspect followup = %#v", followup)
-			}
-		case "outline":
-			if len(followup.Arguments) != 1 {
-				t.Fatalf("outline followup arguments = %#v", followup.Arguments)
-			}
-			path, ok := followup.Arguments["path"].(string)
-			if !ok || path == "" || strings.Contains(path, ":") {
-				t.Fatalf("outline followup = %#v", followup)
-			}
-		default:
-			t.Fatalf("unsupported compact followup = %#v", followup)
+func containsString(values []string, value string) bool {
+	for _, existing := range values {
+		if existing == value {
+			return true
 		}
 	}
-}
-
-func validCompactLocation(location string) bool {
-	separator := strings.LastIndexByte(location, ':')
-	if separator < 1 || separator == len(location)-1 {
-		return false
-	}
-	for _, digit := range location[separator+1:] {
-		if digit < '0' || digit > '9' {
-			return false
-		}
-	}
-	return location[separator+1:] != "0"
+	return false
 }

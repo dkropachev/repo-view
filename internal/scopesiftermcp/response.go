@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -14,90 +15,73 @@ const (
 	responseAuto = "auto"
 	responseFull = "full"
 
-	maximumCompactCandidates  = 5
-	maximumCompactFollowups   = 2
-	maximumCompactTextBytes   = 160
-	maximumCompactValueBytes  = 256
-	maximumCandidateTextBytes = 128
+	maximumLeanResults       = 5
+	maximumCompactTextBytes  = 160
+	maximumLeanMetadataBytes = 256
+	maximumLeanResultBytes   = 128
 )
 
-// responseSizing reports the structured-output bytes observed by the response
-// formatter. Adaptive budget learning uses Compacted; the byte counts are also
-// useful for protocol-level tests and benchmarks.
+// responseSizing remains internal measurement and adaptive-learning state. No
+// size telemetry is emitted in the lean structured response.
 type responseSizing struct {
 	OriginalBytes   int
 	StructuredBytes int
 	Compacted       bool
 }
 
-// compactToolResponse is the shared v4 compact output variant. Tool-specific
-// selector and outcome fields are populated by compactResponseFor. Source code,
-// patches, and repository roots intentionally have no representation here.
-type compactToolResponse struct {
-	Tool              string                `json:"tool"`
-	Query             string                `json:"query,omitempty"`
-	Location          string                `json:"location,omitempty"`
-	Path              string                `json:"path,omitempty"`
-	MatchedAs         navigator.FindOutcome `json:"matched_as,omitempty"`
-	Symbol            string                `json:"symbol,omitempty"`
-	Error             string                `json:"error,omitempty"`
-	BaseCommit        string                `json:"base_commit,omitempty"`
-	HeadCommit        string                `json:"head_commit,omitempty"`
-	HeadSubject       string                `json:"head_subject,omitempty"`
-	FullResponse      string                `json:"full_response"`
-	Candidates        []compactCandidate    `json:"candidates"`
-	Followups         []compactFollowup     `json:"followups"`
-	Counts            compactCounts         `json:"counts"`
-	OmittedBytes      compactOmittedBytes   `json:"omitted_bytes"`
-	OriginalBytes     int                   `json:"original_bytes"`
-	BudgetBytes       int                   `json:"budget_bytes"`
-	Truncated         compactTruncation     `json:"truncated"`
-	Compact           bool                  `json:"compact"`
-	MetadataTruncated bool                  `json:"metadata_truncated,omitempty"`
+// leanResponse is the stable auto-response shape for every tool. Optional
+// evidence and next are useful payload, never formatter telemetry.
+type leanResponse struct {
+	Target    string        `json:"target"`
+	Outcome   string        `json:"outcome"`
+	Evidence  *leanEvidence `json:"evidence,omitempty"`
+	Results   []leanResult  `json:"results"`
+	Truncated []string      `json:"truncated"`
+	Next      *leanNext     `json:"next,omitempty"`
+	Error     string        `json:"error,omitempty"`
 }
 
-type compactCounts struct {
-	ReturnedResults int                  `json:"returned_results"`
-	UniqueFiles     int                  `json:"unique_files"`
-	Findings        compactFindingCounts `json:"findings"`
+type leanEvidence struct {
+	Kind  string `json:"kind"`
+	Start string `json:"start"`
+	Text  string `json:"text"`
 }
 
-type compactFindingCounts struct {
-	File   int `json:"file"`
-	Symbol int `json:"symbol"`
-	Other  int `json:"other"`
+type leanResult struct {
+	Location  string `json:"location"`
+	Kind      string `json:"kind"`
+	Symbol    string `json:"symbol,omitempty"`
+	Scope     string `json:"scope,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
-type compactTruncation struct {
-	Results bool `json:"results"`
-	Code    bool `json:"code"`
-	Patch   bool `json:"patch"`
-}
-
-type compactOmittedBytes struct {
-	Code       int `json:"code"`
-	Patch      int `json:"patch"`
-	Candidates int `json:"candidates"`
-}
-
-type compactCandidate struct {
-	Location  string            `json:"location"`
-	Finding   navigator.Finding `json:"finding"`
-	Kind      string            `json:"kind"`
-	Symbol    string            `json:"symbol,omitempty"`
-	Scope     string            `json:"scope,omitempty"`
-	Signature string            `json:"signature,omitempty"`
-}
-
-type compactFollowup struct {
-	Arguments map[string]any `json:"arguments"`
+type leanNext struct {
 	Tool      string         `json:"tool"`
+	Arguments map[string]any `json:"arguments"`
 }
 
-// prepareToolResponse applies the v4 output contract to one successful v3
-// navigator response. Full responses and auto responses within budget retain
-// the exact original structured shape. All paths return a short text pointer so
-// the MCP SDK does not copy structured JSON into content.
+type leanResultSource struct {
+	result navigator.Result
+	lean   leanResult
+}
+
+type leanEvidenceSource struct {
+	start     string
+	text      string
+	truncated bool
+}
+
+type leanResponsePlan struct {
+	response         leanResponse
+	results          []leanResultSource
+	evidence         *leanEvidenceSource
+	resultsTruncated bool
+	sourceTruncated  bool
+}
+
+// prepareToolResponse emits the exact v3 shape only for explicit full calls.
+// Auto always emits leanResponse, avoiding a schema that changes with response
+// size. Compacted still means the original v3 JSON crossed the adaptive budget.
 func prepareToolResponse(
 	tool, mode string,
 	full any,
@@ -123,145 +107,163 @@ func prepareToolResponse(
 		OriginalBytes:   len(originalJSON),
 		StructuredBytes: len(originalJSON),
 	}
-	if mode == responseFull || len(originalJSON) <= budget {
-		return responseResult(fullResponseTextHint), full, sizing, nil
+	if mode == responseFull {
+		return responseResult(actionableResponseHint(tool, full, nil)), full, sizing, nil
 	}
 
-	compact, candidateSources, err := compactResponseFor(tool, full, len(originalJSON), budget)
+	plan, err := leanResponseFor(tool, full)
 	if err != nil {
 		return nil, nil, responseSizing{}, err
 	}
-	if !fitCompactResponse(&compact, candidateSources, budget) {
+	if !fitLeanResponse(&plan, tool, budget) {
 		return nil, nil, responseSizing{}, fmt.Errorf(
-			"%d-byte structured-output budget is too small for compact %s metadata",
+			"%d-byte structured-output budget is too small for exact %s actions",
 			budget,
 			tool,
 		)
 	}
-	compactJSON, err := json.Marshal(compact)
+	leanJSON, err := json.Marshal(plan.response)
 	if err != nil {
-		return nil, nil, responseSizing{}, fmt.Errorf("marshal compact %s response: %w", tool, err)
+		return nil, nil, responseSizing{}, fmt.Errorf("marshal lean %s response: %w", tool, err)
 	}
-	if len(compactJSON) > budget {
+	if len(leanJSON) > budget {
 		return nil, nil, responseSizing{}, fmt.Errorf(
-			"compact %s response requires %d bytes, exceeds %d-byte budget",
+			"lean %s response requires %d bytes, exceeds %d-byte budget",
 			tool,
-			len(compactJSON),
+			len(leanJSON),
 			budget,
 		)
 	}
-	sizing.StructuredBytes = len(compactJSON)
-	sizing.Compacted = true
-	hint := fmt.Sprintf(
-		"Structured result compacted from %d to %d bytes; use followups or repeat with response=full.",
-		sizing.OriginalBytes,
-		sizing.StructuredBytes,
-	)
-	return responseResult(hint), compact, sizing, nil
+	sizing.StructuredBytes = len(leanJSON)
+	sizing.Compacted = len(originalJSON) > budget
+	return responseResult(actionableResponseHint(tool, full, &plan.response)), plan.response, sizing, nil
 }
 
-const fullResponseTextHint = "Structured result is in structuredContent."
+const fullResponseTextHint = "Full result is in structuredContent."
 
 func responseResult(hint string) *mcp.CallToolResult {
-	if len(hint) > maximumCompactTextBytes {
-		hint = hint[:maximumCompactTextBytes]
+	if hint == "" || len(hint) > maximumCompactTextBytes || !utf8.ValidString(hint) {
+		hint = fullResponseTextHint
 	}
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: hint}},
 	}
 }
 
-type compactCandidateSource struct {
-	path      string
-	candidate compactCandidate
-}
-
-func compactResponseFor(
-	tool string,
-	full any,
-	originalBytes, budget int,
-) (compactToolResponse, []compactCandidateSource, error) {
-	compact := compactToolResponse{
-		Compact:       true,
-		Tool:          tool,
-		OriginalBytes: originalBytes,
-		BudgetBytes:   budget,
-		Candidates:    []compactCandidate{},
-		Followups:     []compactFollowup{},
-		FullResponse:  `Repeat the same call with response="full" for complete structured output.`,
-	}
+func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
+	plan := leanResponsePlan{response: leanResponse{
+		Results:   []leanResult{},
+		Truncated: []string{},
+	}}
 	var results []navigator.Result
 	switch response := full.(type) {
 	case navigator.ChangedResponse:
 		if tool != "changed" {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		compact.BaseCommit = response.BaseCommit
-		compact.HeadCommit = response.HeadCommit
-		compact.HeadSubject, compact.MetadataTruncated = compactValue(response.HeadSubject)
-		compact.Truncated.Patch = response.PatchTruncated
-		compact.Truncated.Results = response.ResultsTruncated
-		compact.OmittedBytes.Patch = len(response.Patch)
+		plan.response.Target = changedTarget(response.BaseCommit, response.HeadCommit)
+		plan.response.Outcome = "unchanged"
+		if response.Patch != "" || len(response.Results) != 0 ||
+			response.PatchTruncated || response.ResultsTruncated {
+			plan.response.Outcome = "changed"
+		}
+		if response.Patch != "" || response.PatchTruncated {
+			markLeanTruncated(&plan.response, "patch")
+		}
+		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
 	case *navigator.ChangedResponse:
 		if response == nil {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		return compactResponseFor(tool, *response, originalBytes, budget)
+		return leanResponseFor(tool, *response)
 	case navigator.FindResponse:
 		if tool != "find" {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		compact.Query, compact.MetadataTruncated = compactValue(response.Query)
-		compact.MatchedAs = response.MatchedAs
-		compact.Truncated.Results = response.ResultsTruncated
+		plan.response.Target, plan.response.Truncated = boundedLeanField(
+			response.Query, "target", plan.response.Truncated,
+		)
+		plan.response.Outcome = string(response.MatchedAs)
+		if plan.response.Outcome == "" {
+			plan.response.Outcome = string(navigator.FindOutcomeNone)
+		}
+		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
 	case *navigator.FindResponse:
 		if response == nil {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		return compactResponseFor(tool, *response, originalBytes, budget)
+		return leanResponseFor(tool, *response)
 	case navigator.InspectResponse:
 		if tool != "inspect" {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		var truncated bool
-		compact.Location, compact.MetadataTruncated = compactValue(response.Location)
-		compact.Symbol, truncated = compactValue(response.Symbol)
-		compact.MetadataTruncated = compact.MetadataTruncated || truncated
-		compact.Error, truncated = compactValue(response.Error)
-		compact.MetadataTruncated = compact.MetadataTruncated || truncated
-		compact.Truncated.Results = response.ResultsTruncated
+		// Location is an executable action. Keep it exact or reject the response;
+		// silently shortening PATH:LINE would create a false instruction.
+		plan.response.Target = response.Location
+		plan.response.Outcome, plan.response.Truncated = boundedLeanField(
+			response.Symbol, "outcome", plan.response.Truncated,
+		)
+		if plan.response.Outcome == "" {
+			plan.response.Outcome = "scope"
+		}
+		plan.response.Error, plan.response.Truncated = boundedLeanField(
+			response.Error, "error", plan.response.Truncated,
+		)
+		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
+		if len(results) > 0 && results[0].Code != "" {
+			if evidence := inspectEvidenceSource(results[0]); evidence != nil {
+				plan.evidence = evidence
+				plan.sourceTruncated = evidence.truncated
+				results = results[1:]
+			}
+		}
 	case *navigator.InspectResponse:
 		if response == nil {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		return compactResponseFor(tool, *response, originalBytes, budget)
+		return leanResponseFor(tool, *response)
 	case navigator.OutlineResponse:
 		if tool != "outline" {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		compact.Path, compact.MetadataTruncated = compactValue(response.Path)
-		var truncated bool
-		compact.Error, truncated = compactValue(response.Error)
-		compact.MetadataTruncated = compact.MetadataTruncated || truncated
-		compact.Truncated.Results = response.ResultsTruncated
+		plan.response.Target = response.Path
+		plan.response.Outcome = "definitions"
+		plan.response.Error, plan.response.Truncated = boundedLeanField(
+			response.Error, "error", plan.response.Truncated,
+		)
+		if response.Error != "" {
+			plan.response.Outcome = "error"
+		}
+		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
 	case *navigator.OutlineResponse:
 		if response == nil {
-			return compact, nil, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, full)
 		}
-		return compactResponseFor(tool, *response, originalBytes, budget)
+		return leanResponseFor(tool, *response)
 	default:
-		return compact, nil, responseTypeError(tool, full)
+		return plan, responseTypeError(tool, full)
 	}
 
-	compact.Counts, compact.Truncated.Code, compact.OmittedBytes.Code = summarizeResults(results)
-	candidates, candidateBytes := diverseCompactCandidates(results)
-	compact.OmittedBytes.Candidates = candidateBytes
-	compact.Followups = compactFollowups(tool, results)
-	return compact, candidates, nil
+	for index := range results {
+		result := results[index]
+		if result.Code != "" || result.CodeTruncated {
+			plan.sourceTruncated = true
+		}
+		lean, ok := leanResultFor(result)
+		if !ok {
+			plan.resultsTruncated = true
+			continue
+		}
+		plan.results = append(plan.results, leanResultSource{result: result, lean: lean})
+	}
+	if tool != "outline" {
+		plan.results = definitionFirst(plan.results)
+	}
+	return plan, nil
 }
 
 func responseTypeError(tool string, response any) error {
@@ -302,148 +304,273 @@ func validToolResponseType(tool string, response any) bool {
 	return false
 }
 
-func summarizeResults(results []navigator.Result) (compactCounts, bool, int) {
-	counts := compactCounts{ReturnedResults: len(results)}
-	files := make(map[string]struct{})
-	codeTruncated := false
-	codeBytes := 0
-	for index := range results {
-		result := &results[index]
-		if result.Path != "" {
-			files[result.Path] = struct{}{}
-		}
-		switch result.Finding {
-		case navigator.FindingFile:
-			counts.Findings.File++
-		case navigator.FindingSymbol:
-			counts.Findings.Symbol++
-		case navigator.FindingOther:
-			counts.Findings.Other++
-		default:
-			counts.Findings.Other++
-		}
-		codeBytes += len(result.Code)
-		codeTruncated = codeTruncated || result.CodeTruncated
+func changedTarget(base, head string) string {
+	if base == "" {
+		return head
 	}
-	counts.UniqueFiles = len(files)
-	return counts, codeTruncated, codeBytes
+	if head == "" {
+		return base
+	}
+	return base + ".." + head
 }
 
-func diverseCompactCandidates(results []navigator.Result) ([]compactCandidateSource, int) {
-	eligible := make([]compactCandidateSource, 0, len(results))
-	seenLocations := make(map[string]struct{})
-	totalBytes := 0
-	for index := range results {
-		result := &results[index]
-		line := actionableResultLine(result)
-		if result.Path == "" {
-			continue
-		}
-		candidate := compactCandidate{
-			Location: result.Path,
-			Finding:  result.Finding,
-			Kind:     result.Kind,
-		}
-		if line > 0 {
-			candidate.Location = fmt.Sprintf("%s:%d", result.Path, line)
-		}
-		candidate.Symbol, _ = boundedJSONString(result.Symbol, maximumCandidateTextBytes)
-		if result.Scope != "" && result.Scope != result.Symbol {
-			candidate.Scope, _ = boundedJSONString(result.Scope, maximumCandidateTextBytes)
-		}
-		candidate.Signature, _ = boundedJSONString(result.Signature, maximumCandidateTextBytes)
-		originalCandidate := candidate
-		originalCandidate.Symbol = result.Symbol
-		if result.Scope != result.Symbol {
-			originalCandidate.Scope = result.Scope
-		}
-		originalCandidate.Signature = result.Signature
-		originalEncoded, err := json.Marshal(originalCandidate)
-		if err != nil {
-			continue
-		}
-		totalBytes += len(originalEncoded)
-		if line < 1 {
-			// A file without a line can inform an outline follow-up, but cannot be
-			// presented as a path:line candidate.
-			continue
-		}
-		if _, duplicate := seenLocations[candidate.Location]; duplicate {
-			continue
-		}
-		seenLocations[candidate.Location] = struct{}{}
-		if _, err := json.Marshal(candidate); err != nil {
-			continue
-		}
-		eligible = append(eligible, compactCandidateSource{
-			path:      result.Path,
-			candidate: candidate,
-		})
+func boundedLeanField(value, field string, truncated []string) (string, []string) {
+	bounded, shortened := boundedJSONString(value, maximumLeanMetadataBytes)
+	if shortened {
+		truncated = appendUnique(truncated, field)
 	}
-
-	ordered := make([]compactCandidateSource, 0, len(eligible))
-	selected := make([]bool, len(eligible))
-	seenPaths := make(map[string]struct{})
-	for index := range eligible {
-		source := &eligible[index]
-		if _, seen := seenPaths[source.path]; seen {
-			continue
-		}
-		seenPaths[source.path] = struct{}{}
-		selected[index] = true
-		ordered = append(ordered, *source)
-	}
-	for index := range eligible {
-		if !selected[index] {
-			ordered = append(ordered, eligible[index])
-		}
-	}
-	return ordered, totalBytes
+	return bounded, truncated
 }
 
-func compactFollowups(tool string, results []navigator.Result) []compactFollowup {
-	followups := make([]compactFollowup, 0, maximumCompactFollowups)
-	start := 0
-	if tool == "inspect" && len(results) > 0 {
-		// Inspect's first result is the scope at the requested location. Repeating
-		// the same compacting call is not progressive disclosure; prefer a related
-		// result when one exists.
-		start = 1
+func inspectEvidenceSource(result navigator.Result) *leanEvidenceSource {
+	line := result.CodeStartLine
+	if line < 1 {
+		line = result.StartLine
 	}
-	for index := start; index < len(results); index++ {
-		result := &results[index]
-		line := actionableResultLine(result)
-		if result.Path != "" && line > 0 {
-			followups = append(followups, compactFollowup{
-				Tool: "inspect",
-				Arguments: map[string]any{
-					"location": fmt.Sprintf("%s:%d", result.Path, line),
-				},
-			})
-			break
+	if line < 1 {
+		line = actionableResultLine(&result)
+	}
+	if result.Path == "" || line < 1 || result.Code == "" || !utf8.ValidString(result.Code) {
+		return nil
+	}
+	return &leanEvidenceSource{
+		start:     fmt.Sprintf("%s:%d", result.Path, line),
+		text:      result.Code,
+		truncated: result.CodeTruncated,
+	}
+}
+
+func leanResultFor(result navigator.Result) (leanResult, bool) {
+	if result.Path == "" {
+		return leanResult{}, false
+	}
+	location := result.Path
+	if line := actionableResultLine(&result); line > 0 {
+		location = fmt.Sprintf("%s:%d", result.Path, line)
+	}
+	kind := result.Kind
+	if kind == "" {
+		kind = string(result.Finding)
+	}
+	symbol, _ := boundedJSONString(result.Symbol, maximumLeanResultBytes)
+	return leanResult{Location: location, Kind: kind, Symbol: symbol}, true
+}
+
+func definitionFirst(results []leanResultSource) []leanResultSource {
+	ordered := make([]leanResultSource, 0, len(results))
+	for index := range results {
+		if results[index].result.Kind == "def" {
+			ordered = append(ordered, results[index])
 		}
 	}
-	if len(followups) < maximumCompactFollowups && tool != "outline" {
-		for index := range results {
-			result := &results[index]
-			if result.Path == "" {
-				continue
-			}
-			// Path-only find results refer to current repository files. Changed
-			// path-only results may represent a deletion or binary file.
-			if actionableResultLine(result) == 0 && tool != "find" {
-				continue
-			}
-			followups = append(followups, compactFollowup{
-				Tool: "outline",
-				Arguments: map[string]any{
-					"path": result.Path,
-				},
-			})
-			break
+	for index := range results {
+		if results[index].result.Kind != "def" {
+			ordered = append(ordered, results[index])
 		}
 	}
-	return followups
+	return ordered
+}
+
+func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
+	response := &plan.response
+	if plan.resultsTruncated || len(plan.results) > maximumLeanResults {
+		markLeanTruncated(response, "results")
+	}
+	if plan.sourceTruncated {
+		markLeanTruncated(response, "source")
+	}
+	if !leanFits(response, budget) {
+		return false
+	}
+
+	selected := make([]int, 0, min(len(plan.results), maximumLeanResults))
+	primary := firstActionableResult(tool, plan.results)
+	if primary >= 0 {
+		next := leanNextFor(tool, plan.results[primary].result)
+		candidate := coreLeanResult(plan.results[primary].lean)
+		if tryPrimaryLeanResult(response, candidate, next, budget) {
+			selected = append(selected, primary)
+		}
+	}
+
+	if plan.evidence != nil {
+		fitLeanEvidence(response, plan.evidence, budget)
+	}
+
+	for index := range plan.results {
+		if len(selected) == maximumLeanResults || containsIndex(selected, index) {
+			continue
+		}
+		candidate := coreLeanResult(plan.results[index].lean)
+		if tryLeanResult(response, candidate, budget) {
+			selected = append(selected, index)
+		}
+	}
+
+	if len(selected) != len(plan.results) {
+		markLeanTruncated(response, "results")
+	}
+	if !leanFits(response, budget) {
+		// Truncation marker is mandatory. Evict least-important extra results;
+		// preserve first actionable result and its exact next when possible.
+		for !leanFits(response, budget) && len(response.Results) > 1 {
+			response.Results = response.Results[:len(response.Results)-1]
+			selected = selected[:len(selected)-1]
+		}
+		if !leanFits(response, budget) {
+			response.Evidence = nil
+			markLeanTruncated(response, "source")
+		}
+		if !leanFits(response, budget) {
+			response.Results = []leanResult{}
+			response.Next = nil
+			selected = selected[:0]
+		}
+	}
+	if !leanFits(response, budget) {
+		return false
+	}
+
+	// Scope and signature are optional enrichment after exact actions, evidence,
+	// and core result identities have fit.
+	for resultIndex, sourceIndex := range selected {
+		if resultIndex >= len(response.Results) {
+			break
+		}
+		source := plan.results[sourceIndex].result
+		for _, optional := range []struct {
+			field string
+			value string
+		}{
+			{field: "scope", value: source.Scope},
+			{field: "signature", value: source.Signature},
+		} {
+			field, value := optional.field, optional.value
+			value, _ = boundedJSONString(value, maximumLeanResultBytes)
+			if value == "" {
+				continue
+			}
+			before := response.Results[resultIndex]
+			if field == "scope" {
+				response.Results[resultIndex].Scope = value
+			} else {
+				response.Results[resultIndex].Signature = value
+			}
+			if !leanFits(response, budget) {
+				response.Results[resultIndex] = before
+			}
+		}
+	}
+	return leanFits(response, budget)
+}
+
+func firstActionableResult(tool string, results []leanResultSource) int {
+	for index := range results {
+		if leanNextFor(tool, results[index].result) != nil {
+			return index
+		}
+	}
+	return -1
+}
+
+func leanNextFor(tool string, result navigator.Result) *leanNext {
+	if result.Path == "" {
+		return nil
+	}
+	if line := actionableResultLine(&result); line > 0 {
+		return &leanNext{Tool: "inspect", Arguments: map[string]any{
+			"location": fmt.Sprintf("%s:%d", result.Path, line),
+		}}
+	}
+	if tool == "find" {
+		return &leanNext{Tool: "outline", Arguments: map[string]any{
+			"path": result.Path,
+		}}
+	}
+	return nil
+}
+
+func coreLeanResult(result leanResult) leanResult {
+	result.Scope = ""
+	result.Signature = ""
+	return result
+}
+
+func tryPrimaryLeanResult(
+	response *leanResponse,
+	result leanResult,
+	next *leanNext,
+	budget int,
+) bool {
+	if next == nil {
+		return false
+	}
+	response.Results = append(response.Results, result)
+	response.Next = next
+	if leanFits(response, budget) {
+		return true
+	}
+	response.Results[len(response.Results)-1].Symbol = ""
+	if leanFits(response, budget) {
+		return true
+	}
+	response.Results = response.Results[:len(response.Results)-1]
+	response.Next = nil
+	return false
+}
+
+func tryLeanResult(response *leanResponse, result leanResult, budget int) bool {
+	response.Results = append(response.Results, result)
+	if leanFits(response, budget) {
+		return true
+	}
+	response.Results[len(response.Results)-1].Symbol = ""
+	if leanFits(response, budget) {
+		return true
+	}
+	response.Results = response.Results[:len(response.Results)-1]
+	return false
+}
+
+func fitLeanEvidence(response *leanResponse, source *leanEvidenceSource, budget int) {
+	evidence := &leanEvidence{Kind: "source", Start: source.start, Text: source.text}
+	response.Evidence = evidence
+	if leanFits(response, budget) {
+		return
+	}
+	markLeanTruncated(response, "source")
+	lineEnds := completeLineEnds(source.text)
+	best := -1
+	for low, high := 0, len(lineEnds)-1; low <= high; {
+		middle := low + (high-low)/2
+		evidence.Text = source.text[:lineEnds[middle]]
+		if leanFits(response, budget) {
+			best = middle
+			low = middle + 1
+		} else {
+			high = middle - 1
+		}
+	}
+	if best >= 0 {
+		evidence.Text = source.text[:lineEnds[best]]
+		return
+	}
+	response.Evidence = nil
+}
+
+// completeLineEnds returns strict, non-empty prefix ends at source line
+// boundaries. Binary-searching these offsets never cuts a UTF-8 rune or line.
+func completeLineEnds(text string) []int {
+	if text == "" || !utf8.ValidString(text) {
+		return nil
+	}
+	ends := make([]int, 0, strings.Count(text, "\n"))
+	for index := 0; index < len(text); index++ {
+		if text[index] == '\n' && index > 0 {
+			ends = append(ends, index)
+		}
+	}
+	return ends
 }
 
 func actionableResultLine(result *navigator.Result) int {
@@ -461,121 +588,87 @@ func actionableResultLine(result *navigator.Result) int {
 	return 0
 }
 
-func fitCompactResponse(
-	compact *compactToolResponse,
-	candidates []compactCandidateSource,
-	budget int,
-) bool {
-	wantedFollowups := compact.Followups
-	compact.Followups = []compactFollowup{}
-
-	// Selectors are routing-critical, but a caller may use the full 4096-byte
-	// input allowance while the compact budget is only 1 KiB. Tighten metadata
-	// as a group before considering optional follow-ups and candidates.
-	if !fitCompactMetadata(compact, budget) {
-		return false
+func actionableResponseHint(tool string, full any, lean *leanResponse) string {
+	if lean != nil {
+		if hint := leanNextHint(lean.Next); hint != "" {
+			return hint
+		}
+		if lean.Evidence != nil {
+			return boundedActionHint("Inspect", lean.Evidence.Start)
+		}
+		return fullResponseTextHint
 	}
-
-	// Follow-ups are the escape hatch for progressive disclosure, so retain as
-	// many as fit before filling the remaining space with ranked candidates.
-	for _, followup := range wantedFollowups {
-		if len(compact.Followups) == maximumCompactFollowups {
-			break
-		}
-		compact.Followups = append(compact.Followups, followup)
-		if !compactFits(compact, budget) {
-			compact.Followups = compact.Followups[:len(compact.Followups)-1]
-		}
+	plan, err := leanResponseFor(tool, full)
+	if err != nil {
+		return fullResponseTextHint
 	}
-
-	for index := range candidates {
-		if len(compact.Candidates) == maximumCompactCandidates {
-			break
-		}
-		candidate := candidates[index].candidate
-		if !tryCompactCandidate(compact, &candidate, budget) {
-			candidate.Signature = ""
-			if !tryCompactCandidate(compact, &candidate, budget) {
-				candidate.Scope = ""
-				if !tryCompactCandidate(compact, &candidate, budget) {
-					candidate.Symbol = ""
-					if !tryCompactCandidate(compact, &candidate, budget) {
-						continue
-					}
-				}
-			}
-		}
+	if index := firstActionableResult(tool, plan.results); index >= 0 {
+		return leanNextHint(leanNextFor(tool, plan.results[index].result))
 	}
-	return compactFits(compact, budget)
+	if plan.evidence != nil {
+		return boundedActionHint("Inspect", plan.evidence.start)
+	}
+	return fullResponseTextHint
 }
 
-func fitCompactMetadata(compact *compactToolResponse, budget int) bool {
-	for _, maximum := range []int{128, 64, 32, 16, 8, 2} {
-		if compactFits(compact, budget) {
+func leanNextHint(next *leanNext) string {
+	if next == nil {
+		return ""
+	}
+	switch next.Tool {
+	case "inspect":
+		location, _ := next.Arguments["location"].(string)
+		return boundedActionHint("Inspect", location)
+	case "outline":
+		path, _ := next.Arguments["path"].(string)
+		return boundedActionHint("Outline", path)
+	default:
+		return ""
+	}
+}
+
+func boundedActionHint(verb, target string) string {
+	if target == "" || !utf8.ValidString(target) || strings.ContainsAny(target, "\r\n") {
+		return fullResponseTextHint
+	}
+	hint := fmt.Sprintf("%s %s; full result is in structuredContent.", verb, target)
+	if len(hint) > maximumCompactTextBytes {
+		return fullResponseTextHint
+	}
+	return hint
+}
+
+func markLeanTruncated(response *leanResponse, field string) {
+	response.Truncated = appendUnique(response.Truncated, field)
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+func containsIndex(values []int, value int) bool {
+	for _, existing := range values {
+		if existing == value {
 			return true
 		}
-		truncateCompactMetadata(compact, maximum)
 	}
-	if compactFits(compact, budget) {
-		return true
-	}
-	// Outcome annotations are useful but less critical than the tool target,
-	// exact commit IDs, aggregate counts, and retry instructions.
-	compact.Error = ""
-	compact.Symbol = ""
-	compact.HeadSubject = ""
-	return compactFits(compact, budget)
-}
-
-func truncateCompactMetadata(compact *compactToolResponse, maximum int) {
-	var truncated bool
-	compact.Query, truncated = boundedJSONString(compact.Query, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-	compact.Location, truncated = boundedJSONString(compact.Location, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-	compact.Path, truncated = boundedJSONString(compact.Path, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-	compact.Symbol, truncated = boundedJSONString(compact.Symbol, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-	compact.Error, truncated = boundedJSONString(compact.Error, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-	compact.HeadSubject, truncated = boundedJSONString(compact.HeadSubject, maximum)
-	compact.MetadataTruncated = compact.MetadataTruncated || truncated
-}
-
-func tryCompactCandidate(
-	compact *compactToolResponse,
-	candidate *compactCandidate,
-	budget int,
-) bool {
-	encoded, err := json.Marshal(candidate)
-	if err != nil {
-		return false
-	}
-	compact.Candidates = append(compact.Candidates, *candidate)
-	compact.OmittedBytes.Candidates -= len(encoded)
-	if compactFits(compact, budget) {
-		return true
-	}
-	compact.Candidates = compact.Candidates[:len(compact.Candidates)-1]
-	compact.OmittedBytes.Candidates += len(encoded)
 	return false
 }
 
-func compactFits(compact *compactToolResponse, budget int) bool {
-	encoded, err := json.Marshal(compact)
+func leanFits(response *leanResponse, budget int) bool {
+	encoded, err := json.Marshal(response)
 	return err == nil && len(encoded) <= budget
 }
 
-func compactValue(value string) (string, bool) {
-	return boundedJSONString(value, maximumCompactValueBytes)
-}
-
-// boundedJSONString limits the encoded JSON string rather than the raw input,
-// so quotes, control characters, and multibyte text cannot evade the bound.
+// boundedJSONString limits encoded JSON bytes, preserving valid UTF-8.
 func boundedJSONString(value string, maximum int) (string, bool) {
 	encoded, err := json.Marshal(value)
-	if err == nil && len(encoded) <= maximum {
+	if err == nil && utf8.ValidString(value) && len(encoded) <= maximum {
 		return value, false
 	}
 	const suffix = "…"
@@ -587,7 +680,7 @@ func boundedJSONString(value string, maximum int) (string, bool) {
 		value = value[:len(value)-size]
 		candidate := value + suffix
 		encoded, err = json.Marshal(candidate)
-		if err == nil && len(encoded) <= maximum {
+		if err == nil && utf8.ValidString(candidate) && len(encoded) <= maximum {
 			return candidate, true
 		}
 	}
