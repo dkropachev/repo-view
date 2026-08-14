@@ -211,7 +211,7 @@ func (learner *adaptiveLearner) recordCompacted(request adaptiveRequest) {
 // recordFull treats a full call as insufficiency evidence only when it matches
 // one not-yet-consumed compacted call in the last-three window. Two such
 // retries for one region grow its budget and clear the evidence window.
-func (learner *adaptiveLearner) recordFull(request adaptiveRequest) {
+func (learner *adaptiveLearner) recordFull(request adaptiveRequest) bool {
 	learner.mu.Lock()
 	defer learner.mu.Unlock()
 	region := learner.regionForRequestLocked(request)
@@ -240,6 +240,7 @@ func (learner *adaptiveLearner) recordFull(request adaptiveRequest) {
 		}
 	}
 	learner.persistLocked()
+	return matched >= 0
 }
 
 func (learner *adaptiveLearner) regionForRequestLocked(
@@ -603,12 +604,8 @@ type normalizedInspectInput struct {
 }
 
 type normalizedOutlineInput struct {
-	Path           string `json:"path"`
-	Return         string `json:"return"`
-	Limit          int    `json:"limit"`
-	MaxCodeLines   int    `json:"max_code_lines"`
-	DropComments   bool   `json:"drop_comments"`
-	DropDocstrings bool   `json:"drop_docstrings"`
+	Path  string `json:"path"`
+	Limit int    `json:"limit"`
 }
 
 func normalizeChangedInput(input changedInput) normalizedChangedInput {
@@ -643,12 +640,8 @@ func normalizeInspectInput(input inspectInput) normalizedInspectInput {
 
 func normalizeOutlineInput(input outlineInput) normalizedOutlineInput {
 	return normalizedOutlineInput{
-		Path:           input.Path,
-		Return:         defaultString(input.Return, "line"),
-		Limit:          defaultInt(input.Limit, defaultLimit),
-		MaxCodeLines:   defaultInt(input.MaxCodeLines, defaultMaxCodeLines),
-		DropComments:   input.DropComments,
-		DropDocstrings: input.DropDocstrings,
+		Path:  input.Path,
+		Limit: defaultInt(input.Limit, defaultLimit),
 	}
 }
 

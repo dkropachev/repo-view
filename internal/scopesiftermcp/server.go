@@ -23,10 +23,10 @@ const (
 	// ImplementationVersion changes when the public MCP tool contract changes.
 	ImplementationVersion = "scopesifter-mcp/v4"
 
-	changedDescription = "Branch/commit/PR first: base-to-HEAD patch and source context."
-	findDescription    = "Exact identifier or path fragment; auto tries identifier then path."
-	inspectDescription = "Scope/imports/related identifiers at known PATH:LINE."
-	outlineDescription = "Source-ordered definitions for a known repository file."
+	changedDescription = "Start bug/branch/PR work here; bounded base-to-HEAD changes."
+	findDescription    = "Exact identifier or path; file hits add matching changed PATH:LINE."
+	inspectDescription = "Read one bounded scope/imports/relations at exact PATH:LINE."
+	outlineDescription = "Index-only definitions for known file; inspect returned PATH:LINE for source."
 )
 
 // ToolSpecification is the code-owned provider-visible part of one scopesifter
@@ -196,13 +196,8 @@ type inspectInput struct {
 }
 
 type outlineInput struct {
-	Response       string `json:"response"`
-	Path           string `json:"path"`
-	Return         string `json:"return"`
-	Limit          int    `json:"limit"`
-	MaxCodeLines   int    `json:"max_code_lines"`
-	DropComments   bool   `json:"drop_comments"`
-	DropDocstrings bool   `json:"drop_docstrings"`
+	Path  string `json:"path"`
+	Limit int    `json:"limit"`
 }
 
 type service struct {
@@ -243,7 +238,82 @@ func (service *service) find(
 	if err != nil {
 		return nil, nil, err
 	}
+	response, err = service.enrichFileFindWithChanges(ctx, input, response)
+	if err != nil {
+		return nil, nil, err
+	}
 	return service.prepareResponse("find", input.Response, input, response)
+}
+
+func (service *service) enrichFileFindWithChanges(
+	ctx context.Context,
+	input findInput,
+	response navigator.FindResponse,
+) (navigator.FindResponse, error) {
+	if response.MatchedAs != navigator.FindOutcomeFile || len(response.Results) == 0 {
+		return response, nil
+	}
+	paths := make([]string, 0, len(response.Results))
+	wantedPaths := make(map[string]struct{}, len(response.Results))
+	for index := range response.Results {
+		path := response.Results[index].Path
+		if path == "" {
+			continue
+		}
+		if _, exists := wantedPaths[path]; exists {
+			continue
+		}
+		wantedPaths[path] = struct{}{}
+		paths = append(paths, path)
+	}
+	if len(paths) == 0 {
+		return response, nil
+	}
+	limit := defaultInt(input.Limit, defaultLimit)
+	changed, err := service.view.WithContext(ctx).Changed(navigator.Options{
+		Base:          service.base,
+		Include:       navigator.IncludeAll,
+		Return:        navigator.ReturnLocations,
+		PathGlobs:     paths,
+		Limit:         limit,
+		MaxCodeLines:  defaultMaxCodeLines,
+		MaxPatchLines: 1,
+	})
+	if err != nil {
+		return navigator.FindResponse{}, err
+	}
+	changedPaths := make(map[string]struct{})
+	results := make([]navigator.Result, 0, len(changed.Results)+len(response.Results))
+	for index := range changed.Results {
+		result := changed.Results[index]
+		if _, wanted := wantedPaths[result.Path]; !wanted || actionableResultLine(&result) < 1 {
+			continue
+		}
+		result.Code = ""
+		result.CodeStartLine = 0
+		result.CodeEndLine = 0
+		result.CodeTruncated = false
+		results = append(results, result)
+		changedPaths[result.Path] = struct{}{}
+	}
+	if len(results) == 0 {
+		return response, nil
+	}
+	for index := range response.Results {
+		result := response.Results[index]
+		if _, changedPath := changedPaths[result.Path]; changedPath {
+			continue
+		}
+		results = append(results, result)
+	}
+	if len(results) > limit {
+		results = results[:limit]
+		response.ResultsTruncated = true
+	}
+	response.Results = results
+	response.ResultsTruncated = response.ResultsTruncated || changed.ResultsTruncated
+	response.MatchedAs = navigator.FindOutcomeOther
+	return response, nil
 }
 
 func (service *service) inspect(
@@ -272,20 +342,18 @@ func (service *service) outline(
 	input outlineInput,
 ) (*mcp.CallToolResult, any, error) {
 	options := navigator.Options{
-		Base:           service.base,
-		Include:        navigator.IncludeDefs,
-		Return:         navigator.Return(defaultString(input.Return, string(navigator.ReturnLine))),
-		Limit:          defaultInt(input.Limit, defaultLimit),
-		MaxCodeLines:   defaultInt(input.MaxCodeLines, defaultMaxCodeLines),
-		MaxPatchLines:  defaultMaxPatchLines,
-		DropComments:   input.DropComments,
-		DropDocstrings: input.DropDocstrings,
+		Base:          service.base,
+		Include:       navigator.IncludeDefs,
+		Return:        navigator.ReturnLocations,
+		Limit:         defaultInt(input.Limit, defaultLimit),
+		MaxCodeLines:  defaultMaxCodeLines,
+		MaxPatchLines: defaultMaxPatchLines,
 	}
 	response, err := service.view.WithContext(ctx).Outline(input.Path, options)
 	if err != nil {
 		return nil, nil, err
 	}
-	return service.prepareResponse("outline", input.Response, input, response)
+	return service.prepareResponse("outline", responseAuto, input, response)
 }
 
 func (service *service) prepareResponse(
@@ -297,13 +365,25 @@ func (service *service) prepareResponse(
 		return nil, nil, err
 	}
 	budget := service.learner.budget(request)
-	result, output, sizing, err := prepareToolResponse(tool, mode, response, budget)
+	if tool == "inspect" && budget < adaptiveMaximumBudget {
+		budget = adaptiveMaximumBudget
+	}
+	effectiveMode := defaultString(mode, responseAuto)
+	matchedFullRetry := false
+	if effectiveMode == responseFull {
+		matchedFullRetry = service.learner.recordFull(request)
+		if !matchedFullRetry {
+			effectiveMode = responseAuto
+		}
+	}
+	result, output, sizing, err := prepareToolResponse(tool, effectiveMode, response, budget)
 	if err != nil {
 		return nil, nil, err
 	}
 	switch {
-	case defaultString(mode, responseAuto) == responseFull:
-		service.learner.recordFull(request)
+	case matchedFullRetry:
+		// recordFull already consumed matching compact evidence and persisted
+		// any resulting budget growth before the unrestricted retry was emitted.
 	case sizing.Compacted:
 		service.learner.recordCompacted(request)
 	default:

@@ -16,6 +16,11 @@ const (
 
 func findInputSchema() map[string]any {
 	properties := commonInputProperties("locations")
+	for _, name := range []string{
+		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+	} {
+		delete(properties, name)
+	}
 	properties["query"] = stringSchema(maximumSelectorLength)
 	properties["match"] = enumSchema(
 		"auto",
@@ -26,39 +31,43 @@ func findInputSchema() map[string]any {
 		"defs", "refs", "both",
 	)
 	properties["changed_only"] = booleanSchema(false)
-	properties["include_comments"] = booleanSchema(false)
-	properties["include_strings"] = booleanSchema(false)
 	return objectSchema(properties, "query")
 }
 
 func inspectInputSchema() map[string]any {
 	properties := commonInputProperties("scope")
+	for _, name := range []string{
+		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+	} {
+		delete(properties, name)
+	}
 	properties["location"] = stringSchema(maximumSelectorLength)
 	properties["include"] = enumSchema(
 		"scope",
 		"symbol", "scope", "defs", "refs", "both", "imports", "all",
 	)
 	properties["changed_only"] = booleanSchema(false)
-	properties["include_comments"] = booleanSchema(false)
-	properties["include_strings"] = booleanSchema(false)
 	return objectSchema(properties, "location")
 }
 
 func outlineInputSchema() map[string]any {
-	properties := commonInputProperties("line")
-	delete(properties, "context")
-	delete(properties, "path_globs")
-	delete(properties, "exclude_globs")
-	properties["path"] = stringSchema(maximumSelectorLength)
+	properties := map[string]any{
+		"path": stringSchema(maximumSelectorLength),
+		"limit": boundedIntegerSchema(
+			defaultLimit,
+			maximumLimit,
+		),
+	}
 	return objectSchema(properties, "path")
 }
 
 func changedInputSchema() map[string]any {
 	properties := commonInputProperties("context")
-	properties["max_patch_lines"] = boundedIntegerSchema(
-		defaultMaxPatchLines,
-		maximumMaxPatchLines,
-	)
+	for _, name := range []string{
+		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+	} {
+		delete(properties, name)
+	}
 	return objectSchema(properties)
 }
 

@@ -99,21 +99,16 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	}
 	wantProperties := map[string][]string{
 		"changed": {
-			"context", "drop_comments", "drop_docstrings", "exclude_globs",
-			"limit", "max_code_lines", "max_patch_lines", "path_globs", "response", "return",
+			"exclude_globs", "limit", "path_globs",
 		},
 		"find": {
-			"changed_only", "context", "drop_comments", "drop_docstrings",
-			"exclude_globs", "include", "include_comments", "include_strings",
-			"limit", "match", "max_code_lines", "path_globs", "query", "response", "return",
+			"changed_only", "exclude_globs", "include", "limit", "match", "path_globs", "query",
 		},
 		"inspect": {
-			"changed_only", "context", "drop_comments", "drop_docstrings",
-			"exclude_globs", "include", "include_comments", "include_strings",
-			"limit", "location", "max_code_lines", "path_globs", "response", "return",
+			"changed_only", "exclude_globs", "include", "limit", "location", "path_globs",
 		},
 		"outline": {
-			"drop_comments", "drop_docstrings", "limit", "max_code_lines", "path", "response", "return",
+			"limit", "path",
 		},
 	}
 	wantNames := []string{"changed", "find", "inspect", "outline"}
@@ -173,13 +168,13 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		}
 		switch tool.Name {
 		case "changed":
-			if !strings.Contains(tool.Description, "Branch/commit/PR first") ||
-				!strings.Contains(tool.Description, "base-to-HEAD patch") {
+			if !strings.Contains(tool.Description, "Start bug/branch/PR work here") ||
+				!strings.Contains(tool.Description, "base-to-HEAD changes") {
 				t.Fatalf("changed description = %q", tool.Description)
 			}
 		case "find":
-			if !strings.Contains(tool.Description, "path fragment") ||
-				!strings.Contains(tool.Description, "auto tries identifier then path") {
+			if !strings.Contains(tool.Description, "Exact identifier or path") ||
+				!strings.Contains(tool.Description, "matching changed PATH:LINE") {
 				t.Fatalf("find description = %q", tool.Description)
 			}
 			matchSchema := normalizedObject(t, properties["match"])
@@ -187,25 +182,16 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 				!reflect.DeepEqual(stringArray(matchSchema["enum"]), []string{"auto", "symbol", "path"}) {
 				t.Fatalf("find match schema = %#v", matchSchema)
 			}
-			returnSchema := normalizedObject(t, properties["return"])
-			if returnSchema["default"] != "locations" {
-				t.Fatalf("find return schema = %#v", returnSchema)
-			}
 		case "inspect":
-			if !strings.Contains(tool.Description, "Scope/imports/related identifiers") ||
+			if !strings.Contains(tool.Description, "bounded scope/imports/relations") ||
 				!strings.Contains(tool.Description, "PATH:LINE") {
 				t.Fatalf("inspect description = %q", tool.Description)
 			}
 		case "outline":
-			if !strings.Contains(tool.Description, "Source-ordered definitions") ||
-				!strings.Contains(tool.Description, "known repository file") {
+			if !strings.Contains(tool.Description, "Index-only definitions") ||
+				!strings.Contains(tool.Description, "inspect returned PATH:LINE") {
 				t.Fatalf("outline description = %q", tool.Description)
 			}
-		}
-		responseSchema := normalizedObject(t, properties["response"])
-		if responseSchema["default"] != responseAuto ||
-			!reflect.DeepEqual(stringArray(responseSchema["enum"]), []string{responseAuto, responseFull}) {
-			t.Fatalf("tool %q response schema = %#v", tool.Name, responseSchema)
 		}
 		assertIntegerProperty(
 			t,
@@ -214,14 +200,6 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			"limit",
 			defaultLimit,
 			maximumLimit,
-		)
-		assertIntegerProperty(
-			t,
-			tool.Name,
-			properties,
-			"max_code_lines",
-			defaultMaxCodeLines,
-			maximumMaxCodeLines,
 		)
 	}
 
@@ -234,7 +212,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	assertToolOutput(t, client, "changed", map[string]any{"response": responseFull}, func() (navigator.ChangedResponse, error) {
+	assertToolOutput(t, client, "changed", map[string]any{}, func() (navigator.ChangedResponse, error) {
 		return view.Changed(navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeAll,
 			Return: navigator.ReturnContext, Context: defaultContext,
@@ -243,7 +221,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		})
 	})
 	assertToolOutput(t, client, "find", map[string]any{
-		"query": "Helper", "response": responseFull,
+		"query": "Helper",
 	}, func() (navigator.FindResponse, error) {
 		response, err := view.Find("Helper", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeBoth,
@@ -254,9 +232,9 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		return response, err
 	})
 	assertToolOutput(t, client, "find", map[string]any{
-		"query": "demo.go", "match": "path", "response": responseFull,
+		"query": "missing.go", "match": "path",
 	}, func() (navigator.FindResponse, error) {
-		response, err := view.Find("demo.go", navigator.Options{
+		response, err := view.Find("missing.go", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeBoth,
 			Match: navigator.FindMatchPath, Return: navigator.ReturnLocations, Context: defaultContext,
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
@@ -266,7 +244,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		return response, err
 	})
 	assertToolOutput(t, client, "inspect", map[string]any{
-		"location": "demo.go:6", "response": responseFull,
+		"location": "demo.go:6",
 	}, func() (navigator.InspectResponse, error) {
 		return view.Inspect("demo.go:6", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeScope,
@@ -276,11 +254,11 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		})
 	})
 	assertToolOutput(t, client, "outline", map[string]any{
-		"path": "demo.go", "response": responseFull,
+		"path": "demo.go",
 	}, func() (navigator.OutlineResponse, error) {
 		return view.Outline("demo.go", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeDefs,
-			Return: navigator.ReturnLine, Limit: defaultLimit,
+			Return: navigator.ReturnLocations, Limit: defaultLimit,
 			MaxCodeLines: defaultMaxCodeLines, MaxPatchLines: defaultMaxPatchLines,
 		})
 	})
@@ -293,7 +271,10 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		{name: "find", arguments: map[string]any{}},
 		{name: "find", arguments: map[string]any{"query": "Helper", "limit": maximumLimit + 1}},
 		{name: "find", arguments: map[string]any{"query": "Helper", "match": "text"}},
+		{name: "find", arguments: map[string]any{"query": "Helper", "response": "full"}},
 		{name: "inspect", arguments: map[string]any{"location": "../outside.go:1"}},
+		{name: "outline", arguments: map[string]any{"path": "demo.go", "return": "context"}},
+		{name: "outline", arguments: map[string]any{"path": "demo.go", "response": "full"}},
 	} {
 		response, err := client.CallTool(ctx, &mcp.CallToolParams{
 			Name: call.name, Arguments: call.arguments,
@@ -308,6 +289,40 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 
 	if after := snapshotTree(t, fixture.root); !reflect.DeepEqual(after, before) {
 		t.Fatal("read-only MCP calls changed repository or Git metadata")
+	}
+}
+
+func TestServerFindPathPrioritizesChangedLocation(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{"query": "demo.go"},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("path find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found navigator.FindResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.MatchedAs != navigator.FindOutcomeOther || len(found.Results) != 1 {
+		t.Fatalf("enriched path response = %#v", found)
+	}
+	result := found.Results[0]
+	if result.Path != "demo.go" || result.Line != 7 || result.Kind != "changed" ||
+		result.Finding != navigator.FindingOther || result.Scope != "Caller" ||
+		result.Code != "" {
+		t.Fatalf("changed path candidate = %#v", result)
+	}
+	if len(raw) > adaptiveDefaultBudget {
+		t.Fatalf("enriched path response = %d bytes, want at most %d", len(raw), adaptiveDefaultBudget)
 	}
 }
 
@@ -342,11 +357,11 @@ func TestPersistentServerAdvertisesStatefulTools(t *testing.T) {
 	}
 }
 
-func TestServerAutoCompactsAndFullRetryPreservesV3(t *testing.T) {
+func TestServerAutoCompactsWithinToolBudget(t *testing.T) {
 	fixture := newFixture(t)
 	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
 	for index := range 200 {
-		large += fmt.Sprintf("\tprintln(%d)\n", index)
+		large += fmt.Sprintf("\tprintln(%q)\n", fmt.Sprintf("%03d-%s", index, strings.Repeat("x", 96)))
 	}
 	large += "\tHelper()\n}\n"
 	writeFixtureFile(t, fixture.root, large)
@@ -355,10 +370,8 @@ func TestServerAutoCompactsAndFullRetryPreservesV3(t *testing.T) {
 	defer closeSessions()
 
 	auto, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "inspect",
-		Arguments: map[string]any{
-			"location": "demo.go:6", "max_code_lines": maximumMaxCodeLines,
-		},
+		Name:      "inspect",
+		Arguments: map[string]any{"location": "demo.go:6"},
 	})
 	if err != nil || auto.IsError {
 		t.Fatalf("auto inspect = %#v, %v", auto, err)
@@ -367,36 +380,62 @@ func TestServerAutoCompactsAndFullRetryPreservesV3(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(autoJSON) > adaptiveDefaultBudget || !bytes.Contains(autoJSON, []byte(`"compact":true`)) ||
-		bytes.Contains(autoJSON, []byte("println(100)")) {
+	if len(autoJSON) > adaptiveMaximumBudget || !bytes.Contains(autoJSON, []byte(`"compact":true`)) ||
+		bytes.Contains(autoJSON, []byte(strings.Repeat("x", 96))) {
 		t.Fatalf("auto structured output (%d bytes) = %s", len(autoJSON), autoJSON)
 	}
 	if text := toolText(auto); text == "" || len(text) > maximumCompactTextBytes ||
 		strings.Contains(text, string(autoJSON)) {
 		t.Fatalf("auto text content = %q", text)
 	}
+}
 
-	full, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "inspect",
-		Arguments: map[string]any{
-			"location": "demo.go:6", "max_code_lines": maximumMaxCodeLines,
-			"response": responseFull,
+func TestServerRejectsPublicFullResponse(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "inspect", Arguments: map[string]any{
+			"location": "demo.go:6", "response": responseFull,
 		},
 	})
-	if err != nil || full.IsError {
-		t.Fatalf("full inspect = %#v, %v", full, err)
-	}
-	fullJSON, err := json.Marshal(full.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(fullJSON) <= adaptiveDefaultBudget || bytes.Contains(fullJSON, []byte(`"compact":true`)) ||
-		!bytes.Contains(fullJSON, []byte("println(100)")) {
-		t.Fatalf("full structured output (%d bytes) = %s", len(fullJSON), fullJSON)
+	if !response.IsError {
+		t.Fatalf("public response=full succeeded: %#v", response)
 	}
-	if text := toolText(full); text == "" || len(text) > maximumCompactTextBytes ||
-		strings.Contains(text, string(fullJSON)) {
-		t.Fatalf("full text content = %q", text)
+}
+
+func TestServerInspectUsesThreeKiBBudgetForUsefulScope(t *testing.T) {
+	fixture := newFixture(t)
+	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
+	for index := range 80 {
+		large += fmt.Sprintf("\tprintln(%d)\n", index)
+	}
+	large += "\tHelper()\n}\n"
+	writeFixtureFile(t, fixture.root, large)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      "inspect",
+		Arguments: map[string]any{"location": "demo.go:40"},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("inspect = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("useful inspect structured output: %d bytes", len(raw))
+	if len(raw) <= adaptiveDefaultBudget || len(raw) > adaptiveMaximumBudget ||
+		bytes.Contains(raw, []byte(`"compact":true`)) ||
+		!bytes.Contains(raw, []byte("println(40)")) {
+		t.Fatalf("three-KiB inspect (%d bytes) = %s", len(raw), raw)
 	}
 }
 
@@ -506,6 +545,7 @@ func newFixture(t *testing.T) fixture {
 	gitRun(t, gitPath, root, "init", "-q")
 	gitRun(t, gitPath, root, "config", "user.email", "scopesifter@example.test")
 	gitRun(t, gitPath, root, "config", "user.name", "scopesifter MCP test")
+	gitRun(t, gitPath, root, "config", "commit.gpgsign", "false")
 	writeFixtureFile(t, root, `package demo
 
 func Helper() {}

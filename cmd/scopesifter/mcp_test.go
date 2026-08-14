@@ -40,6 +40,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	mcpTestGit(t, gitPath, root, "init", "-q")
 	mcpTestGit(t, gitPath, root, "config", "user.email", "scopesifter@example.test")
 	mcpTestGit(t, gitPath, root, "config", "user.name", "scopesifter MCP test")
+	mcpTestGit(t, gitPath, root, "config", "commit.gpgsign", "false")
 	if err := os.WriteFile(
 		filepath.Join(root, "demo.go"),
 		[]byte("package demo\n\nfunc Target() {}\n"),
@@ -107,7 +108,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		}
 	}
 	response, err := session.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "outline", Arguments: map[string]any{"path": "demo.go", "response": "full"},
+		Name: "outline", Arguments: map[string]any{"path": "demo.go"},
 	})
 	if err != nil || response.IsError {
 		_ = session.Close()
@@ -115,7 +116,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	}
 	response, err = session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "find", Arguments: map[string]any{
-			"query": "demo.go", "match": "path", "response": "full",
+			"query": "demo.go", "match": "path",
 		},
 	})
 	if err != nil || response.IsError {
