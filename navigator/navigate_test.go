@@ -14,6 +14,187 @@ import (
 	"testing"
 )
 
+func TestFindAutoFallsBackToRepositoryPathsAndReportsFinding(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "cmd/scopesifter-validate/main.go", "package main\n")
+	writeFile(t, root, "cmd/scopesifter-validate/settings.yaml", "enabled: true\n")
+	writeFile(t, root, "cmd/scopesifter-validate/Makefile", "validate:\n")
+	writeFile(t, root, "unrelated.go", "package demo\n")
+
+	response, err := mustView(t, root).Find("scopesifter-validate", Options{
+		Return: ReturnScope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Query != "scopesifter-validate" || response.Symbol != response.Query ||
+		response.MatchedAs != FindOutcomeFile ||
+		!slices.Equal(response.SearchedAs, []FindMatch{FindMatchSymbol, FindMatchPath}) ||
+		response.Hint != "" {
+		t.Fatalf("response metadata = %#v", response)
+	}
+	wantPaths := []string{
+		"cmd/scopesifter-validate/Makefile",
+		"cmd/scopesifter-validate/main.go",
+		"cmd/scopesifter-validate/settings.yaml",
+	}
+	if len(response.Results) != len(wantPaths) {
+		t.Fatalf("results = %#v", response.Results)
+	}
+	for index, result := range response.Results {
+		if result.Finding != FindingFile || result.Kind != "file" ||
+			result.Path != wantPaths[index] || result.Symbol != "" || result.Line != 0 ||
+			result.StartLine != 0 || result.EndLine != 0 || result.Code != "" ||
+			result.CodeStartLine != 0 || result.CodeEndLine != 0 || result.CodeTruncated {
+			t.Errorf("result %d = %#v", index, result)
+		}
+	}
+}
+
+func TestFindAutoPrefersIdentifierAndExplicitPathOverrides(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "selectSymbols.go", `package demo
+
+func selectSymbols() {}
+func caller() { selectSymbols() }
+`)
+	view := mustView(t, root)
+	automatic, err := view.Find("selectSymbols", Options{
+		Include: IncludeBoth, Return: ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if automatic.MatchedAs != FindOutcomeSymbol ||
+		!slices.Equal(automatic.SearchedAs, []FindMatch{FindMatchSymbol}) ||
+		len(automatic.Results) != 2 {
+		t.Fatalf("automatic response = %#v", automatic)
+	}
+	for _, result := range automatic.Results {
+		if result.Finding != FindingSymbol || (result.Kind != "def" && result.Kind != "ref") {
+			t.Errorf("identifier result = %#v", result)
+		}
+	}
+	automaticJSON, err := json.Marshal(automatic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(automaticJSON, []byte(`"query":"selectSymbols"`)) ||
+		!bytes.Contains(automaticJSON, []byte(`"symbol":"selectSymbols"`)) {
+		t.Fatalf("identifier JSON lost compatibility fields: %s", automaticJSON)
+	}
+
+	paths, err := view.Find("selectSymbols", Options{
+		Match: FindMatchPath, Return: ReturnScope,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if paths.MatchedAs != FindOutcomeFile ||
+		!slices.Equal(paths.SearchedAs, []FindMatch{FindMatchPath}) ||
+		len(paths.Results) != 1 || paths.Results[0].Path != "selectSymbols.go" ||
+		paths.Results[0].Finding != FindingFile {
+		t.Fatalf("path response = %#v", paths)
+	}
+	pathsJSON, err := json.Marshal(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(pathsJSON, []byte(`"symbol":`)) {
+		t.Fatalf("path JSON mislabeled as symbol: %s", pathsJSON)
+	}
+
+	dotRelative, err := view.Find("./selectSymbols.go", Options{
+		Match: FindMatchPath, Return: ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dotRelative.Results) != 1 || dotRelative.Results[0].Path != "selectSymbols.go" {
+		t.Fatalf("dot-relative path response = %#v", dotRelative)
+	}
+}
+
+func TestFindEmptyResponseReportsSearchAndRecoveryHint(t *testing.T) {
+	response, err := mustView(t, t.TempDir()).Find("missing", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.MatchedAs != FindOutcomeNone ||
+		!slices.Equal(response.SearchedAs, []FindMatch{FindMatchSymbol, FindMatchPath}) ||
+		response.Hint == "" || response.Results == nil || len(response.Results) != 0 ||
+		response.ResultsTruncated {
+		t.Fatalf("empty response = %#v", response)
+	}
+}
+
+func TestFindPathHonorsFiltersChangedOnlyLimitAndTruncation(t *testing.T) {
+	root := t.TempDir()
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "scopesifter@example.test")
+	runGit(t, root, "config", "user.name", "scopesifter test")
+	writeFile(t, root, "selected/first.yaml", "value: one\n")
+	writeFile(t, root, "selected/second.yaml", "value: two\n")
+	writeFile(t, root, "excluded/third.yaml", "value: three\n")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "base")
+	writeFile(t, root, "selected/first.yaml", "value: changed\n")
+
+	response, err := mustView(t, root).Find("yaml", Options{
+		Match:        FindMatchPath,
+		Return:       ReturnLocations,
+		PathGlobs:    []string{"selected"},
+		ExcludeGlobs: []string{"second.yaml"},
+		ChangedOnly:  true,
+		Limit:        1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 1 || response.Results[0].Path != "selected/first.yaml" ||
+		response.ResultsTruncated {
+		t.Fatalf("filtered response = %#v", response)
+	}
+
+	truncated, err := mustView(t, root).Find("selected", Options{
+		Match: FindMatchPath, Return: ReturnLocations, Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(truncated.Results) != 1 || !truncated.ResultsTruncated {
+		t.Fatalf("truncated response = %#v", truncated)
+	}
+}
+
+func TestFindingForKindReportsFileSymbolOrOther(t *testing.T) {
+	t.Parallel()
+	for kind, want := range map[string]Finding{
+		"file": FindingFile, "def": FindingSymbol, "ref": FindingSymbol,
+		"scope": FindingOther, "imports": FindingOther, "changed": FindingOther,
+	} {
+		if got := findingForKind(kind); got != want {
+			t.Errorf("findingForKind(%q) = %q, want %q", kind, got, want)
+		}
+	}
+}
+
+func TestFindPathRetainsRepositoryDirectoryExclusions(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "vendor/hidden.yaml", "hidden: true\n")
+	writeFile(t, root, "visible.yaml", "hidden: false\n")
+
+	response, err := mustView(t, root).Find("hidden.yaml", Options{
+		Match: FindMatchPath, Return: ReturnLocations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.MatchedAs != FindOutcomeNone || len(response.Results) != 0 {
+		t.Fatalf("excluded path response = %#v", response)
+	}
+}
+
 func TestFindReturnsScope(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "found.go", "package demo\n\nfunc helper() {}\n\nfunc caller() {\n\thelper()\n}\n")
@@ -164,7 +345,7 @@ func TestInspectReturnsScopeAndRelatedSymbolResults(t *testing.T) {
 	if len(response.Results) < 2 {
 		t.Fatalf("results = %#v", response.Results)
 	}
-	if response.Results[0].Kind != "scope" {
+	if response.Results[0].Kind != "scope" || response.Results[0].Finding != FindingOther {
 		t.Fatalf("first result = %#v", response.Results[0])
 	}
 }
@@ -1268,7 +1449,8 @@ func TestFindSearchesGoModuleManifest(t *testing.T) {
 	if len(response.Results) != 1 {
 		t.Fatalf("results = %#v", response.Results)
 	}
-	if got := response.Results[0]; got.Path != "go.mod" || got.Line != 3 || !strings.Contains(got.Code, "v0.14.0") {
+	if got := response.Results[0]; got.Path != "go.mod" || got.Line != 3 ||
+		got.Finding != FindingSymbol || !strings.Contains(got.Code, "v0.14.0") {
 		t.Fatalf("result = %#v", got)
 	}
 }

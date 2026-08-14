@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -99,9 +100,39 @@ const (
 	IncludeAll     Include = "all"
 )
 
+// FindMatch selects which repository evidence Find may return.
+type FindMatch string
+
+const (
+	FindMatchAuto   FindMatch = "auto"
+	FindMatchSymbol FindMatch = "symbol"
+	FindMatchPath   FindMatch = "path"
+)
+
+// FindOutcome reports the category of evidence returned for one query.
+type FindOutcome string
+
+const (
+	FindOutcomeFile   FindOutcome = "file"
+	FindOutcomeSymbol FindOutcome = "symbol"
+	FindOutcomeOther  FindOutcome = "other"
+	FindOutcomeNone   FindOutcome = "none"
+)
+
+// Finding classifies the evidence represented by a Result independently from
+// its more specific Kind.
+type Finding string
+
+const (
+	FindingFile   Finding = "file"
+	FindingSymbol Finding = "symbol"
+	FindingOther  Finding = "other"
+)
+
 type Options struct {
 	Return        Return
 	Include       Include
+	Match         FindMatch
 	Base          string
 	PathGlobs     []string
 	ExcludeGlobs  []string
@@ -126,6 +157,7 @@ type Result struct {
 	Code          string   `json:"code,omitempty"`
 	Signature     string   `json:"signature,omitempty"`
 	Kind          string   `json:"kind"`
+	Finding       Finding  `json:"finding"`
 	Language      string   `json:"language,omitempty"`
 	ChangedLines  []int    `json:"changed_lines,omitempty"`
 	Scopes        []string `json:"scopes,omitempty"`
@@ -145,10 +177,27 @@ type NavigationBudget struct {
 
 type FindResponse struct {
 	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
-	Symbol           string            `json:"symbol"`
-	Root             string            `json:"root"`
-	Results          []Result          `json:"results"`
-	ResultsTruncated bool              `json:"results_truncated"`
+	Query            string            `json:"query"`
+	// Symbol is a deprecated Go API alias for Query. JSON retains it for source
+	// match outcomes, but omits it when the query resolved to a file or nothing.
+	Symbol           string      `json:"symbol,omitempty"`
+	MatchedAs        FindOutcome `json:"matched_as"`
+	Root             string      `json:"root"`
+	SearchedAs       []FindMatch `json:"searched_as"`
+	Hint             string      `json:"hint,omitempty"`
+	Results          []Result    `json:"results"`
+	ResultsTruncated bool        `json:"results_truncated"`
+}
+
+// MarshalJSON keeps the legacy symbol field for compatible source-search
+// responses without labeling file-path queries as symbols.
+func (response FindResponse) MarshalJSON() ([]byte, error) {
+	type findResponseJSON FindResponse
+	encoded := findResponseJSON(response)
+	if response.MatchedAs != FindOutcomeSymbol {
+		encoded.Symbol = ""
+	}
+	return json.Marshal(encoded)
 }
 
 type InspectResponse struct {
@@ -189,36 +238,102 @@ type positionedFindScopeResolver interface {
 	scopeNameAt(lineNo, column int, structuralLine string) string
 }
 
-func (r *View) Find(symbol string, opts Options) (FindResponse, error) {
+func (r *View) Find(query string, opts Options) (FindResponse, error) {
 	if err := r.checkContext(); err != nil {
 		return FindResponse{}, err
 	}
-	responses, err := r.FindMany([]string{symbol}, opts)
+	responses, err := r.FindMany([]string{query}, opts)
 	if err != nil {
 		return FindResponse{}, err
 	}
 	return responses[0], nil
 }
 
-// FindMany searches for several symbols in one pass over the selected files.
-// Limit is shared fairly across the supplied symbols, matching the CLI's
-// batched find behavior.
-func (r *View) FindMany(symbols []string, opts Options) ([]FindResponse, error) {
+// FindMany locates several exact source identifiers or literal repository
+// paths. Auto mode preserves exact-symbol behavior and falls back to path
+// lookup only when one query has no symbol results. Limit is shared fairly
+// across queries.
+func (r *View) FindMany(queries []string, opts Options) ([]FindResponse, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
 	}
-	if len(symbols) == 0 {
-		return nil, fmt.Errorf("at least one symbol is required")
+	if len(queries) == 0 {
+		return nil, fmt.Errorf("at least one query is required")
 	}
-	for _, symbol := range symbols {
-		if symbol == "" {
-			return nil, fmt.Errorf("symbol must not be empty")
+	for _, query := range queries {
+		if query == "" {
+			return nil, fmt.Errorf("query must not be empty")
 		}
 	}
 	opts = normalizeOptions(opts, ReturnScope)
 	if err := validateOptions(opts); err != nil {
 		return nil, err
 	}
+
+	responses := make([]FindResponse, len(queries))
+	var symbolResponses []FindResponse
+	var err error
+	if opts.Match != FindMatchPath {
+		symbolResponses, err = r.findSymbolCandidates(queries, opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	pathIndexes := make([]int, 0, len(queries))
+	pathQueries := make([]string, 0, len(queries))
+	for index, query := range queries {
+		if opts.Match == FindMatchPath ||
+			(opts.Match == FindMatchAuto && len(symbolResponses[index].Results) == 0) {
+			pathIndexes = append(pathIndexes, index)
+			pathQueries = append(pathQueries, query)
+		}
+	}
+	pathResponses, err := r.findPathCandidates(pathQueries, opts)
+	if err != nil {
+		return nil, err
+	}
+	pathsByIndex := make(map[int]FindResponse, len(pathIndexes))
+	for index, response := range pathResponses {
+		pathsByIndex[pathIndexes[index]] = response
+	}
+
+	for index, query := range queries {
+		response := FindResponse{
+			Query:  query,
+			Symbol: query,
+			Root:   r.root,
+		}
+		switch opts.Match {
+		case FindMatchSymbol:
+			response = symbolResponses[index]
+		case FindMatchPath:
+			response = pathsByIndex[index]
+		case FindMatchAuto:
+			if len(symbolResponses[index].Results) != 0 {
+				response = symbolResponses[index]
+			} else {
+				response = pathsByIndex[index]
+				response.SearchedAs = []FindMatch{FindMatchSymbol, FindMatchPath}
+			}
+		}
+		if len(response.Results) == 0 {
+			response.MatchedAs = FindOutcomeNone
+			response.Hint = emptyFindHint(opts.Match)
+		}
+		responses[index] = response
+	}
+	responses = limitFindResponses(responses, opts.Limit)
+	if err := r.verifyRootIdentity(); err != nil {
+		return nil, err
+	}
+	return responses, nil
+}
+
+func (r *View) findSymbolCandidates(
+	queries []string,
+	opts Options,
+) ([]FindResponse, error) {
 	files, err := r.filteredFiles(opts)
 	if err != nil {
 		return nil, err
@@ -237,8 +352,8 @@ func (r *View) FindMany(symbols []string, opts Options) ([]FindResponse, error) 
 		symbol  string
 		results []Result
 	}
-	states := make([]symbolState, len(symbols))
-	for index, symbol := range symbols {
+	states := make([]symbolState, len(queries))
+	for index, symbol := range queries {
 		states[index] = symbolState{
 			symbol:  symbol,
 			results: make([]Result, 0),
@@ -472,23 +587,136 @@ func (r *View) FindMany(symbols []string, opts Options) ([]FindResponse, error) 
 		}
 	}
 
-	remaining := opts.Limit
 	responses := make([]FindResponse, 0, len(states))
-	for index, state := range states {
-		resultLimit := len(state.results)
-		if opts.Limit > 0 {
-			resultLimit = fairResultLimit(remaining, len(states)-index)
-			if resultLimit > len(state.results) {
-				resultLimit = len(state.results)
-			}
-		}
+	for _, state := range states {
 		response := FindResponse{
-			Symbol:           state.symbol,
-			Root:             r.root,
-			Results:          state.results[:resultLimit],
-			ResultsTruncated: len(state.results) > resultLimit,
+			Query:      state.symbol,
+			Symbol:     state.symbol,
+			MatchedAs:  findOutcomeForResults(state.results),
+			Root:       r.root,
+			SearchedAs: []FindMatch{FindMatchSymbol},
+			Results:    state.results,
 		}
 		responses = append(responses, response)
+	}
+	return responses, nil
+}
+
+func (r *View) findPathCandidates(
+	queries []string,
+	opts Options,
+) ([]FindResponse, error) {
+	if len(queries) == 0 {
+		return nil, nil
+	}
+	files, err := r.repositoryFiles(false)
+	if err != nil {
+		return nil, err
+	}
+	changed := map[string]bool{}
+	if opts.ChangedOnly {
+		changed, err = r.changedFileSet(opts)
+		if err != nil {
+			return nil, err
+		}
+	}
+	type rankedPath struct {
+		path string
+		rank int
+	}
+	responses := make([]FindResponse, 0, len(queries))
+	for _, query := range queries {
+		matches := make([]rankedPath, 0)
+		for _, path := range files {
+			if err := r.checkContext(); err != nil {
+				return nil, err
+			}
+			rel, relErr := filepath.Rel(r.root, path)
+			if relErr != nil {
+				return nil, relErr
+			}
+			rel = filepath.ToSlash(rel)
+			if !matchPathFilters(rel, opts.PathGlobs, opts.ExcludeGlobs) ||
+				(opts.ChangedOnly && !changed[rel]) {
+				continue
+			}
+			rank, matched := repositoryPathMatchRank(query, rel)
+			if matched {
+				matches = append(matches, rankedPath{path: rel, rank: rank})
+			}
+		}
+		sort.Slice(matches, func(i, j int) bool {
+			if matches[i].rank == matches[j].rank {
+				return matches[i].path < matches[j].path
+			}
+			return matches[i].rank < matches[j].rank
+		})
+		results := make([]Result, 0, len(matches))
+		for _, match := range matches {
+			results = append(results, Result{
+				Finding: FindingFile,
+				Kind:    "file",
+				Path:    match.path,
+			})
+			if opts.Limit > 0 && len(results) > opts.Limit {
+				break
+			}
+		}
+		responses = append(responses, FindResponse{
+			Query:      query,
+			Symbol:     query,
+			MatchedAs:  FindOutcomeFile,
+			Root:       r.root,
+			SearchedAs: []FindMatch{FindMatchPath},
+			Results:    results,
+		})
+	}
+	return responses, nil
+}
+
+func repositoryPathMatchRank(query, path string) (int, bool) {
+	query = filepath.ToSlash(query)
+	for strings.HasPrefix(query, "./") {
+		query = strings.TrimPrefix(query, "./")
+	}
+	if query == path {
+		return 0, true
+	}
+	base := pathpkg.Base(path)
+	if query == base {
+		return 1, true
+	}
+	for _, component := range strings.Split(path, "/") {
+		if query == component {
+			return 2, true
+		}
+	}
+	if strings.HasPrefix(base, query) {
+		return 3, true
+	}
+	if strings.Contains(base, query) {
+		return 4, true
+	}
+	if strings.Contains(path, query) {
+		return 5, true
+	}
+	return 0, false
+}
+
+func limitFindResponses(responses []FindResponse, limit int) []FindResponse {
+	remaining := limit
+	limited := make([]FindResponse, 0, len(responses))
+	for index, response := range responses {
+		resultLimit := len(response.Results)
+		if limit > 0 {
+			resultLimit = fairResultLimit(remaining, len(responses)-index)
+			if resultLimit > len(response.Results) {
+				resultLimit = len(response.Results)
+			}
+		}
+		response.ResultsTruncated = len(response.Results) > resultLimit
+		response.Results = response.Results[:resultLimit]
+		limited = append(limited, response)
 		if remaining > 0 {
 			remaining -= resultLimit
 			if remaining <= 0 {
@@ -496,10 +724,20 @@ func (r *View) FindMany(symbols []string, opts Options) ([]FindResponse, error) 
 			}
 		}
 	}
-	if err := r.verifyRootIdentity(); err != nil {
-		return nil, err
+	return limited
+}
+
+func emptyFindHint(match FindMatch) string {
+	switch match {
+	case FindMatchSymbol:
+		return "No exact source identifier matched. Try a complete identifier or use match=path for repository paths."
+	case FindMatchPath:
+		return "No literal repository path matched. Try a shorter path fragment or use match=symbol for source identifiers."
+	case FindMatchAuto:
+		return "No exact source identifier or literal repository path matched. Try a shorter literal query, or use changed for branch, commit, or PR work."
+	default:
+		return "No repository evidence matched."
 	}
-	return responses, nil
 }
 
 func fairResultLimit(remaining, remainingSelectors int) int {
@@ -582,6 +820,7 @@ func (r *View) Inspect(location string, opts Options) (InspectResponse, error) {
 		}
 		related, err := r.Find(symbol, Options{
 			Include:        relatedInclude,
+			Match:          FindMatchSymbol,
 			Return:         opts.Return,
 			Context:        opts.Context,
 			ContextSet:     opts.ContextSet,
@@ -753,7 +992,9 @@ changedFiles:
 			return ChangedResponse{}, readErr
 		}
 		if readErr != nil || len(lines) == 0 {
-			if !appendResult(Result{Kind: "file", Path: rel, Language: language.name()}) {
+			if !appendResult(Result{
+				Finding: FindingFile, Kind: "file", Path: rel, Language: language.name(),
+			}) {
 				break
 			}
 			continue
@@ -766,7 +1007,7 @@ changedFiles:
 		}
 		if len(lineNumbers) == 0 {
 			if !appendResult(Result{
-				Kind: "file", Path: rel, Language: language.name(),
+				Finding: FindingFile, Kind: "file", Path: rel, Language: language.name(),
 			}) {
 				break
 			}
@@ -828,6 +1069,7 @@ func (r *View) resultForRange(
 ) Result {
 	lineNo := start
 	result := Result{
+		Finding:      findingForKind(kind),
 		Kind:         kind,
 		Symbol:       symbol,
 		Path:         rel,
@@ -917,6 +1159,7 @@ func (r *View) resultForFindHit(
 		scope = scopeName(lines, lineNo, language)
 	}
 	result := Result{
+		Finding:   findingForKind(kind),
 		Kind:      kind,
 		Symbol:    symbol,
 		Path:      rel,
@@ -1113,6 +1356,9 @@ func normalizeOptions(opts Options, defaultReturn Return) Options {
 	if opts.Include == "" {
 		opts.Include = IncludeBoth
 	}
+	if opts.Match == "" {
+		opts.Match = FindMatchAuto
+	}
 	if opts.Return == "" {
 		opts.Return = defaultReturn
 	}
@@ -1135,6 +1381,11 @@ func validateOptions(opts Options) error {
 	case IncludeDefs, IncludeRefs, IncludeBoth, IncludeSymbol, IncludeScope, IncludeImports, IncludeAll:
 	default:
 		return fmt.Errorf("include must be one of: defs, refs, both, symbol, scope, imports, all")
+	}
+	switch opts.Match {
+	case FindMatchAuto, FindMatchSymbol, FindMatchPath:
+	default:
+		return fmt.Errorf("match must be one of: auto, symbol, path")
 	}
 	if opts.Context < 0 {
 		return fmt.Errorf("context must be non-negative")
@@ -1169,6 +1420,29 @@ func kindForMatch(isDef bool) string {
 		return "def"
 	}
 	return "ref"
+}
+
+func findingForKind(kind string) Finding {
+	switch kind {
+	case "file":
+		return FindingFile
+	case "def", "ref":
+		return FindingSymbol
+	default:
+		return FindingOther
+	}
+}
+
+func findOutcomeForResults(results []Result) FindOutcome {
+	for _, result := range results {
+		if result.Finding == FindingSymbol {
+			return FindOutcomeSymbol
+		}
+	}
+	if len(results) != 0 {
+		return FindOutcomeOther
+	}
+	return FindOutcomeNone
 }
 
 func (r *View) filteredFiles(opts Options) ([]string, error) {
@@ -1443,6 +1717,7 @@ func importResult(
 		return Result{}, false
 	}
 	result := Result{
+		Finding:   FindingOther,
 		Kind:      "imports",
 		Path:      path,
 		StartLine: start,

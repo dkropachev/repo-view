@@ -1,11 +1,13 @@
 package scopesiftermcp
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -30,13 +32,26 @@ func TestServicePropagatesRequestCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := &service{view: view, base: fixture.base}
+	learner, err := newAdaptiveLearner(fixture.root, false, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &service{view: view, learner: learner, base: fixture.base}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err = service.find(ctx, nil, findInput{Symbol: "Helper"})
+	_, _, err = service.find(ctx, nil, findInput{Query: "Helper"})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("find error = %v, want context cancellation", err)
+	}
+}
+
+func TestBooleanSchemaHonorsDefault(t *testing.T) {
+	for _, want := range []bool{false, true} {
+		schema := booleanSchema(want)
+		if got, ok := schema["default"].(bool); !ok || got != want {
+			t.Fatalf("boolean schema default = %#v, want %t", schema["default"], want)
+		}
 	}
 }
 
@@ -56,7 +71,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatalf("server identity = %#v", initial.ServerInfo)
 	}
 	if initial.Instructions != "" {
-		t.Fatalf("server instructions = %q, want empty", initial.Instructions)
+		t.Fatalf("server instructions = %q, want none", initial.Instructions)
 	}
 	capabilities := initial.Capabilities
 	if capabilities == nil || capabilities.Tools == nil ||
@@ -74,29 +89,37 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	discoveryJSON, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("MCP tool-discovery payload: %d bytes", len(discoveryJSON))
+	if len(discoveryJSON) >= 4_700 {
+		t.Fatalf("MCP tool-discovery payload = %d bytes, want below 4700", len(discoveryJSON))
+	}
 	wantProperties := map[string][]string{
 		"changed": {
 			"context", "drop_comments", "drop_docstrings", "exclude_globs",
-			"limit", "max_code_lines", "max_patch_lines", "path_globs", "return",
+			"limit", "max_code_lines", "max_patch_lines", "path_globs", "response", "return",
 		},
 		"find": {
 			"changed_only", "context", "drop_comments", "drop_docstrings",
 			"exclude_globs", "include", "include_comments", "include_strings",
-			"limit", "max_code_lines", "path_globs", "return", "symbol",
+			"limit", "match", "max_code_lines", "path_globs", "query", "response", "return",
 		},
 		"inspect": {
 			"changed_only", "context", "drop_comments", "drop_docstrings",
 			"exclude_globs", "include", "include_comments", "include_strings",
-			"limit", "location", "max_code_lines", "path_globs", "return",
+			"limit", "location", "max_code_lines", "path_globs", "response", "return",
 		},
 		"outline": {
-			"drop_comments", "drop_docstrings", "limit", "max_code_lines", "path", "return",
+			"drop_comments", "drop_docstrings", "limit", "max_code_lines", "path", "response", "return",
 		},
 	}
 	wantNames := []string{"changed", "find", "inspect", "outline"}
 	wantRequired := map[string][]string{
 		"changed": {},
-		"find":    {"symbol"},
+		"find":    {"query"},
 		"inspect": {"location"},
 		"outline": {"path"},
 	}
@@ -107,8 +130,15 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		if tool.Name != wantNames[index] {
 			t.Fatalf("tool %d name = %q, want %q", index, tool.Name, wantNames[index])
 		}
-		if tool.Title != "" || tool.Description == "" || tool.OutputSchema == nil {
+		if tool.Title != "" || tool.Description == "" || tool.OutputSchema != nil {
 			t.Fatalf("tool %q metadata = %#v", tool.Name, tool)
+		}
+		inputSchemaJSON, err := json.Marshal(tool.InputSchema)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(inputSchemaJSON, []byte(`"description"`)) {
+			t.Fatalf("tool %q input schema contains redundant prose", tool.Name)
 		}
 		annotations := tool.Annotations
 		if annotations == nil || !annotations.ReadOnlyHint ||
@@ -141,6 +171,42 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		if required := stringArray(schema["required"]); !reflect.DeepEqual(required, wantRequired[tool.Name]) {
 			t.Fatalf("tool %q required = %q, want %q", tool.Name, required, wantRequired[tool.Name])
 		}
+		switch tool.Name {
+		case "changed":
+			if !strings.Contains(tool.Description, "Branch/commit/PR first") ||
+				!strings.Contains(tool.Description, "base-to-HEAD patch") {
+				t.Fatalf("changed description = %q", tool.Description)
+			}
+		case "find":
+			if !strings.Contains(tool.Description, "path fragment") ||
+				!strings.Contains(tool.Description, "auto tries identifier then path") {
+				t.Fatalf("find description = %q", tool.Description)
+			}
+			matchSchema := normalizedObject(t, properties["match"])
+			if matchSchema["default"] != "auto" ||
+				!reflect.DeepEqual(stringArray(matchSchema["enum"]), []string{"auto", "symbol", "path"}) {
+				t.Fatalf("find match schema = %#v", matchSchema)
+			}
+			returnSchema := normalizedObject(t, properties["return"])
+			if returnSchema["default"] != "locations" {
+				t.Fatalf("find return schema = %#v", returnSchema)
+			}
+		case "inspect":
+			if !strings.Contains(tool.Description, "Scope/imports/related identifiers") ||
+				!strings.Contains(tool.Description, "PATH:LINE") {
+				t.Fatalf("inspect description = %q", tool.Description)
+			}
+		case "outline":
+			if !strings.Contains(tool.Description, "Source-ordered definitions") ||
+				!strings.Contains(tool.Description, "known repository file") {
+				t.Fatalf("outline description = %q", tool.Description)
+			}
+		}
+		responseSchema := normalizedObject(t, properties["response"])
+		if responseSchema["default"] != responseAuto ||
+			!reflect.DeepEqual(stringArray(responseSchema["enum"]), []string{responseAuto, responseFull}) {
+			t.Fatalf("tool %q response schema = %#v", tool.Name, responseSchema)
+		}
 		assertIntegerProperty(
 			t,
 			tool.Name,
@@ -168,7 +234,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	assertToolOutput(t, client, "changed", map[string]any{}, func() (navigator.ChangedResponse, error) {
+	assertToolOutput(t, client, "changed", map[string]any{"response": responseFull}, func() (navigator.ChangedResponse, error) {
 		return view.Changed(navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeAll,
 			Return: navigator.ReturnContext, Context: defaultContext,
@@ -176,15 +242,32 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			MaxPatchLines: defaultMaxPatchLines,
 		})
 	})
-	assertToolOutput(t, client, "find", map[string]any{"symbol": "Helper"}, func() (navigator.FindResponse, error) {
-		return view.Find("Helper", navigator.Options{
+	assertToolOutput(t, client, "find", map[string]any{
+		"query": "Helper", "response": responseFull,
+	}, func() (navigator.FindResponse, error) {
+		response, err := view.Find("Helper", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeBoth,
-			Return: navigator.ReturnScope, Context: defaultContext,
+			Match: navigator.FindMatchAuto, Return: navigator.ReturnLocations, Context: defaultContext,
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
 			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
 		})
+		return response, err
 	})
-	assertToolOutput(t, client, "inspect", map[string]any{"location": "demo.go:6"}, func() (navigator.InspectResponse, error) {
+	assertToolOutput(t, client, "find", map[string]any{
+		"query": "demo.go", "match": "path", "response": responseFull,
+	}, func() (navigator.FindResponse, error) {
+		response, err := view.Find("demo.go", navigator.Options{
+			Base: fixture.base, Include: navigator.IncludeBoth,
+			Match: navigator.FindMatchPath, Return: navigator.ReturnLocations, Context: defaultContext,
+			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
+			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
+		})
+		response.Symbol = ""
+		return response, err
+	})
+	assertToolOutput(t, client, "inspect", map[string]any{
+		"location": "demo.go:6", "response": responseFull,
+	}, func() (navigator.InspectResponse, error) {
 		return view.Inspect("demo.go:6", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeScope,
 			Return: navigator.ReturnScope, Context: defaultContext,
@@ -192,7 +275,9 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
 		})
 	})
-	assertToolOutput(t, client, "outline", map[string]any{"path": "demo.go"}, func() (navigator.OutlineResponse, error) {
+	assertToolOutput(t, client, "outline", map[string]any{
+		"path": "demo.go", "response": responseFull,
+	}, func() (navigator.OutlineResponse, error) {
 		return view.Outline("demo.go", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeDefs,
 			Return: navigator.ReturnLine, Limit: defaultLimit,
@@ -204,9 +289,10 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		name      string
 		arguments map[string]any
 	}{
-		{name: "find", arguments: map[string]any{"symbol": "Helper", "root": "/tmp"}},
+		{name: "find", arguments: map[string]any{"query": "Helper", "root": "/tmp"}},
 		{name: "find", arguments: map[string]any{}},
-		{name: "find", arguments: map[string]any{"symbol": "Helper", "limit": maximumLimit + 1}},
+		{name: "find", arguments: map[string]any{"query": "Helper", "limit": maximumLimit + 1}},
+		{name: "find", arguments: map[string]any{"query": "Helper", "match": "text"}},
 		{name: "inspect", arguments: map[string]any{"location": "../outside.go:1"}},
 	} {
 		response, err := client.CallTool(ctx, &mcp.CallToolParams{
@@ -222,6 +308,95 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 
 	if after := snapshotTree(t, fixture.root); !reflect.DeepEqual(after, before) {
 		t.Fatal("read-only MCP calls changed repository or Git metadata")
+	}
+}
+
+func TestPersistentServerAdvertisesStatefulTools(t *testing.T) {
+	fixture := newFixture(t)
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+	t.Setenv("LOCALAPPDATA", cacheRoot)
+	t.Setenv("HOME", cacheRoot)
+	server, err := New(Config{
+		AdaptiveOutputCache: true,
+		Root:                fixture.root,
+		Base:                fixture.base,
+		GitExecutable:       fixture.git,
+		GitExecutableSHA256: fixture.gitSHA256,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+	result, err := client.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range result.Tools {
+		annotations := tool.Annotations
+		if annotations == nil || annotations.ReadOnlyHint || annotations.IdempotentHint ||
+			annotations.DestructiveHint == nil || *annotations.DestructiveHint {
+			t.Fatalf("persistent tool %q annotations = %#v", tool.Name, annotations)
+		}
+	}
+}
+
+func TestServerAutoCompactsAndFullRetryPreservesV3(t *testing.T) {
+	fixture := newFixture(t)
+	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
+	for index := range 200 {
+		large += fmt.Sprintf("\tprintln(%d)\n", index)
+	}
+	large += "\tHelper()\n}\n"
+	writeFixtureFile(t, fixture.root, large)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	auto, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "inspect",
+		Arguments: map[string]any{
+			"location": "demo.go:6", "max_code_lines": maximumMaxCodeLines,
+		},
+	})
+	if err != nil || auto.IsError {
+		t.Fatalf("auto inspect = %#v, %v", auto, err)
+	}
+	autoJSON, err := json.Marshal(auto.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(autoJSON) > adaptiveDefaultBudget || !bytes.Contains(autoJSON, []byte(`"compact":true`)) ||
+		bytes.Contains(autoJSON, []byte("println(100)")) {
+		t.Fatalf("auto structured output (%d bytes) = %s", len(autoJSON), autoJSON)
+	}
+	if text := toolText(auto); text == "" || len(text) > maximumCompactTextBytes ||
+		strings.Contains(text, string(autoJSON)) {
+		t.Fatalf("auto text content = %q", text)
+	}
+
+	full, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "inspect",
+		Arguments: map[string]any{
+			"location": "demo.go:6", "max_code_lines": maximumMaxCodeLines,
+			"response": responseFull,
+		},
+	})
+	if err != nil || full.IsError {
+		t.Fatalf("full inspect = %#v, %v", full, err)
+	}
+	fullJSON, err := json.Marshal(full.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fullJSON) <= adaptiveDefaultBudget || bytes.Contains(fullJSON, []byte(`"compact":true`)) ||
+		!bytes.Contains(fullJSON, []byte("println(100)")) {
+		t.Fatalf("full structured output (%d bytes) = %s", len(fullJSON), fullJSON)
+	}
+	if text := toolText(full); text == "" || len(text) > maximumCompactTextBytes ||
+		strings.Contains(text, string(fullJSON)) {
+		t.Fatalf("full text content = %q", text)
 	}
 }
 
@@ -416,6 +591,10 @@ func assertToolOutput[T any](
 	if response.IsError {
 		t.Fatalf("call %s returned tool error: %s", name, toolText(response))
 	}
+	text := toolText(response)
+	if text == "" || len(text) > maximumCompactTextBytes || strings.HasPrefix(strings.TrimSpace(text), "{") {
+		t.Fatalf("%s text content = %q", name, text)
+	}
 	expected, err := direct()
 	if err != nil {
 		t.Fatalf("direct %s: %v", name, err)
@@ -430,6 +609,9 @@ func assertToolOutput[T any](
 	}
 	if !reflect.DeepEqual(actual, expected) {
 		t.Fatalf("%s output = %#v, want %#v", name, actual, expected)
+	}
+	if text == string(raw) || strings.Contains(text, string(raw)) {
+		t.Fatalf("%s duplicated structured JSON in text content", name)
 	}
 }
 

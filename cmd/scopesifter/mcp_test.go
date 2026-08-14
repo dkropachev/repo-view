@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -99,17 +100,39 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	}
 	for index, want := range []string{"changed", "find", "inspect", "outline"} {
 		tool := tools.Tools[index]
-		if tool.Name != want || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+		if tool.Name != want || tool.Annotations == nil || !tool.Annotations.ReadOnlyHint ||
+			tool.OutputSchema != nil {
 			_ = session.Close()
 			t.Fatalf("tool %d = %#v", index, tool)
 		}
 	}
 	response, err := session.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "outline", Arguments: map[string]any{"path": "demo.go"},
+		Name: "outline", Arguments: map[string]any{"path": "demo.go", "response": "full"},
 	})
 	if err != nil || response.IsError {
 		_ = session.Close()
 		t.Fatalf("outline = %#v, %v", response, err)
+	}
+	response, err = session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "demo.go", "match": "path", "response": "full",
+		},
+	})
+	if err != nil || response.IsError {
+		_ = session.Close()
+		t.Fatalf("find path = %#v, %v", response, err)
+	}
+	structured, err := json.Marshal(response.StructuredContent)
+	if err != nil || !bytes.Contains(structured, []byte(`"matched_as":"file"`)) ||
+		!bytes.Contains(structured, []byte(`"finding":"file"`)) {
+		_ = session.Close()
+		t.Fatalf("find path structured output = %s, %v", structured, err)
+	}
+	text := mcpCommandText(response)
+	if text == "" || len(text) > 160 || strings.Contains(text, string(structured)) ||
+		strings.HasPrefix(strings.TrimSpace(text), "{") {
+		_ = session.Close()
+		t.Fatalf("find path text output = %q", text)
 	}
 	if err := session.Close(); err != nil {
 		t.Fatalf("close MCP subprocess: %v; stderr: %s", err, serverStderr.String())
@@ -117,6 +140,16 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	if serverStderr.Len() != 0 {
 		t.Fatalf("MCP server wrote stderr: %s", serverStderr.String())
 	}
+}
+
+func mcpCommandText(response *mcp.CallToolResult) string {
+	var values []string
+	for _, content := range response.Content {
+		if text, ok := content.(*mcp.TextContent); ok {
+			values = append(values, text.Text)
+		}
+	}
+	return strings.Join(values, "\n")
 }
 
 func mcpTestGit(t *testing.T, gitPath, root string, args ...string) {
