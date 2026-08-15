@@ -6,7 +6,7 @@ require (
 	github.com/dcosson/treesitter-go v0.1.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	go.yaml.in/yaml/v3 v3.0.4
-	golang.org/x/mod v0.35.0
+	golang.org/x/mod v0.39.0
 	golang.org/x/sys v0.42.0
 	golang.org/x/text v0.37.0
 )
