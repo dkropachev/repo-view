@@ -202,8 +202,7 @@ func TestLeanResponseRemovesFormatterTelemetryAndDuplicateFinding(t *testing.T) 
 func TestInspectEvidenceUsesOnlyCompleteUTF8LinesWithinBudget(t *testing.T) {
 	lines := []string{
 		"func Serve() {",
-		"\tfirst := \"界界界\"",
-		"\tsecond := \"" + strings.Repeat("界", 120) + "\"",
+		"\toversized := \"" + strings.Repeat("界", 120) + "\"",
 		"\tthird()",
 		"}",
 	}
@@ -224,11 +223,12 @@ func TestInspectEvidenceUsesOnlyCompleteUTF8LinesWithinBudget(t *testing.T) {
 	if len(encoded) > 420 || sizing.StructuredBytes != len(encoded) || !utf8.Valid(encoded) {
 		t.Fatalf("lean evidence bytes = %d, sizing %#v", len(encoded), sizing)
 	}
-	if lean.Evidence == nil || lean.Evidence.Start != "internal/service.go:38" {
+	if lean.Evidence == nil || lean.Evidence.Start != "internal/service.go:40" {
 		t.Fatalf("evidence = %#v", lean.Evidence)
 	}
-	if lean.Evidence.Text == code || !strings.HasPrefix(code, lean.Evidence.Text+"\n") {
-		t.Fatalf("evidence cut through line or was not bounded: %q", lean.Evidence.Text)
+	if !strings.HasPrefix(lean.Evidence.Text, "\tthird()") ||
+		!strings.HasSuffix(code, lean.Evidence.Text) {
+		t.Fatalf("evidence omitted inspected line or cut through source: %q", lean.Evidence.Text)
 	}
 	for _, line := range lines {
 		if strings.HasPrefix(line, lean.Evidence.Text) && line != lean.Evidence.Text {
@@ -340,6 +340,219 @@ func TestLeanResultsDefinitionFirstWithExactlyOneExactNext(t *testing.T) {
 	if text != "Inspect target.go:3; details in structuredContent." ||
 		len(text) > maximumCompactTextBytes {
 		t.Fatalf("actionable text hint = %q", text)
+	}
+}
+
+func TestFindSourceEvidenceCollapsesRedundantInspect(t *testing.T) {
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "target.go", Line: 3, StartLine: 3, Kind: "def",
+			Finding: navigator.FindingSymbol, Symbol: "Target", Scope: "Target",
+			CodeStartLine: 3, CodeEndLine: 5,
+			Code: "func Target() {\n\twork()\n}",
+		}},
+	}
+	result, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence == nil || lean.Evidence.Start != "target.go:3" ||
+		lean.Evidence.Text != response.Results[0].Code {
+		t.Fatalf("find evidence = %#v", lean.Evidence)
+	}
+	if lean.Next != nil || sizing.StructuredBytes > 1024 {
+		t.Fatalf("find retained redundant inspect = %#v, sizing %#v", lean.Next, sizing)
+	}
+	if text := toolResultText(t, result); text != "Source target.go:3; details in structuredContent." {
+		t.Fatalf("find evidence hint = %q", text)
+	}
+}
+
+func TestFindAmbiguousDefinitionsDoNotInlineArbitrarySource(t *testing.T) {
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{
+			{Path: "a.go", Line: 3, Kind: "def", Symbol: "Target", CodeStartLine: 3, Code: "func Target() {}"},
+			{Path: "b.go", Line: 7, Kind: "def", Symbol: "Target", CodeStartLine: 7, Code: "func Target() {}"},
+		},
+	}
+	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence != nil || lean.Next == nil ||
+		lean.Next.Arguments["location"] != "a.go:3" {
+		t.Fatalf("ambiguous find = %#v", lean)
+	}
+}
+
+func TestFindEvidenceFitsTightBudgetOnCompleteUTF8Lines(t *testing.T) {
+	code := "func 函数() {\n\tprintln(\"界🚀\")\n\tprintln(\"second complete line\")\n\tprintln(\"third complete line\")\n}"
+	response := navigator.FindResponse{
+		Query: "函数", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "unicode.go", Line: 3, Kind: "def", Symbol: "函数",
+			CodeStartLine: 3, CodeEndLine: 7, Code: code,
+		}},
+	}
+	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	encoded := mustMarshalResponse(t, lean)
+	if sizing.StructuredBytes > 320 || !utf8.Valid(encoded) || lean.Evidence == nil ||
+		!strings.HasPrefix(code, lean.Evidence.Text) {
+		t.Fatalf("tight UTF-8 evidence = %#v (%d bytes)", lean, sizing.StructuredBytes)
+	}
+	if lean.Evidence.Text != code && !strings.HasPrefix(code, lean.Evidence.Text+"\n") {
+		t.Fatalf("evidence cut through source line: %q", lean.Evidence.Text)
+	}
+	if lean.Evidence.Text != code {
+		if !containsString(lean.Truncated, "source") || lean.Next == nil ||
+			lean.Next.Arguments["location"] != "unicode.go:3" {
+			t.Fatalf("source continuation omitted: %#v", lean)
+		}
+	} else if lean.Next != nil {
+		t.Fatalf("complete source retained inspect: %#v", lean.Next)
+	}
+}
+
+func TestFindOversizedSingleLineKeepsInspectFallback(t *testing.T) {
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "target.go", Line: 3, Kind: "def", Symbol: "Target",
+			CodeStartLine: 3, CodeEndLine: 3, Code: strings.Repeat("界", 300),
+		}},
+	}
+	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if sizing.StructuredBytes > 320 || lean.Evidence != nil || lean.Next == nil ||
+		lean.Next.Arguments["location"] != "target.go:3" ||
+		!containsString(lean.Truncated, "source") {
+		t.Fatalf("oversized-line fallback = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestFindEvidenceStartsAtDefinitionAfterLongPrelude(t *testing.T) {
+	prelude := strings.Repeat("// long decorator and prelude line\n", 80)
+	code := prelude + "func Target() {\n\twork()\n}"
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "target.go", Line: 81, StartLine: 1, Kind: "def", Symbol: "Target",
+			CodeStartLine: 1, CodeEndLine: 83, Code: code,
+		}},
+	}
+	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if sizing.StructuredBytes > 320 || lean.Evidence == nil ||
+		lean.Evidence.Start != "target.go:81" ||
+		!strings.HasPrefix(lean.Evidence.Text, "func Target()") ||
+		strings.Contains(lean.Evidence.Text, "prelude") ||
+		!containsString(lean.Truncated, "source") || lean.Next == nil ||
+		lean.Next.Arguments["location"] != "target.go:81" {
+		t.Fatalf("focused definition evidence = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestFindNavigatorTruncatedEvidenceRetainsExactInspect(t *testing.T) {
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "target.go", Line: 3, Kind: "def", Symbol: "Target",
+			CodeStartLine: 3, CodeEndLine: 4, Code: "func Target() {\n\twork()",
+			CodeTruncated: true,
+		}},
+	}
+	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence == nil || lean.Evidence.Text != response.Results[0].Code ||
+		!containsString(lean.Truncated, "source") || lean.Next == nil ||
+		lean.Next.Arguments["location"] != "target.go:3" {
+		t.Fatalf("navigator-truncated evidence = %#v", lean)
+	}
+}
+
+func TestFindCompleteEvidenceWinsBoundaryWithoutRedundantNext(t *testing.T) {
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+		Results: []navigator.Result{{
+			Path: "target.go", Line: 3, Kind: "def", Symbol: "Target",
+			CodeStartLine: 3, CodeEndLine: 5,
+			Code: "func Target() {\n\twork()\n}",
+		}},
+	}
+	_, initial, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := initial.(leanResponse)
+	budget := len(mustMarshalResponse(t, complete))
+	withNext := complete
+	withNext.Next = &leanNext{Tool: "inspect", Arguments: map[string]any{
+		"location": "target.go:3",
+	}}
+	if len(mustMarshalResponse(t, withNext)) <= budget {
+		t.Fatal("test boundary does not exclude redundant next action")
+	}
+
+	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if sizing.StructuredBytes != budget || lean.Evidence == nil ||
+		lean.Evidence.Text != response.Results[0].Code || lean.Next != nil ||
+		containsString(lean.Truncated, "source") {
+		t.Fatalf("boundary response = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestFindUniqueDefinitionKeepsEvidenceBeforeDiverseReferences(t *testing.T) {
+	results := []navigator.Result{{
+		Path: "target.go", Line: 3, Kind: "def", Symbol: "Target", Scope: "Target",
+		CodeStartLine: 3, CodeEndLine: 3, Code: "func Target() {}",
+	}}
+	for index := range 6 {
+		results = append(results, navigator.Result{
+			Path: fmt.Sprintf("caller%d.go", index), Line: index + 5,
+			Kind: "ref", Symbol: "Target", Scope: fmt.Sprintf("Caller%d", index),
+		})
+	}
+	response := navigator.FindResponse{
+		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol, Results: results,
+	}
+	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence == nil || lean.Next != nil || len(lean.Results) != maximumLeanResults ||
+		lean.Results[0].Location != "target.go:3" ||
+		!containsString(lean.Truncated, "results") || sizing.StructuredBytes > 1024 {
+		t.Fatalf("definition/reference evidence = %#v, sizing %#v", lean, sizing)
+	}
+	seen := map[string]bool{}
+	for _, result := range lean.Results {
+		path := strings.SplitN(result.Location, ":", 2)[0]
+		if seen[path] {
+			t.Fatalf("duplicate file in diverse results: %#v", lean.Results)
+		}
+		seen[path] = true
 	}
 }
 

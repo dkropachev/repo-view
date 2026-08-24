@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -70,8 +71,10 @@ type leanResultSource struct {
 }
 
 type leanEvidenceSource struct {
-	start     string
+	path      string
 	text      string
+	startLine int
+	focusLine int
 	truncated bool
 }
 
@@ -198,6 +201,12 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		}
 		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
+		if primary := uniqueActionableDefinition(results); primary >= 0 {
+			if evidence := inspectEvidenceSource(results[primary]); evidence != nil {
+				plan.evidence = evidence
+				plan.sourceTruncated = evidence.truncated
+			}
+		}
 	case *navigator.FindResponse:
 		if response == nil {
 			return plan, responseTypeError(tool, full)
@@ -279,7 +288,13 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 	for index := range results {
 		result := results[index]
 		if result.Code != "" || result.CodeTruncated {
-			plan.sourceTruncated = true
+			evidence := inspectEvidenceSource(result)
+			if plan.evidence == nil || evidence == nil ||
+				evidence.path != plan.evidence.path ||
+				evidence.startLine != plan.evidence.startLine ||
+				evidence.text != plan.evidence.text {
+				plan.sourceTruncated = true
+			}
 		}
 		lean, ok := leanResultFor(result)
 		if !ok {
@@ -361,9 +376,15 @@ func inspectEvidenceSource(result navigator.Result) *leanEvidenceSource {
 	if result.Path == "" || line < 1 || result.Code == "" || !utf8.ValidString(result.Code) {
 		return nil
 	}
+	focusLine := actionableResultLine(&result)
+	if focusLine < line {
+		focusLine = line
+	}
 	return &leanEvidenceSource{
-		start:     fmt.Sprintf("%s:%d", result.Path, line),
+		path:      result.Path,
 		text:      result.Code,
+		startLine: line,
+		focusLine: focusLine,
 		truncated: result.CodeTruncated,
 	}
 }
@@ -384,6 +405,21 @@ func primaryInspectScope(location string, results []navigator.Result) int {
 		return 0
 	}
 	return -1
+}
+
+func uniqueActionableDefinition(results []navigator.Result) int {
+	primary := -1
+	for index := range results {
+		if results[index].Kind != "def" || results[index].Path == "" ||
+			actionableResultLine(&results[index]) < 1 {
+			continue
+		}
+		if primary >= 0 {
+			return -1
+		}
+		primary = index
+	}
+	return primary
 }
 
 func leanResultFor(result navigator.Result) (leanResult, bool) {
@@ -452,7 +488,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	// Source is the direct answer to inspect. Fit it before follow-up actions
 	// and candidate metadata so a tight budget cannot replace evidence with a
 	// redundant navigation suggestion.
-	if plan.evidence != nil {
+	if plan.evidence != nil && tool != "find" {
 		fitLeanEvidence(response, plan.evidence, budget)
 	}
 
@@ -461,7 +497,21 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	if primary >= 0 {
 		next := leanNextFor(tool, plan.results[primary].result)
 		candidate := coreLeanResult(plan.results[primary].lean)
-		if tryPrimaryLeanResult(response, candidate, next, budget) {
+		if tool == "find" && plan.evidence != nil && tryLeanResult(response, candidate, budget) {
+			selected = append(selected, primary)
+			fitLeanEvidence(response, plan.evidence, budget)
+			if response.Evidence == nil || slices.Contains(response.Truncated, "source") {
+				response.Evidence = nil
+				response.Next = next
+				if !leanFits(response, budget) && len(response.Results) > 0 {
+					response.Results[0].Symbol = ""
+				}
+				if !leanFits(response, budget) {
+					return false
+				}
+				fitLeanEvidence(response, plan.evidence, budget)
+			}
+		} else if tryPrimaryLeanResult(response, candidate, next, budget) {
 			selected = append(selected, primary)
 		}
 	}
@@ -657,44 +707,65 @@ func tryLeanResult(response *leanResponse, result leanResult, budget int) bool {
 }
 
 func fitLeanEvidence(response *leanResponse, source *leanEvidenceSource, budget int) {
-	evidence := &leanEvidence{Kind: "source", Start: source.start, Text: source.text}
+	evidence := &leanEvidence{
+		Kind: "source", Start: evidenceLocation(source.path, source.startLine), Text: source.text,
+	}
 	response.Evidence = evidence
 	if leanFits(response, budget) {
 		return
 	}
 	markLeanTruncated(response, "source")
-	lineEnds := completeLineEnds(source.text)
+	lines := strings.Split(source.text, "\n")
+	if len(lines) > 1 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	focus := source.focusLine - source.startLine
+	if focus < 0 || focus >= len(lines) {
+		response.Evidence = nil
+		return
+	}
+	if fitLeanEvidenceLines(
+		response, evidence, source.path, lines, 0, focus, source.startLine, budget,
+	) {
+		return
+	}
+	if fitLeanEvidenceLines(
+		response, evidence, source.path, lines, focus, focus, source.focusLine, budget,
+	) {
+		return
+	}
+	response.Evidence = nil
+}
+
+func fitLeanEvidenceLines(
+	response *leanResponse,
+	evidence *leanEvidence,
+	path string,
+	lines []string,
+	start, required int,
+	startLine, budget int,
+) bool {
 	best := -1
-	for low, high := 0, len(lineEnds)-1; low <= high; {
+	for low, high := required+1, len(lines); low <= high; {
 		middle := low + (high-low)/2
-		evidence.Text = source.text[:lineEnds[middle]]
-		if leanFits(response, budget) {
+		evidence.Start = evidenceLocation(path, startLine)
+		evidence.Text = strings.Join(lines[start:middle], "\n")
+		if evidence.Text != "" && leanFits(response, budget) {
 			best = middle
 			low = middle + 1
 		} else {
 			high = middle - 1
 		}
 	}
-	if best >= 0 {
-		evidence.Text = source.text[:lineEnds[best]]
-		return
+	if best < 0 {
+		return false
 	}
-	response.Evidence = nil
+	evidence.Text = strings.Join(lines[start:best], "\n")
+	return true
 }
 
-// completeLineEnds returns strict, non-empty prefix ends at source line
-// boundaries. Binary-searching these offsets never cuts a UTF-8 rune or line.
-func completeLineEnds(text string) []int {
-	if text == "" || !utf8.ValidString(text) {
-		return nil
-	}
-	ends := make([]int, 0, strings.Count(text, "\n"))
-	for index := range len(text) {
-		if text[index] == '\n' && index > 0 {
-			ends = append(ends, index)
-		}
-	}
-	return ends
+func evidenceLocation(path string, line int) string {
+	return fmt.Sprintf("%s:%d", path, line)
 }
 
 func actionableResultLine(result *navigator.Result) int {
@@ -727,7 +798,10 @@ func actionableResponseHint(tool string, full any, lean *leanResponse) string {
 		return structuredContentTextHint
 	}
 	if plan.evidence != nil {
-		return boundedLocationHint("Source", plan.evidence.start)
+		return boundedLocationHint(
+			"Source",
+			evidenceLocation(plan.evidence.path, plan.evidence.startLine),
+		)
 	}
 	if index := firstActionableResult(tool, plan.results); index >= 0 {
 		return leanNextHint(leanNextFor(tool, plan.results[index].result))
