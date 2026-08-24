@@ -90,8 +90,8 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("MCP tool-discovery payload: %d bytes", len(discoveryJSON))
-	if len(discoveryJSON) >= 4_700 {
-		t.Fatalf("MCP tool-discovery payload = %d bytes, want below 4700", len(discoveryJSON))
+	if len(discoveryJSON) >= 2_650 {
+		t.Fatalf("MCP tool-discovery payload = %d bytes, want below 2650", len(discoveryJSON))
 	}
 	wantProperties := map[string][]string{
 		"changed": {
@@ -164,13 +164,13 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		}
 		switch tool.Name {
 		case "changed":
-			if !strings.Contains(tool.Description, "Start bug/branch/PR work here") ||
+			if !strings.Contains(tool.Description, "bug/branch/PR") ||
 				!strings.Contains(tool.Description, "base-to-HEAD changes") {
 				t.Fatalf("changed description = %q", tool.Description)
 			}
 		case "find":
-			if !strings.Contains(tool.Description, "Exact identifier or path") ||
-				!strings.Contains(tool.Description, "matching changed PATH:LINE") {
+			if !strings.Contains(tool.Description, "exact symbol/path") ||
+				!strings.Contains(tool.Description, "definition includes source") {
 				t.Fatalf("find description = %q", tool.Description)
 			}
 			matchSchema := normalizedObject(t, properties["match"])
@@ -179,13 +179,13 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 				t.Fatalf("find match schema = %#v", matchSchema)
 			}
 		case "inspect":
-			if !strings.Contains(tool.Description, "bounded scope/imports/relations") ||
+			if !strings.Contains(tool.Description, "source/imports/relations") ||
 				!strings.Contains(tool.Description, "PATH:LINE") {
 				t.Fatalf("inspect description = %q", tool.Description)
 			}
 		case "outline":
-			if !strings.Contains(tool.Description, "Index-only definitions") ||
-				!strings.Contains(tool.Description, "inspect returned PATH:LINE") {
+			if !strings.Contains(tool.Description, "Index known file") ||
+				!strings.Contains(tool.Description, "inspect PATH:LINE") {
 				t.Fatalf("outline description = %q", tool.Description)
 			}
 		}
@@ -210,6 +210,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
+	directService := &service{view: view, base: fixture.base}
 	assertToolOutput(t, client, "changed", map[string]any{}, func() (navigator.ChangedResponse, error) {
 		return view.Changed(navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeAll,
@@ -227,6 +228,13 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
 			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
 		})
+		if err == nil {
+			response, err = directService.enrichUniqueSymbolFindWithScope(
+				ctx,
+				findInput{Query: "Helper"},
+				response,
+			)
+		}
 		return response, err
 	})
 	assertToolOutput(t, client, "find", map[string]any{
@@ -417,6 +425,505 @@ func TestServerFindRelatedActionIsAcceptedAndUseful(t *testing.T) {
 		references.Results[0].Location != "demo_test.go:3" ||
 		references.Results[0].Kind != "ref" {
 		t.Fatalf("related references = %#v", references)
+	}
+}
+
+func TestServerFindInlinesUniqueDefinitionScope(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "Helper", "match": "symbol", "include": "both",
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Evidence == nil || found.Evidence.Start != "demo.go:3" ||
+		!strings.Contains(found.Evidence.Text, "func Helper()") {
+		t.Fatalf("unique definition evidence = %#v in %s", found.Evidence, raw)
+	}
+	if found.Next != nil || len(raw) > structuredOutputBudget {
+		t.Fatalf("unique definition retained inspect = %#v (%d bytes)", found.Next, len(raw))
+	}
+	if len(found.Results) == 0 || found.Results[0].Signature != "func Helper() {}" {
+		t.Fatalf("unique definition signature = %#v in %s", found.Results, raw)
+	}
+	inspected, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "inspect", Arguments: map[string]any{"location": "demo.go:3"},
+	})
+	if err != nil || inspected.IsError {
+		t.Fatalf("inspect = %#v, %v", inspected, err)
+	}
+	inspectRaw, err := json.Marshal(inspected.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inspect leanResponse
+	if err := json.Unmarshal(inspectRaw, &inspect); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(found.Evidence, inspect.Evidence) {
+		t.Fatalf("find evidence = %#v, inspect evidence = %#v", found.Evidence, inspect.Evidence)
+	}
+}
+
+func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.WriteFile(
+		filepath.Join(fixture.root, "other.go"),
+		[]byte("package demo\n\nfunc Helper() {}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	call := func(arguments map[string]any) leanResponse {
+		t.Helper()
+		response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "find", Arguments: arguments,
+		})
+		if err != nil || response.IsError {
+			t.Fatalf("find = %#v, %v", response, err)
+		}
+		raw, err := json.Marshal(response.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) > structuredOutputBudget {
+			t.Fatalf("find response = %d bytes", len(raw))
+		}
+		var found leanResponse
+		if err := json.Unmarshal(raw, &found); err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+
+	ambiguous := call(map[string]any{
+		"query": "Helper", "match": "symbol", "include": "defs",
+	})
+	if ambiguous.Evidence != nil || ambiguous.Next == nil || len(ambiguous.Results) != 2 {
+		t.Fatalf("ambiguous definitions = %#v", ambiguous)
+	}
+	locations := []string{ambiguous.Results[0].Location, ambiguous.Results[1].Location}
+	sort.Strings(locations)
+	if !reflect.DeepEqual(locations, []string{"demo.go:3", "other.go:3"}) {
+		t.Fatalf("ambiguous locations = %q", locations)
+	}
+	truncatedAmbiguous := call(map[string]any{
+		"query": "Helper", "match": "symbol", "include": "defs", "limit": 1,
+	})
+	if truncatedAmbiguous.Evidence != nil || truncatedAmbiguous.Next == nil ||
+		!containsString(truncatedAmbiguous.Truncated, "results") {
+		t.Fatalf("truncated ambiguity claimed source = %#v", truncatedAmbiguous)
+	}
+
+	narrowed := call(map[string]any{
+		"query": "Helper", "match": "symbol", "include": "defs",
+		"path_globs": []string{"other.go"},
+	})
+	if narrowed.Evidence == nil || narrowed.Evidence.Start != "other.go:3" ||
+		narrowed.Next != nil {
+		t.Fatalf("narrowed definition = %#v", narrowed)
+	}
+}
+
+func TestServerFindOneDefinitionManyRefsVerifiesTruncatedUniqueness(t *testing.T) {
+	fixture := newFixture(t)
+	for index := range 5 {
+		content := fmt.Sprintf("package demo\n\nfunc Caller%d() { Helper() }\n", index)
+		if err := os.WriteFile(
+			filepath.Join(fixture.root, fmt.Sprintf("caller%d.go", index)),
+			[]byte(content),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "Helper", "match": "symbol", "include": "both", "limit": 2,
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Evidence == nil || found.Evidence.Start != "demo.go:3" ||
+		found.Next != nil || !containsString(found.Truncated, "results") ||
+		len(raw) > structuredOutputBudget {
+		t.Fatalf("truncated unique definition = %#v (%d bytes)", found, len(raw))
+	}
+
+	refsOnly, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "Helper", "match": "symbol", "include": "refs", "limit": 1,
+		},
+	})
+	if err != nil || refsOnly.IsError {
+		t.Fatalf("refs-only find = %#v, %v", refsOnly, err)
+	}
+	refsRaw, err := json.Marshal(refsOnly.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refs leanResponse
+	if err := json.Unmarshal(refsRaw, &refs); err != nil {
+		t.Fatal(err)
+	}
+	if refs.Evidence != nil || len(refs.Results) != 1 || refs.Results[0].Kind != "ref" {
+		t.Fatalf("refs-only find injected definition = %#v", refs)
+	}
+}
+
+func TestServerFindSourceEnrichmentHonorsFiltersAndChangedOnly(t *testing.T) {
+	fixture := newFixture(t)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	call := func(arguments map[string]any) leanResponse {
+		t.Helper()
+		response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "find", Arguments: arguments,
+		})
+		if err != nil || response.IsError {
+			t.Fatalf("find = %#v, %v", response, err)
+		}
+		raw, err := json.Marshal(response.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found leanResponse
+		if err := json.Unmarshal(raw, &found); err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+
+	excluded := call(map[string]any{
+		"query": "Helper", "match": "symbol", "include": "defs",
+		"exclude_globs": []string{"demo.go"},
+	})
+	if excluded.Outcome != string(navigator.FindOutcomeNone) ||
+		excluded.Evidence != nil || len(excluded.Results) != 0 {
+		t.Fatalf("excluded find = %#v", excluded)
+	}
+
+	changed := call(map[string]any{
+		"query": "Helper", "match": "auto", "include": "defs",
+		"changed_only": true,
+	})
+	if changed.Evidence == nil || changed.Evidence.Start != "demo.go:3" ||
+		changed.Next != nil {
+		t.Fatalf("changed-only source = %#v", changed)
+	}
+}
+
+func TestFindScopeEnrichmentPropagatesCancellation(t *testing.T) {
+	fixture := newFixture(t)
+	view, err := navigator.NewWithGit(fixture.root, fixture.git, fixture.gitSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &service{view: view, base: fixture.base}
+	input := findInput{Query: "Helper"}
+	original, err := view.Find("Helper", input.options(
+		navigator.IncludeBoth,
+		navigator.ReturnLocations,
+		fixture.base,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	enriched, err := service.enrichUniqueSymbolFindWithScope(context.Background(), input, original)
+	if err != nil {
+		t.Fatal(err)
+	}
+	primary := uniqueActionableDefinition(enriched.Results)
+	if primary < 0 || enriched.Results[primary].Signature != "func Helper() {}" {
+		t.Fatalf("enriched signature = %#v", enriched.Results)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = service.enrichUniqueSymbolFindWithScope(ctx, input, original)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("source enrichment error = %v, want context cancellation", err)
+	}
+}
+
+func TestServerFindKeepsColumnAwareSameLineDefinitionScope(t *testing.T) {
+	fixture := newFixture(t)
+	writeFixtureFile(t, fixture.root, `package demo
+func first() {}; func second() {
+	println("target body")
+}
+`)
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "second", "match": "symbol", "include": "defs",
+			"path_globs": []string{"demo.go"},
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Evidence == nil || found.Evidence.Start != "demo.go:2" ||
+		!strings.Contains(found.Evidence.Text, `println("target body")`) ||
+		found.Next != nil {
+		t.Fatalf("column-aware definition = %#v", found)
+	}
+}
+
+func TestServerFindRefusesSameLineSameNameOverloadEvidence(t *testing.T) {
+	fixture := newFixture(t)
+	if err := os.WriteFile(
+		filepath.Join(fixture.root, "Demo.java"),
+		[]byte("class Demo { void target() {} void target(int value) {} }\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "target", "match": "symbol", "include": "defs",
+			"path_globs": []string{"Demo.java"},
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Evidence != nil || found.Next == nil || len(found.Results) == 0 {
+		t.Fatalf("same-line overload claimed source = %#v", found)
+	}
+}
+
+func TestServerFindPreservesScopePreludeAndAllowsNameInParameters(t *testing.T) {
+	fixture := newFixture(t)
+	files := map[string]string{
+		"decorated.js": "@sealed\nclass DecoratedTarget {\n  method() {}\n}\n",
+		"repeated.py":  "def repeat_name(repeat_name):\n    return repeat_name\n",
+	}
+	for path, source := range files {
+		if err := os.WriteFile(filepath.Join(fixture.root, path), []byte(source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	call := func(t *testing.T, path, query string) leanResponse {
+		t.Helper()
+		response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+			Name: "find", Arguments: map[string]any{
+				"query": query, "match": "symbol", "include": "defs",
+				"path_globs": []string{path},
+			},
+		})
+		if err != nil || response.IsError {
+			t.Fatalf("find = %#v, %v", response, err)
+		}
+		raw, err := json.Marshal(response.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var found leanResponse
+		if err := json.Unmarshal(raw, &found); err != nil {
+			t.Fatal(err)
+		}
+		if len(raw) > structuredOutputBudget {
+			t.Fatalf("find output = %d bytes", len(raw))
+		}
+		return found
+	}
+
+	t.Run("decorator prelude", func(t *testing.T) {
+		found := call(t, "decorated.js", "DecoratedTarget")
+		if found.Evidence == nil || found.Evidence.Start != "decorated.js:1" ||
+			!strings.HasPrefix(found.Evidence.Text, "@sealed\nclass DecoratedTarget") ||
+			found.Next != nil || containsString(found.Truncated, "source") {
+			t.Fatalf("decorated source = %#v", found)
+		}
+	})
+
+	t.Run("parameter repeats symbol", func(t *testing.T) {
+		found := call(t, "repeated.py", "repeat_name")
+		if found.Evidence == nil || found.Evidence.Start != "repeated.py:1" ||
+			!strings.Contains(found.Evidence.Text, "def repeat_name(repeat_name):") ||
+			found.Next != nil {
+			t.Fatalf("repeated-name source = %#v", found)
+		}
+	})
+}
+
+func TestServerFindColonPathFallbackExecutesExactInspect(t *testing.T) {
+	fixture := newFixture(t)
+	path := "colon:dir/target.go"
+	if err := os.MkdirAll(filepath.Join(fixture.root, "colon:dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := "package colon\n\nfunc ColonTarget() {\n" +
+		strings.Repeat("\tprintln(\"bounded source line\")\n", defaultMaxCodeLines+20) +
+		"}\n"
+	if err := os.WriteFile(filepath.Join(fixture.root, path), []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "ColonTarget", "match": "symbol", "include": "defs",
+			"path_globs": []string{path},
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	location := path + ":3"
+	if found.Evidence == nil || found.Evidence.Start != location ||
+		!containsString(found.Truncated, "source") || found.Next == nil ||
+		found.Next.Tool != "inspect" || found.Next.Arguments["location"] != location {
+		t.Fatalf("colon-path find = %#v", found)
+	}
+
+	inspected, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: found.Next.Tool, Arguments: found.Next.Arguments,
+	})
+	if err != nil || inspected.IsError {
+		t.Fatalf("emitted inspect = %#v, %v", inspected, err)
+	}
+	inspectRaw, err := json.Marshal(inspected.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var scope leanResponse
+	if err := json.Unmarshal(inspectRaw, &scope); err != nil {
+		t.Fatal(err)
+	}
+	if scope.Target != location || scope.Evidence == nil || scope.Evidence.Start != location {
+		t.Fatalf("emitted inspect target = %#v", scope)
+	}
+}
+
+func TestServerFindUniqueDefinitionEvidenceAcrossLanguages(t *testing.T) {
+	fixture := newFixture(t)
+	tests := []struct {
+		path   string
+		symbol string
+		source string
+	}{
+		{path: "unique.go", symbol: "GoTarget", source: "package unique\n\nfunc GoTarget() {}\n"},
+		{path: "unique.py", symbol: "python_target", source: "def python_target():\n    return 1\n"},
+		{path: "unique.rs", symbol: "rust_target", source: "fn rust_target() {}\n"},
+		{path: "unique.js", symbol: "jsTarget", source: "function jsTarget() {}\n"},
+		{path: "unique.ts", symbol: "tsTarget", source: "function tsTarget(): void {}\n"},
+		{path: "Unique.java", symbol: "JavaTarget", source: "class JavaTarget {}\n"},
+		{path: "unique.c", symbol: "c_target", source: "void c_target(void) {}\n"},
+		{path: "unique.cpp", symbol: "cpp_target", source: "void cpp_target() {}\n"},
+		{path: "Unique.cs", symbol: "CSharpTarget", source: "class CSharpTarget {}\n"},
+		{path: "Unique.kt", symbol: "kotlinTarget", source: "fun kotlinTarget() {}\n"},
+		{path: "Unique.swift", symbol: "swiftTarget", source: "func swiftTarget() {}\n"},
+		{
+			path: "Unique.mod", symbol: "ModulaTarget",
+			source: "MODULE Unique;\nPROCEDURE ModulaTarget;\nBEGIN\nEND ModulaTarget;\nBEGIN\nEND Unique.\n",
+		},
+	}
+	for _, test := range tests {
+		if err := os.WriteFile(filepath.Join(fixture.root, test.path), []byte(test.source), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	for _, test := range tests {
+		t.Run(test.path, func(t *testing.T) {
+			response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+				Name: "find", Arguments: map[string]any{
+					"query": test.symbol, "match": "symbol", "include": "defs",
+					"path_globs": []string{test.path},
+				},
+			})
+			if err != nil || response.IsError {
+				t.Fatalf("find = %#v, %v", response, err)
+			}
+			raw, err := json.Marshal(response.StructuredContent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var found leanResponse
+			if err := json.Unmarshal(raw, &found); err != nil {
+				t.Fatal(err)
+			}
+			if len(raw) > structuredOutputBudget || found.Evidence == nil ||
+				!strings.Contains(found.Evidence.Text, test.symbol) || found.Next != nil ||
+				len(found.Results) != 1 ||
+				!strings.Contains(found.Results[0].Signature, test.symbol) {
+				t.Fatalf("cross-language source = %#v (%d bytes)", found, len(raw))
+			}
+		})
 	}
 }
 

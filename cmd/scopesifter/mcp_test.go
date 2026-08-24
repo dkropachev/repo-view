@@ -122,6 +122,24 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	}
 	response, err = session.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "find", Arguments: map[string]any{
+			"query": "Target", "match": "symbol", "include": "both",
+		},
+	})
+	if err != nil || response.IsError {
+		_ = session.Close()
+		t.Fatalf("find symbol = %#v, %v", response, err)
+	}
+	structured, err := json.Marshal(response.StructuredContent)
+	if err != nil || len(structured) > 1024 ||
+		!bytes.Contains(structured, []byte(`"evidence"`)) ||
+		!bytes.Contains(structured, []byte(`"start":"demo.go:3"`)) ||
+		!bytes.Contains(structured, []byte(`"text":"func Target() {}"`)) ||
+		bytes.Contains(structured, []byte(`"next"`)) {
+		_ = session.Close()
+		t.Fatalf("find symbol structured output = %s, %v", structured, err)
+	}
+	response, err = session.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
 			"query": "demo.go", "match": "path",
 		},
 	})
@@ -129,7 +147,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		_ = session.Close()
 		t.Fatalf("find path = %#v, %v", response, err)
 	}
-	structured, err := json.Marshal(response.StructuredContent)
+	structured, err = json.Marshal(response.StructuredContent)
 	if err != nil || !bytes.Contains(structured, []byte(`"outcome":"file"`)) ||
 		!bytes.Contains(structured, []byte(`"kind":"file"`)) ||
 		!bytes.Contains(structured, []byte(`"location":"demo.go"`)) {

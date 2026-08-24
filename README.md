@@ -108,12 +108,13 @@ Multiple includes are ORed; any matching exclude wins.
   includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
   and an actionable `hint` when nothing matched. Identifier findings honor
   `--include defs|refs|both`; default `both`.
-  CLI default return is `scope`; MCP v5 defaults to `locations`. Its `--limit`
+  CLI default return is `scope`; MCP v6 first resolves locations, then embeds
+  bounded source when exactly one actionable definition is present. Its `--limit`
   is shared across all supplied queries. Exact text such as a dependency module
   path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
   `query` always reports the requested selector; source-match JSON also retains
-  the legacy `symbol` field. MCP v5 accepts `query` instead of the v2 `symbol`
+  the legacy `symbol` field. MCP v6 accepts `query` instead of the v2 `symbol`
   input.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
@@ -136,7 +137,7 @@ Multiple includes are ORed; any matching exclude wins.
 
 ## MCP Lean Output
 
-MCP v5 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
+MCP v6 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
 and `outline`) but exposes only routing-critical inputs. Every successful call
 returns one stable structured envelope containing `target`, `outcome`, bounded
 `results`, semantic `truncated` fields, and at most one exact `next` action.
@@ -145,11 +146,15 @@ When a changed Go source has its exact `_test.go` counterpart, a complete
 Results retain complete `PATH:LINE` locations and prefer distinct files.
 
 Structured output is fixed at no more than 1 KiB. `inspect` spends available
-space on complete source lines in `evidence`; the other tools return locations
-without source or patch text. A separate non-JSON text hint is at most 160 bytes
-and names the first exact follow-up when one exists. There is no public full
-response or adaptive cache: progressive disclosure uses a targeted `inspect` or
-`outline` call. CLI and Go navigator response shapes are unchanged.
+space on complete source lines in `evidence`. A symbol `find` with exactly one
+actionable definition resolves that definition's bounded scope internally,
+may return source evidence plus a signature when budget permits, and omits a
+redundant self-`inspect` action only when evidence is complete.
+Ambiguous definitions remain location-only with an exact `inspect` follow-up;
+`changed` and `outline` also remain routing indexes without source or patch
+text. A separate non-JSON text hint is at most 160 bytes. There is no public
+full response or adaptive cache. CLI and Go navigator response shapes are
+unchanged.
 
 ## Codex Integration
 
