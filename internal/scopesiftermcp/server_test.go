@@ -226,7 +226,8 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 				t.Fatalf("find match schema = %#v", matchSchema)
 			}
 		case "inspect":
-			if !strings.Contains(tool.Description, "source/imports/relations") ||
+			if !strings.Contains(tool.Description, "complete scope") ||
+				!strings.Contains(tool.Description, "exact fallback") ||
 				!strings.Contains(tool.Description, "PATH:LINE") {
 				t.Fatalf("inspect description = %q", tool.Description)
 			}
@@ -494,7 +495,9 @@ func TestServerFindUniqueDefinitionStaysLocationIndex(t *testing.T) {
 	if err := json.Unmarshal(inspectRaw, &inspect); err != nil {
 		t.Fatal(err)
 	}
-	if inspect.Evidence == nil || !strings.Contains(inspect.Evidence.Text, "func Helper()") {
+	if inspect.Evidence == nil || inspect.Evidence.Kind != "scope" ||
+		inspect.Evidence.Start != "demo.go:3" || inspect.Evidence.Text != "func Helper() {}" ||
+		len(inspect.Results) != 0 || containsString(inspect.Truncated, "source") {
 		t.Fatalf("explicit inspect evidence = %#v", inspect.Evidence)
 	}
 }
@@ -804,7 +807,10 @@ func TestServerFindColonPathEmitsExecutableInspectLocation(t *testing.T) {
 	if err := json.Unmarshal(inspectRaw, &scope); err != nil {
 		t.Fatal(err)
 	}
-	if scope.Target != location || scope.Evidence == nil || scope.Evidence.Start != location {
+	if scope.Target != location || scope.Evidence != nil ||
+		!containsString(scope.Truncated, "source") || len(scope.Results) != 1 ||
+		scope.Results[0].Location != location || scope.Results[0].Kind != "scope" ||
+		bytes.Contains(inspectRaw, []byte("bounded source line")) {
 		t.Fatalf("emitted inspect target = %#v", scope)
 	}
 }
@@ -933,7 +939,7 @@ func TestChangedFileEnrichmentPreservesOutcomeAndLimit(t *testing.T) {
 	}
 }
 
-func TestServerAutoUsesLeanEvidenceWithinBudget(t *testing.T) {
+func TestServerAutoRejectsNavigatorTruncatedEvidence(t *testing.T) {
 	fixture := newFixture(t)
 	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
 	for index := range 200 {
@@ -958,9 +964,11 @@ func TestServerAutoUsesLeanEvidenceWithinBudget(t *testing.T) {
 	}
 	if len(autoJSON) > structuredOutputBudget ||
 		!bytes.Contains(autoJSON, []byte(`"target":"demo.go:6"`)) ||
-		!bytes.Contains(autoJSON, []byte(`"evidence"`)) ||
+		bytes.Contains(autoJSON, []byte(`"evidence"`)) ||
+		!bytes.Contains(autoJSON, []byte(`"location":"demo.go:6"`)) ||
+		!bytes.Contains(autoJSON, []byte(`"truncated":["source"]`)) ||
 		bytes.Contains(autoJSON, []byte(`"original_bytes"`)) ||
-		bytes.Contains(autoJSON, []byte("println(100)")) {
+		bytes.Contains(autoJSON, []byte("println(")) {
 		t.Fatalf("auto structured output (%d bytes) = %s", len(autoJSON), autoJSON)
 	}
 	if text := toolText(auto); text == "" || len(text) > maximumCompactTextBytes ||

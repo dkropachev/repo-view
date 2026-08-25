@@ -21,7 +21,7 @@ var approvedDynamicProcessFileSHA256 = map[string]string{
 	"internal/releaseartifacts/release.go":            "ea7a839576a744ec99ca22394e4823491ea36c12fd118ecb3f8e74cb18d5ae3c",
 	"internal/releaseartifacts/release_publish.go":    "e9e04148cc5ea4a0a656b2e09e11b3a4785aebed9817c8e3d42b0701c8868f34",
 	"internal/releaseartifacts/release_test.go":       "794fe0026e80696d9a8ea5172bcf8d8790e0afd9afb07ec4a4146cd4ff698340",
-	"internal/scopesiftermcp/server_test.go":          "cc19c3790aef17ab3d632d0139eb84198c26abaca507db3321f8d19851bf63d2",
+	"internal/scopesiftermcp/server_test.go":          "92b836ec1eb069e0e05148bb819057ff57b941e63b7b9fa27d725a696b143fab",
 	"internal/workflowrunner/runner.go":               "9798ab60e1e7c3592447f4d57e3b141ba6c7c6cb648d7f310354c96741c55184",
 	"internal/workflowrunner/runner_test.go":          "bb78ba1e7149e49e94e623e488a1e2d2e9006a8922a126f68ebe14f00d9b1402",
 	"navigator/git_identity.go":                       "797550ea84ca03e1493d624b1ed0743261160fbc72719fa3410e4b9c32edbb8d",
