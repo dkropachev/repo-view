@@ -42,6 +42,28 @@ func TestServicePropagatesRequestCancellation(t *testing.T) {
 	}
 }
 
+func TestTruncatedDefinitionVerificationPropagatesCancellation(t *testing.T) {
+	fixture := newFixture(t)
+	view, err := navigator.NewWithGit(fixture.root, fixture.git, fixture.gitSHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = (&service{view: view, base: fixture.base}).ensureUniqueFindDefinition(
+		ctx,
+		findInput{Query: "Helper", Include: "both"},
+		navigator.FindResponse{
+			Query: "Helper", MatchedAs: navigator.FindOutcomeSymbol,
+			Results:          []navigator.Result{{Path: "caller.go", Line: 3, Kind: "ref"}},
+			ResultsTruncated: true,
+		},
+	)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("definition verification error = %v, want context cancellation", err)
+	}
+}
+
 func TestBooleanSchemaHonorsDefault(t *testing.T) {
 	for _, want := range []bool{false, true} {
 		schema := booleanSchema(want)
@@ -170,7 +192,7 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			}
 		case "find":
 			if !strings.Contains(tool.Description, "exact symbol/path") ||
-				!strings.Contains(tool.Description, "definition includes source") {
+				!strings.Contains(tool.Description, "ranked locations") {
 				t.Fatalf("find description = %q", tool.Description)
 			}
 			matchSchema := normalizedObject(t, properties["match"])
@@ -210,7 +232,6 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx := context.Background()
-	directService := &service{view: view, base: fixture.base}
 	assertToolOutput(t, client, "changed", map[string]any{}, func() (navigator.ChangedResponse, error) {
 		return view.Changed(navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeAll,
@@ -222,20 +243,12 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	assertToolOutput(t, client, "find", map[string]any{
 		"query": "Helper",
 	}, func() (navigator.FindResponse, error) {
-		response, err := view.Find("Helper", navigator.Options{
+		return view.Find("Helper", navigator.Options{
 			Base: fixture.base, Include: navigator.IncludeBoth,
 			Match: navigator.FindMatchAuto, Return: navigator.ReturnLocations, Context: defaultContext,
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
 			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
 		})
-		if err == nil {
-			response, err = directService.enrichUniqueSymbolFindWithScope(
-				ctx,
-				findInput{Query: "Helper"},
-				response,
-			)
-		}
-		return response, err
 	})
 	assertToolOutput(t, client, "find", map[string]any{
 		"query": "missing.go", "match": "path",
@@ -428,7 +441,7 @@ func TestServerFindRelatedActionIsAcceptedAndUseful(t *testing.T) {
 	}
 }
 
-func TestServerFindInlinesUniqueDefinitionScope(t *testing.T) {
+func TestServerFindUniqueDefinitionStaysLocationIndex(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
@@ -450,15 +463,16 @@ func TestServerFindInlinesUniqueDefinitionScope(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Evidence == nil || found.Evidence.Start != "demo.go:3" ||
-		!strings.Contains(found.Evidence.Text, "func Helper()") {
-		t.Fatalf("unique definition evidence = %#v in %s", found.Evidence, raw)
+	if found.Evidence != nil || len(found.Results) < 1 ||
+		found.Results[0].Location != "demo.go:3" || found.Results[0].Kind != "def" {
+		t.Fatalf("unique definition index = %#v in %s", found, raw)
 	}
-	if found.Next != nil || len(raw) > structuredOutputBudget {
-		t.Fatalf("unique definition retained inspect = %#v (%d bytes)", found.Next, len(raw))
+	if found.Next == nil || found.Next.Tool != "inspect" ||
+		found.Next.Arguments["location"] != "demo.go:3" || len(raw) > structuredOutputBudget {
+		t.Fatalf("unique definition action = %#v (%d bytes)", found.Next, len(raw))
 	}
-	if len(found.Results) == 0 || found.Results[0].Signature != "func Helper() {}" {
-		t.Fatalf("unique definition signature = %#v in %s", found.Results, raw)
+	if found.Results[0].Signature != "" || bytes.Contains(raw, []byte("func Helper()")) {
+		t.Fatalf("find leaked source = %#v in %s", found.Results, raw)
 	}
 	inspected, err := client.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "inspect", Arguments: map[string]any{"location": "demo.go:3"},
@@ -474,8 +488,8 @@ func TestServerFindInlinesUniqueDefinitionScope(t *testing.T) {
 	if err := json.Unmarshal(inspectRaw, &inspect); err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(found.Evidence, inspect.Evidence) {
-		t.Fatalf("find evidence = %#v, inspect evidence = %#v", found.Evidence, inspect.Evidence)
+	if inspect.Evidence == nil || !strings.Contains(inspect.Evidence.Text, "func Helper()") {
+		t.Fatalf("explicit inspect evidence = %#v", inspect.Evidence)
 	}
 }
 
@@ -537,13 +551,14 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 		"query": "Helper", "match": "symbol", "include": "defs",
 		"path_globs": []string{"other.go"},
 	})
-	if narrowed.Evidence == nil || narrowed.Evidence.Start != "other.go:3" ||
-		narrowed.Next != nil {
+	if narrowed.Evidence != nil || len(narrowed.Results) != 1 ||
+		narrowed.Results[0].Location != "other.go:3" || narrowed.Next == nil ||
+		narrowed.Next.Arguments["location"] != "other.go:3" {
 		t.Fatalf("narrowed definition = %#v", narrowed)
 	}
 }
 
-func TestServerFindOneDefinitionManyRefsVerifiesTruncatedUniqueness(t *testing.T) {
+func TestServerFindOneDefinitionManyRefsStaysBoundedIndex(t *testing.T) {
 	fixture := newFixture(t)
 	for index := range 5 {
 		content := fmt.Sprintf("package demo\n\nfunc Caller%d() { Helper() }\n", index)
@@ -575,10 +590,11 @@ func TestServerFindOneDefinitionManyRefsVerifiesTruncatedUniqueness(t *testing.T
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Evidence == nil || found.Evidence.Start != "demo.go:3" ||
-		found.Next != nil || !containsString(found.Truncated, "results") ||
+	if found.Evidence != nil || found.Next == nil ||
+		found.Next.Arguments["location"] != "demo.go:3" ||
+		!containsString(found.Truncated, "results") ||
 		len(raw) > structuredOutputBudget {
-		t.Fatalf("truncated unique definition = %#v (%d bytes)", found, len(raw))
+		t.Fatalf("bounded definition index = %#v (%d bytes)", found, len(raw))
 	}
 
 	refsOnly, err := client.CallTool(context.Background(), &mcp.CallToolParams{
@@ -602,7 +618,7 @@ func TestServerFindOneDefinitionManyRefsVerifiesTruncatedUniqueness(t *testing.T
 	}
 }
 
-func TestServerFindSourceEnrichmentHonorsFiltersAndChangedOnly(t *testing.T) {
+func TestServerFindIndexHonorsFiltersAndChangedOnly(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
@@ -640,45 +656,14 @@ func TestServerFindSourceEnrichmentHonorsFiltersAndChangedOnly(t *testing.T) {
 		"query": "Helper", "match": "auto", "include": "defs",
 		"changed_only": true,
 	})
-	if changed.Evidence == nil || changed.Evidence.Start != "demo.go:3" ||
-		changed.Next != nil {
-		t.Fatalf("changed-only source = %#v", changed)
+	if changed.Evidence != nil || len(changed.Results) != 1 ||
+		changed.Results[0].Location != "demo.go:3" || changed.Next == nil ||
+		changed.Next.Arguments["location"] != "demo.go:3" {
+		t.Fatalf("changed-only index = %#v", changed)
 	}
 }
 
-func TestFindScopeEnrichmentPropagatesCancellation(t *testing.T) {
-	fixture := newFixture(t)
-	view, err := navigator.NewWithGit(fixture.root, fixture.git, fixture.gitSHA256)
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := &service{view: view, base: fixture.base}
-	input := findInput{Query: "Helper"}
-	original, err := view.Find("Helper", input.options(
-		navigator.IncludeBoth,
-		navigator.ReturnLocations,
-		fixture.base,
-	))
-	if err != nil {
-		t.Fatal(err)
-	}
-	enriched, err := service.enrichUniqueSymbolFindWithScope(context.Background(), input, original)
-	if err != nil {
-		t.Fatal(err)
-	}
-	primary := uniqueActionableDefinition(enriched.Results)
-	if primary < 0 || enriched.Results[primary].Signature != "func Helper() {}" {
-		t.Fatalf("enriched signature = %#v", enriched.Results)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err = service.enrichUniqueSymbolFindWithScope(ctx, input, original)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("source enrichment error = %v, want context cancellation", err)
-	}
-}
-
-func TestServerFindKeepsColumnAwareSameLineDefinitionScope(t *testing.T) {
+func TestServerFindKeepsColumnAwareSameLineDefinitionLocation(t *testing.T) {
 	fixture := newFixture(t)
 	writeFixtureFile(t, fixture.root, `package demo
 func first() {}; func second() {
@@ -706,108 +691,15 @@ func first() {}; func second() {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Evidence == nil || found.Evidence.Start != "demo.go:2" ||
-		!strings.Contains(found.Evidence.Text, `println("target body")`) ||
-		found.Next != nil {
+	if found.Evidence != nil || len(found.Results) != 1 ||
+		found.Results[0].Location != "demo.go:2" || found.Next == nil ||
+		found.Next.Arguments["location"] != "demo.go:2" ||
+		bytes.Contains(raw, []byte(`println("target body")`)) {
 		t.Fatalf("column-aware definition = %#v", found)
 	}
 }
 
-func TestServerFindRefusesSameLineSameNameOverloadEvidence(t *testing.T) {
-	fixture := newFixture(t)
-	if err := os.WriteFile(
-		filepath.Join(fixture.root, "Demo.java"),
-		[]byte("class Demo { void target() {} void target(int value) {} }\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	server := newFixtureServer(t, fixture)
-	client, closeSessions := connect(t, server)
-	defer closeSessions()
-
-	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: "find", Arguments: map[string]any{
-			"query": "target", "match": "symbol", "include": "defs",
-			"path_globs": []string{"Demo.java"},
-		},
-	})
-	if err != nil || response.IsError {
-		t.Fatalf("find = %#v, %v", response, err)
-	}
-	raw, err := json.Marshal(response.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var found leanResponse
-	if err := json.Unmarshal(raw, &found); err != nil {
-		t.Fatal(err)
-	}
-	if found.Evidence != nil || found.Next == nil || len(found.Results) == 0 {
-		t.Fatalf("same-line overload claimed source = %#v", found)
-	}
-}
-
-func TestServerFindPreservesScopePreludeAndAllowsNameInParameters(t *testing.T) {
-	fixture := newFixture(t)
-	files := map[string]string{
-		"decorated.js": "@sealed\nclass DecoratedTarget {\n  method() {}\n}\n",
-		"repeated.py":  "def repeat_name(repeat_name):\n    return repeat_name\n",
-	}
-	for path, source := range files {
-		if err := os.WriteFile(filepath.Join(fixture.root, path), []byte(source), 0o600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	server := newFixtureServer(t, fixture)
-	client, closeSessions := connect(t, server)
-	defer closeSessions()
-
-	call := func(t *testing.T, path, query string) leanResponse {
-		t.Helper()
-		response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-			Name: "find", Arguments: map[string]any{
-				"query": query, "match": "symbol", "include": "defs",
-				"path_globs": []string{path},
-			},
-		})
-		if err != nil || response.IsError {
-			t.Fatalf("find = %#v, %v", response, err)
-		}
-		raw, err := json.Marshal(response.StructuredContent)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var found leanResponse
-		if err := json.Unmarshal(raw, &found); err != nil {
-			t.Fatal(err)
-		}
-		if len(raw) > structuredOutputBudget {
-			t.Fatalf("find output = %d bytes", len(raw))
-		}
-		return found
-	}
-
-	t.Run("decorator prelude", func(t *testing.T) {
-		found := call(t, "decorated.js", "DecoratedTarget")
-		if found.Evidence == nil || found.Evidence.Start != "decorated.js:1" ||
-			!strings.HasPrefix(found.Evidence.Text, "@sealed\nclass DecoratedTarget") ||
-			found.Next != nil || containsString(found.Truncated, "source") {
-			t.Fatalf("decorated source = %#v", found)
-		}
-	})
-
-	t.Run("parameter repeats symbol", func(t *testing.T) {
-		found := call(t, "repeated.py", "repeat_name")
-		if found.Evidence == nil || found.Evidence.Start != "repeated.py:1" ||
-			!strings.Contains(found.Evidence.Text, "def repeat_name(repeat_name):") ||
-			found.Next != nil {
-			t.Fatalf("repeated-name source = %#v", found)
-		}
-	})
-}
-
-func TestServerFindColonPathFallbackExecutesExactInspect(t *testing.T) {
+func TestServerFindColonPathEmitsExecutableInspectLocation(t *testing.T) {
 	fixture := newFixture(t)
 	path := "colon:dir/target.go"
 	if err := os.MkdirAll(filepath.Join(fixture.root, "colon:dir"), 0o700); err != nil {
@@ -841,8 +733,8 @@ func TestServerFindColonPathFallbackExecutesExactInspect(t *testing.T) {
 		t.Fatal(err)
 	}
 	location := path + ":3"
-	if found.Evidence == nil || found.Evidence.Start != location ||
-		!containsString(found.Truncated, "source") || found.Next == nil ||
+	if found.Evidence != nil || len(found.Results) != 1 ||
+		found.Results[0].Location != location || found.Next == nil ||
 		found.Next.Tool != "inspect" || found.Next.Arguments["location"] != location {
 		t.Fatalf("colon-path find = %#v", found)
 	}
@@ -866,7 +758,7 @@ func TestServerFindColonPathFallbackExecutesExactInspect(t *testing.T) {
 	}
 }
 
-func TestServerFindUniqueDefinitionEvidenceAcrossLanguages(t *testing.T) {
+func TestServerFindDefinitionLocationsAcrossLanguages(t *testing.T) {
 	fixture := newFixture(t)
 	tests := []struct {
 		path   string
@@ -917,11 +809,13 @@ func TestServerFindUniqueDefinitionEvidenceAcrossLanguages(t *testing.T) {
 			if err := json.Unmarshal(raw, &found); err != nil {
 				t.Fatal(err)
 			}
-			if len(raw) > structuredOutputBudget || found.Evidence == nil ||
-				!strings.Contains(found.Evidence.Text, test.symbol) || found.Next != nil ||
-				len(found.Results) != 1 ||
-				!strings.Contains(found.Results[0].Signature, test.symbol) {
-				t.Fatalf("cross-language source = %#v (%d bytes)", found, len(raw))
+			if len(raw) > structuredOutputBudget || found.Evidence != nil ||
+				len(found.Results) != 1 || found.Results[0].Kind != "def" ||
+				found.Results[0].Symbol != test.symbol ||
+				!strings.HasPrefix(found.Results[0].Location, test.path+":") ||
+				found.Results[0].Signature != "" || found.Next == nil ||
+				found.Next.Arguments["location"] != found.Results[0].Location {
+				t.Fatalf("cross-language index = %#v (%d bytes)", found, len(raw))
 			}
 		})
 	}

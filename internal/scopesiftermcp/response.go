@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -201,12 +200,6 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		}
 		plan.resultsTruncated = response.ResultsTruncated
 		results = response.Results
-		if primary := uniqueActionableDefinition(results); primary >= 0 {
-			if evidence := inspectEvidenceSource(results[primary]); evidence != nil {
-				plan.evidence = evidence
-				plan.sourceTruncated = evidence.truncated
-			}
-		}
 	case *navigator.FindResponse:
 		if response == nil {
 			return plan, responseTypeError(tool, full)
@@ -407,21 +400,6 @@ func primaryInspectScope(location string, results []navigator.Result) int {
 	return -1
 }
 
-func uniqueActionableDefinition(results []navigator.Result) int {
-	primary := -1
-	for index := range results {
-		if results[index].Kind != "def" || results[index].Path == "" ||
-			actionableResultLine(&results[index]) < 1 {
-			continue
-		}
-		if primary >= 0 {
-			return -1
-		}
-		primary = index
-	}
-	return primary
-}
-
 func leanResultFor(result navigator.Result) (leanResult, bool) {
 	if result.Path == "" {
 		return leanResult{}, false
@@ -488,7 +466,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	// Source is the direct answer to inspect. Fit it before follow-up actions
 	// and candidate metadata so a tight budget cannot replace evidence with a
 	// redundant navigation suggestion.
-	if plan.evidence != nil && tool != "find" {
+	if plan.evidence != nil {
 		fitLeanEvidence(response, plan.evidence, budget)
 	}
 
@@ -497,21 +475,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	if primary >= 0 {
 		next := leanNextFor(tool, plan.results[primary].result)
 		candidate := coreLeanResult(plan.results[primary].lean)
-		if tool == "find" && plan.evidence != nil && tryLeanResult(response, candidate, budget) {
-			selected = append(selected, primary)
-			fitLeanEvidence(response, plan.evidence, budget)
-			if response.Evidence == nil || slices.Contains(response.Truncated, "source") {
-				response.Evidence = nil
-				response.Next = next
-				if !leanFits(response, budget) && len(response.Results) > 0 {
-					response.Results[0].Symbol = ""
-				}
-				if !leanFits(response, budget) {
-					return false
-				}
-				fitLeanEvidence(response, plan.evidence, budget)
-			}
-		} else if tryPrimaryLeanResult(response, candidate, next, budget) {
+		if tryPrimaryLeanResult(response, candidate, next, budget) {
 			selected = append(selected, primary)
 		}
 	}
@@ -573,9 +537,9 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 			{field: "signature", value: source.Signature},
 		} {
 			field, value := optional.field, optional.value
-			// Outline is an index: navigator signatures are definition source
-			// lines, so emitting them would duplicate the job of inspect.
-			if tool == "outline" && field == "signature" {
+			// Find and outline are indexes: navigator signatures are definition
+			// source lines, so emitting them would duplicate the job of inspect.
+			if (tool == "find" || tool == "outline") && field == "signature" {
 				continue
 			}
 			value, _ = boundedJSONString(value, maximumLeanResultBytes)
