@@ -26,11 +26,6 @@ var (
 	enforcedContextCap               string
 	enforcedMaxCodeLinesCap          string
 	enforcedMaxPatchLinesCap         string
-	enforcedNavigationRoot           string
-	enforcedNavigationBaseCommit     string
-	enforcedChangedReturn            string
-	enforcedChangedContext           string
-	enforcedNavigationSemantics      string
 	releaseRevision                  = "development"
 	releaseRevisionMarker            = "scopesifter.release-revision=development"
 )
@@ -122,10 +117,6 @@ func runFind(args []string) int {
 		fmt.Fprintln(os.Stderr, "find --match must be one of: auto, symbol, path")
 		return 2
 	}
-	if err := common.enforceNavigationSemantics("find", options); err != nil {
-		printCLIError(err)
-		return 2
-	}
 	if options.Limit > 0 && options.Limit < len(queries) {
 		fmt.Fprintf(
 			os.Stderr,
@@ -136,7 +127,7 @@ func runFind(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudgetFor("find")
+	budget, err := consumeNavigationBudget()
 	if err != nil {
 		printCLIError(err)
 		return 2
@@ -222,10 +213,6 @@ func runInspect(args []string) int {
 		printCLIError(err)
 		return 2
 	}
-	if err := common.enforceNavigationSemantics("inspect", options); err != nil {
-		printCLIError(err)
-		return 2
-	}
 	if options.Limit > 0 && options.Limit < len(locations) {
 		fmt.Fprintf(
 			os.Stderr,
@@ -236,7 +223,7 @@ func runInspect(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudgetFor("inspect")
+	budget, err := consumeNavigationBudget()
 	if err != nil {
 		printCLIError(err)
 		return 2
@@ -335,10 +322,6 @@ func runOutline(args []string) int {
 		printCLIError(err)
 		return 2
 	}
-	if err := common.enforceNavigationSemantics("outline", options); err != nil {
-		printCLIError(err)
-		return 2
-	}
 	if options.Limit > 0 && options.Limit < len(paths) {
 		fmt.Fprintf(
 			os.Stderr,
@@ -349,7 +332,7 @@ func runOutline(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudgetFor("outline")
+	budget, err := consumeNavigationBudget()
 	if err != nil {
 		printCLIError(err)
 		return 2
@@ -442,11 +425,7 @@ func runChanged(args []string) int {
 		printCLIError(err)
 		return 2
 	}
-	if err := common.enforceNavigationSemantics("changed", opts); err != nil {
-		printCLIError(err)
-		return 2
-	}
-	budget, err := consumeNavigationBudgetFor("changed")
+	budget, err := consumeNavigationBudget()
 	if err != nil {
 		printCLIError(err)
 		return 2
@@ -454,18 +433,6 @@ func runChanged(args []string) int {
 	response, err := view.Changed(opts)
 	if err != nil {
 		printCLIError(err)
-		return 1
-	}
-	if enabled, configErr := enforcedNavigationSemanticsEnabled(); configErr != nil {
-		printCLIError(configErr)
-		return 2
-	} else if enabled && response.BaseCommit != enforcedNavigationBaseCommit {
-		fmt.Fprintf(
-			os.Stderr,
-			"changed response base commit %s does not match enforced base commit %s\n",
-			response.BaseCommit,
-			enforcedNavigationBaseCommit,
-		)
 		return 1
 	}
 	response.NavigationBudget = budget
@@ -528,12 +495,22 @@ func (c commonFlags) buildOptions(include navigator.Include) (navigator.Options,
 	if err != nil {
 		return navigator.Options{}, err
 	}
-	maxCodeLinesSet := false
+	visited := make(map[string]bool)
 	c.flags.Visit(func(option *flag.Flag) {
-		if option.Name == "max-code-lines" {
-			maxCodeLinesSet = true
-		}
+		visited[option.Name] = true
 	})
+	for _, option := range []struct {
+		value       *int
+		name        string
+		environment string
+	}{
+		{name: "limit", environment: "SCOPESIFTER_LIMIT_CAP", value: c.limit},
+		{name: "context", environment: "SCOPESIFTER_CONTEXT_CAP", value: c.context},
+		{name: "max-code-lines", environment: "SCOPESIFTER_MAX_CODE_LINES_CAP", value: c.maxCodeLines},
+		{name: "max-patch-lines", environment: "SCOPESIFTER_MAX_PATCH_LINES_CAP", value: c.maxPatchLines},
+	} {
+		clampUnspecifiedOptionToCap(visited, option.name, option.environment, option.value)
+	}
 	if *c.maxCodeLines < 1 {
 		return navigator.Options{}, fmt.Errorf("--max-code-lines must be positive; use --return locations to omit code")
 	}
@@ -569,7 +546,7 @@ func (c commonFlags) buildOptions(include navigator.Include) (navigator.Options,
 	} {
 		if cap.option == "--max-code-lines" &&
 			options.Return == navigator.ReturnLocations &&
-			!maxCodeLinesSet {
+			!visited["max-code-lines"] {
 			continue
 		}
 		if err := enforceOptionCap(cap.option, cap.value, cap.env); err != nil {
@@ -579,209 +556,23 @@ func (c commonFlags) buildOptions(include navigator.Include) (navigator.Options,
 	return options, nil
 }
 
-func (c commonFlags) enforceNavigationSemantics(
-	subcommand string,
-	options navigator.Options,
-) error {
-	enabled, err := enforcedNavigationSemanticsEnabled()
-	if err != nil || !enabled {
-		return err
+func clampUnspecifiedOptionToCap(
+	visited map[string]bool,
+	option string,
+	environment string,
+	value *int,
+) {
+	if visited[option] {
+		return
 	}
-
-	visited := make(map[string]bool)
-	c.flags.Visit(func(option *flag.Flag) {
-		visited[option.Name] = true
-	})
-	for _, option := range []string{
-		"root",
-		"return",
-		"context",
-		"limit",
-		"max-code-lines",
-		"max-patch-lines",
-		"json",
-	} {
-		if !visited[option] {
-			return fmt.Errorf(
-				"mechanically enforced navigation requires explicit --%s",
-				option,
-			)
-		}
-	}
-	if !*c.jsonOut {
-		return fmt.Errorf("mechanically enforced navigation requires --json")
-	}
-	if options.Limit < 1 {
-		return fmt.Errorf("mechanically enforced navigation requires a positive --limit")
-	}
-	if options.MaxCodeLines < 1 {
-		return fmt.Errorf(
-			"mechanically enforced navigation requires a positive --max-code-lines",
-		)
-	}
-	if options.MaxPatchLines < 1 {
-		return fmt.Errorf(
-			"mechanically enforced navigation requires a positive --max-patch-lines",
-		)
-	}
-	if options.Context < 0 ||
-		(options.Context == 0 && options.Return != navigator.ReturnLocations) {
-		return fmt.Errorf(
-			"mechanically enforced navigation requires a positive --context unless --return locations is used",
-		)
-	}
-
-	root, err := canonicalDirectory(*c.root)
-	if err != nil {
-		return fmt.Errorf("resolve --root: %w", err)
-	}
-	requiredRoot, err := canonicalDirectory(enforcedNavigationRoot)
-	if err != nil {
-		return fmt.Errorf("resolve enforced navigation root: %w", err)
-	}
-	if root != requiredRoot {
-		return fmt.Errorf(
-			"--root resolves to %s, want enforced navigation root %s",
-			root,
-			requiredRoot,
-		)
-	}
-
-	if subcommand != "changed" {
-		return nil
-	}
-	if !visited["base"] {
-		return fmt.Errorf(
-			"mechanically enforced changed navigation requires explicit --base",
-		)
-	}
-	if *c.base != enforcedNavigationBaseCommit {
-		return fmt.Errorf(
-			"--base %s does not match enforced base commit %s",
-			*c.base,
-			enforcedNavigationBaseCommit,
-		)
-	}
-	if string(options.Return) != enforcedChangedReturn {
-		return fmt.Errorf(
-			"changed --return %s does not match enforced return %s",
-			options.Return,
-			enforcedChangedReturn,
-		)
-	}
-	requiredContext, err := strconv.Atoi(enforcedChangedContext)
-	if err != nil || requiredContext < 0 {
-		return fmt.Errorf(
-			"invalid mechanically enforced changed context: %q",
-			enforcedChangedContext,
-		)
-	}
-	if options.Context != requiredContext {
-		return fmt.Errorf(
-			"changed --context %d does not match enforced context %d",
-			options.Context,
-			requiredContext,
-		)
-	}
-	for _, required := range []struct {
-		option      string
-		environment string
-		value       int
-	}{
-		{option: "--limit", environment: "SCOPESIFTER_LIMIT_CAP", value: options.Limit},
-		{option: "--max-code-lines", environment: "SCOPESIFTER_MAX_CODE_LINES_CAP", value: options.MaxCodeLines},
-		{option: "--max-patch-lines", environment: "SCOPESIFTER_MAX_PATCH_LINES_CAP", value: options.MaxPatchLines},
-	} {
-		raw, ok := enforcedOptionCap(required.environment)
-		if !ok {
-			return fmt.Errorf(
-				"mechanically enforced changed navigation lacks %s",
-				required.environment,
-			)
-		}
-		expected, parseErr := strconv.Atoi(raw)
-		if parseErr != nil || expected < 1 {
-			return fmt.Errorf(
-				"%s must be a positive integer: %s",
-				required.environment,
-				raw,
-			)
-		}
-		if required.value != expected {
-			return fmt.Errorf(
-				"changed %s %d does not match enforced value %d",
-				required.option,
-				required.value,
-				expected,
-			)
-		}
-	}
-	return nil
-}
-
-func canonicalDirectory(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := filepath.EvalSymlinks(absolute)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("not a directory: %s", path)
-	}
-	return filepath.Clean(resolved), nil
-}
-
-func enforcedNavigationSemanticsEnabled() (bool, error) {
-	configured := enforcedNavigationSemantics != "" ||
-		enforcedNavigationRoot != "" ||
-		enforcedNavigationBaseCommit != "" ||
-		enforcedChangedReturn != "" ||
-		enforcedChangedContext != ""
+	raw, configured := enforcedOptionCap(environment)
 	if !configured {
-		return false, nil
+		return
 	}
-	if enforcedNavigationSemantics != "1" {
-		return false, fmt.Errorf(
-			"invalid mechanically enforced navigation semantics marker: %q",
-			enforcedNavigationSemantics,
-		)
+	limit, err := strconv.Atoi(raw)
+	if err == nil && limit >= 0 && *value > limit {
+		*value = limit
 	}
-	if enforcedNavigationRoot == "" ||
-		enforcedNavigationBaseCommit == "" ||
-		enforcedChangedReturn == "" ||
-		enforcedChangedContext == "" ||
-		enforcedNavigationCommandCap == "" ||
-		enforcedNavigationTranscriptPath == "" ||
-		enforcedLimitCap == "" ||
-		enforcedContextCap == "" ||
-		enforcedMaxCodeLinesCap == "" ||
-		enforcedMaxPatchLinesCap == "" {
-		return false, fmt.Errorf(
-			"mechanically enforced navigation semantics configuration is incomplete",
-		)
-	}
-	if !validFullGitObjectID(enforcedNavigationBaseCommit) {
-		return false, fmt.Errorf(
-			"invalid mechanically enforced base commit: %q",
-			enforcedNavigationBaseCommit,
-		)
-	}
-	switch enforcedChangedReturn {
-	case "locations", "line", "context", "scope":
-	default:
-		return false, fmt.Errorf(
-			"invalid mechanically enforced changed return: %q",
-			enforcedChangedReturn,
-		)
-	}
-	return true, nil
 }
 
 func validFullGitObjectID(value string) bool {
@@ -837,12 +628,6 @@ func enforcedOptionCap(environment string) (string, bool) {
 }
 
 func consumeNavigationBudget() (*navigator.NavigationBudget, error) {
-	return consumeNavigationBudgetFor("")
-}
-
-func consumeNavigationBudgetFor(
-	subcommand string,
-) (*navigator.NavigationBudget, error) {
 	rawLimit := enforcedNavigationCommandCap
 	configured := rawLimit != ""
 	if !configured {
@@ -859,17 +644,9 @@ func consumeNavigationBudgetFor(
 		)
 	}
 	if enforcedNavigationTranscriptPath != "" {
-		return consumeNavigationTranscriptBudgetFor(
+		return consumeNavigationTranscriptBudget(
 			enforcedNavigationTranscriptPath,
 			limit,
-			subcommand,
-		)
-	}
-	if enabled, semanticsErr := enforcedNavigationSemanticsEnabled(); semanticsErr != nil {
-		return nil, semanticsErr
-	} else if enabled {
-		return nil, fmt.Errorf(
-			"mechanically enforced navigation requires a live transcript",
 		)
 	}
 	statePath := os.Getenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE")
@@ -1039,14 +816,6 @@ func acquireNavigationBudgetLock(statePath string) (func() error, error) {
 }
 
 func consumeNavigationTranscriptBudget(path string, limit int) (*navigator.NavigationBudget, error) {
-	return consumeNavigationTranscriptBudgetFor(path, limit, "")
-}
-
-func consumeNavigationTranscriptBudgetFor(
-	path string,
-	limit int,
-	subcommand string,
-) (*navigator.NavigationBudget, error) {
 	for range 100 {
 		state, err := navigationTranscriptStateFor(path)
 		if err != nil {
@@ -1055,22 +824,6 @@ func consumeNavigationTranscriptBudgetFor(
 		if state.started > state.completed {
 			if state.started > limit {
 				return nil, fmt.Errorf("scopesifter navigation command budget exhausted: %d/%d used", limit, limit)
-			}
-			if enabled, semanticsErr := enforcedNavigationSemanticsEnabled(); semanticsErr != nil {
-				return nil, semanticsErr
-			} else if enabled {
-				if state.started != state.completed+1 {
-					return nil, fmt.Errorf(
-						"navigation transcript has %d unfinished scopesifter commands",
-						state.started-state.completed,
-					)
-				}
-				if err := validateNavigationSequence(
-					state.subcommands,
-					subcommand,
-				); err != nil {
-					return nil, err
-				}
 			}
 			return &navigator.NavigationBudget{
 				Used:      state.started,
@@ -1084,9 +837,8 @@ func consumeNavigationTranscriptBudgetFor(
 }
 
 type navigationTranscriptState struct {
-	subcommands []string
-	started     int
-	completed   int
+	started   int
+	completed int
 }
 
 func navigationTranscriptStateFor(
@@ -1131,7 +883,6 @@ func navigationTranscriptStateFor(
 		switch event.Type {
 		case "item.started":
 			state.started++
-			state.subcommands = append(state.subcommands, subcommand)
 		case "item.completed":
 			state.completed++
 		}
@@ -1143,39 +894,6 @@ func navigationTranscriptStateFor(
 		)
 	}
 	return state, nil
-}
-
-func validateNavigationSequence(
-	subcommands []string,
-	current string,
-) error {
-	if len(subcommands) == 0 {
-		return fmt.Errorf("navigation transcript has no scopesifter invocation")
-	}
-	if subcommands[0] != "changed" {
-		return fmt.Errorf(
-			"the first scopesifter navigation invocation must be changed",
-		)
-	}
-	changedCount := 0
-	for _, subcommand := range subcommands {
-		if subcommand == "changed" {
-			changedCount++
-		}
-	}
-	if changedCount != 1 {
-		return fmt.Errorf(
-			"scopesifter changed must be invoked exactly once, got %d",
-			changedCount,
-		)
-	}
-	if current == "" || subcommands[len(subcommands)-1] != current {
-		return fmt.Errorf(
-			"current scopesifter %s invocation is not the latest navigation transcript entry",
-			current,
-		)
-	}
-	return nil
 }
 
 func (c commonFlags) resolvedReturn() (navigator.Return, error) {

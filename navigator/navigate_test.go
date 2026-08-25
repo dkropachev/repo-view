@@ -27,7 +27,7 @@ func TestFindAutoFallsBackToRepositoryPathsAndReportsFinding(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.Query != "scopesifter-validate" || response.Symbol != response.Query ||
+	if response.Query != "scopesifter-validate" ||
 		response.MatchedAs != FindOutcomeFile ||
 		!slices.Equal(response.SearchedAs, []FindMatch{FindMatchSymbol, FindMatchPath}) ||
 		response.Hint != "" {
@@ -79,9 +79,15 @@ func caller() { selectSymbols() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(automaticJSON, []byte(`"query":"selectSymbols"`)) ||
-		!bytes.Contains(automaticJSON, []byte(`"symbol":"selectSymbols"`)) {
-		t.Fatalf("identifier JSON lost compatibility fields: %s", automaticJSON)
+	var automaticObject map[string]any
+	if err := json.Unmarshal(automaticJSON, &automaticObject); err != nil {
+		t.Fatal(err)
+	}
+	if automaticObject["query"] != "selectSymbols" {
+		t.Fatalf("identifier JSON query = %#v", automaticObject["query"])
+	}
+	if _, found := automaticObject["symbol"]; found {
+		t.Fatalf("identifier JSON has a redundant top-level symbol: %s", automaticJSON)
 	}
 
 	paths, err := view.Find("selectSymbols", Options{
@@ -335,15 +341,15 @@ func third() { Bravo() }
 	if len(responses) != 3 {
 		t.Fatalf("responses = %#v", responses)
 	}
-	if responses[0].Symbol != "Alpha" || len(responses[0].Results) != 1 ||
+	if responses[0].Query != "Alpha" || len(responses[0].Results) != 1 ||
 		!responses[0].ResultsTruncated {
 		t.Fatalf("Alpha response = %#v", responses[0])
 	}
-	if responses[1].Symbol != "Bravo" || len(responses[1].Results) != 1 ||
+	if responses[1].Query != "Bravo" || len(responses[1].Results) != 1 ||
 		responses[1].ResultsTruncated {
 		t.Fatalf("Bravo response = %#v", responses[1])
 	}
-	if responses[2].Symbol != "Missing" || responses[2].Results == nil ||
+	if responses[2].Query != "Missing" || responses[2].Results == nil ||
 		len(responses[2].Results) != 0 || responses[2].ResultsTruncated {
 		t.Fatalf("Missing response = %#v", responses[2])
 	}
@@ -355,7 +361,7 @@ func third() { Bravo() }
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(exhausted) != 1 || exhausted[0].Symbol != "Alpha" ||
+	if len(exhausted) != 1 || exhausted[0].Query != "Alpha" ||
 		len(exhausted[0].Results) != 1 || !exhausted[0].ResultsTruncated {
 		t.Fatalf("exhausted responses = %#v", exhausted)
 	}

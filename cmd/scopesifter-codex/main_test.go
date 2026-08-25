@@ -23,8 +23,8 @@ func TestMain(m *testing.M) {
 		fmt.Printf("BUDGET=%s\n", os.Getenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE"))
 		fmt.Printf("COMMAND_CAP=%s\n", os.Getenv("SCOPESIFTER_NAVIGATION_COMMAND_CAP"))
 		joined := strings.Join(os.Args[1:], "\n")
-		fmt.Printf("HAS_INSTRUCTIONS=%t\n", strings.Contains(joined, "Use scopesifter as the primary code-navigation tool."))
-		fmt.Printf("HAS_ADAPTIVE=%t\n", strings.Contains(joined, "start with changed"))
+		fmt.Printf("HAS_INSTRUCTIONS=%t\n", strings.Contains(joined, "ScopeSifter CLI is available:"))
+		fmt.Printf("HAS_FORCED=%t\n", strings.Contains(joined, "start with changed") || strings.Contains(joined, "Pick exactly one initial command"))
 		fmt.Printf("HAS_REASONING=%t\n", strings.Contains(joined, `model_reasoning_effort="medium"`))
 		fmt.Printf("HAS_ORIGINAL_ARGV=%t\n", strings.HasSuffix(joined, "exec\n--json\nprompt"))
 		os.Exit(31)
@@ -74,10 +74,9 @@ func TestCommandRejectsInvalidConfigurationBeforeBuild(t *testing.T) {
 		environment string
 		want        string
 	}{
-		{"zero result limit", "SCOPESIFTER_CHANGED_LIMIT=0", "changed_limit must be a positive integer"},
-		{"zero code line cap", "SCOPESIFTER_CHANGED_MAX_CODE_LINES=0", "changed_max_code_lines must be a positive integer"},
-		{"zero patch line cap", "SCOPESIFTER_CHANGED_MAX_PATCH_LINES=0", "changed_max_patch_lines must be a positive integer"},
-		{"context above cap", "SCOPESIFTER_CHANGED_CONTEXT=21", "changed_context 21 exceeds navigation_context_cap 20"},
+		{"zero result limit", "SCOPESIFTER_LIMIT_CAP=0", "SCOPESIFTER_LIMIT_CAP must be a positive integer"},
+		{"zero code line cap", "SCOPESIFTER_MAX_CODE_LINES_CAP=0", "SCOPESIFTER_MAX_CODE_LINES_CAP must be a positive integer"},
+		{"zero patch line cap", "SCOPESIFTER_MAX_PATCH_LINES_CAP=0", "SCOPESIFTER_MAX_PATCH_LINES_CAP must be a positive integer"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			command := exec.Command(binary, "exec")
@@ -121,10 +120,6 @@ func TestCommandBuildsAndRunsCodexWithFailClosedEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	binDir := filepath.Join(temporary, "run directory")
-	requiredRoot := filepath.Join(temporary, "target root")
-	if err := os.Mkdir(requiredRoot, 0o700); err != nil {
-		t.Fatal(err)
-	}
 	command := exec.Command(launcher, "exec", "--json", "prompt")
 	command.Dir = root
 	baseEnvironment := make([]string, 0, len(os.Environ()))
@@ -139,19 +134,13 @@ func TestCommandBuildsAndRunsCodexWithFailClosedEnvironment(t *testing.T) {
 		"SCOPESIFTER_CODEX_TEST_HELPER=1",
 		"SCOPESIFTER_CACHE_DIR="+filepath.Join(temporary, "cache"),
 		"SCOPESIFTER_BIN_DIR="+binDir,
-		"SCOPESIFTER_CHANGED_LIMIT=22",
-		"SCOPESIFTER_CHANGED_MAX_CODE_LINES=62",
-		"SCOPESIFTER_CHANGED_MAX_PATCH_LINES=302",
+		"SCOPESIFTER_LIMIT_CAP=22",
+		"SCOPESIFTER_CONTEXT_CAP=24",
+		"SCOPESIFTER_MAX_CODE_LINES_CAP=62",
+		"SCOPESIFTER_MAX_PATCH_LINES_CAP=302",
 		"SCOPESIFTER_REASONING_EFFORT=medium",
-		"SCOPESIFTER_NAVIGATION_POLICY=adaptive",
-		"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=24",
 		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=2",
 		"SCOPESIFTER_NAVIGATION_BUDGET_FILE=/must/not/leak",
-		"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1",
-		"SCOPESIFTER_REQUIRED_ROOT="+requiredRoot,
-		"SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"SCOPESIFTER_REQUIRED_CHANGED_RETURN=context",
-		"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=4",
 	)
 	output, commandErr := command.CombinedOutput()
 	var exitError *exec.ExitError
@@ -168,7 +157,7 @@ func TestCommandBuildsAndRunsCodexWithFailClosedEnvironment(t *testing.T) {
 		"BUDGET=\n",
 		"COMMAND_CAP=\n",
 		"HAS_INSTRUCTIONS=true",
-		"HAS_ADAPTIVE=true",
+		"HAS_FORCED=false",
 		"HAS_REASONING=true",
 		"HAS_ORIGINAL_ARGV=true",
 	} {

@@ -108,14 +108,12 @@ Multiple includes are ORed; any matching exclude wins.
   includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
   and an actionable `hint` when nothing matched. Identifier findings honor
   `--include defs|refs|both`; default `both`.
-  CLI default return is `scope`; MCP v10 returns a bounded location index and
+  CLI default return is `scope`; MCP v1 returns a bounded location index and
   leaves source retrieval to `inspect`. Its `--limit` is shared across all
   supplied queries. Exact text such as a dependency module
   path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
-  `query` always reports the requested selector; source-match JSON also retains
-  the legacy `symbol` field. MCP v10 accepts `query` instead of the v2 `symbol`
-  input.
+  `query` always reports the requested selector.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
   symbol results are all needed in one response.
@@ -137,7 +135,7 @@ Multiple includes are ORed; any matching exclude wins.
 
 ## MCP Lean Output
 
-MCP v10 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
+MCP v1 provides four explicit navigation verbs (`changed`, `find`, `inspect`,
 and `outline`) but exposes only routing-critical inputs. Every successful call
 returns one stable structured envelope containing `target`, `outcome`, bounded
 `results`, and semantic `truncated` fields.
@@ -152,8 +150,7 @@ Structured output is fixed at no more than 1 KiB. `find`, `changed`, and
 Otherwise it emits no code, retains the exact inspected `PATH:LINE` result, and
 marks `source` truncated. Separate text content is the constant
 `See structuredContent.` and never repeats a target or structured JSON.
-There is no public full response or adaptive cache. CLI and Go navigator
-response shapes are unchanged.
+MCP always returns this lean response shape.
 
 ## Codex Integration
 
@@ -171,28 +168,31 @@ $ bin/scopesifter-codex exec \
   "Explain this branch compared with main."
 ```
 
-The launcher defaults to a bounded navigation profile:
+The launcher uses a bounded navigation profile:
 
 ```text
-SCOPESIFTER_CHANGED_RETURN=context
-SCOPESIFTER_CHANGED_CONTEXT=4
-SCOPESIFTER_CHANGED_LIMIT=20
-SCOPESIFTER_CHANGED_MAX_CODE_LINES=60
-SCOPESIFTER_CHANGED_MAX_PATCH_LINES=300
+SCOPESIFTER_LIMIT_CAP=20
+SCOPESIFTER_CONTEXT_CAP=20
+SCOPESIFTER_MAX_CODE_LINES_CAP=60
+SCOPESIFTER_MAX_PATCH_LINES_CAP=300
 SCOPESIFTER_REASONING_EFFORT=high
 SCOPESIFTER_ANSWER_GUARD=on
 ```
 
 Each value can be overridden for one invocation. `SCOPESIFTER_ANSWER_GUARD`
 accepts `on|off`; reasoning accepts `inherit|low|medium|high|xhigh|ultra`.
-The launcher compiles the advertised navigation ceilings into every child
-`scopesifter` binary: result limit `20`, context `20`, embedded code `60`, and
-changed patch `300`. Environment values are fallback-only, so a command cannot
-disable these ceilings with `env -u`. A command that requests more exits with
-an explicit cap error and is counted as a navigation-bound violation by the
-transcript validator.
-`SCOPESIFTER_NAVIGATION_CONTEXT_CAP` overrides the default context ceiling; the
-other ceilings follow their corresponding `SCOPESIFTER_CHANGED_*` values.
+The launcher tells Codex that the CLI is available for exact symbols, paths,
+locations, and change maps, and to use it only when it replaces shell
+navigation. It never requires ScopeSifter as a first action or prescribes a
+navigation sequence. The optional answer guard and the child binary's safety
+ceilings are independent. With the defaults above, the launcher compiles result
+limit `20`, context `20`, embedded code `60`, and changed patch `300` ceilings
+into every child `scopesifter` binary.
+Environment values are fallback-only, so a command cannot disable these
+ceilings with `env -u`. When a capped child command omits an option whose CLI
+default is above its ceiling, the omitted default is reduced to the ceiling;
+an explicit request above a ceiling still exits with a cap error and is counted
+as a navigation-bound violation by the transcript validator.
 When both `SCOPESIFTER_NAVIGATION_COMMAND_CAP` and
 `SCOPESIFTER_NAVIGATION_BUDGET_FILE` are set in a writable integration, JSON
 responses include `navigation_budget` with `used`, `limit`, and `remaining`,

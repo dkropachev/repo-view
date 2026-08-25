@@ -13,21 +13,21 @@ import (
 	"github.com/yapless/scopesifter/navigator"
 )
 
-func TestAutoUsesStableLeanShapeAcrossOriginalSizeBoundary(t *testing.T) {
+func TestLeanUsesStableShapeAcrossOriginalSizeBoundary(t *testing.T) {
 	for _, budget := range []int{1024, 1536, 2048, 2560, 3072} {
 		t.Run(fmt.Sprintf("budget-%d", budget), func(t *testing.T) {
 			var previousKeys []string
 			for _, originalBytes := range []int{budget - 1, budget, budget + 1} {
 				response := findResponseWithSerializedBytes(t, originalBytes)
 				result, output, sizing, err := prepareToolResponse(
-					"find", responseAuto, response, budget,
+					"find", response, budget,
 				)
 				if err != nil {
 					t.Fatal(err)
 				}
 				lean, ok := output.(leanResponse)
 				if !ok {
-					t.Fatalf("auto output = %T, want leanResponse", output)
+					t.Fatalf("lean output = %T, want leanResponse", output)
 				}
 				encoded := mustMarshalResponse(t, lean)
 				if len(encoded) > budget || sizing.StructuredBytes != len(encoded) {
@@ -38,7 +38,7 @@ func TestAutoUsesStableLeanShapeAcrossOriginalSizeBoundary(t *testing.T) {
 				}
 				keys := sortedTopLevelKeys(t, encoded)
 				if previousKeys != nil && !reflect.DeepEqual(keys, previousKeys) {
-					t.Fatalf("auto keys changed with size: %q then %q", previousKeys, keys)
+					t.Fatalf("lean keys changed with size: %q then %q", previousKeys, keys)
 				}
 				previousKeys = keys
 				assertBoundedNonJSONHint(t, result, encoded)
@@ -47,31 +47,31 @@ func TestAutoUsesStableLeanShapeAcrossOriginalSizeBoundary(t *testing.T) {
 	}
 }
 
-func TestAutoFitsFixedOneKiBBudgetForEveryTool(t *testing.T) {
+func TestLeanFitsFixedOneKiBBudgetForEveryTool(t *testing.T) {
 	results := append(largeResponseResults(), []navigator.Result{
 		compactTestResult("third.go", 15, navigator.FindingSymbol, "ref", "Target", "Third", strings.Repeat("source ", 300)),
 		compactTestResult("fourth.go", 19, navigator.FindingSymbol, "ref", "Target", "Fourth", strings.Repeat("source ", 300)),
 	}...)
 	tests := []struct {
-		tool string
-		full any
+		tool  string
+		input any
 	}{
-		{tool: "changed", full: navigator.ChangedResponse{
+		{tool: "changed", input: navigator.ChangedResponse{
 			BaseCommit: "base", HeadCommit: "head", Patch: strings.Repeat("+patch\n", 600), Results: results,
 		}},
-		{tool: "find", full: navigator.FindResponse{
+		{tool: "find", input: navigator.FindResponse{
 			Query: "Target", MatchedAs: navigator.FindOutcomeSymbol, Results: results,
 		}},
-		{tool: "inspect", full: navigator.InspectResponse{
+		{tool: "inspect", input: navigator.InspectResponse{
 			Location: "first.go:7", Symbol: "Target", Results: append([]navigator.Result{{
 				Path: "first.go", Line: 7, StartLine: 7, Kind: "scope", Code: strings.Repeat("line()\n", 300),
 			}}, results...),
 		}},
-		{tool: "outline", full: navigator.OutlineResponse{Path: "first.go", Results: results}},
+		{tool: "outline", input: navigator.OutlineResponse{Path: "first.go", Results: results}},
 	}
 	for _, test := range tests {
 		t.Run(test.tool, func(t *testing.T) {
-			result, output, sizing, err := prepareToolResponse(test.tool, responseAuto, test.full, 1024)
+			result, output, sizing, err := prepareToolResponse(test.tool, test.input, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -84,48 +84,18 @@ func TestAutoFitsFixedOneKiBBudgetForEveryTool(t *testing.T) {
 	}
 }
 
-func TestFullPreservesExactV3ShapeAndIgnoresBudget(t *testing.T) {
-	response := navigator.FindResponse{
-		NavigationBudget: &navigator.NavigationBudget{Used: 2, Limit: 20, Remaining: 18},
-		Query:            "Target",
-		Symbol:           "Target",
-		MatchedAs:        navigator.FindOutcomeSymbol,
-		Root:             "/repository",
-		SearchedAs:       []navigator.FindMatch{navigator.FindMatchSymbol},
-		Hint:             "legacy hint",
-		Results:          largeResponseResults(),
-		ResultsTruncated: true,
-	}
-	want := mustMarshalResponse(t, response)
-	result, output, sizing, err := prepareToolResponse("find", responseFull, response, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	actual, ok := output.(navigator.FindResponse)
-	if !ok || !reflect.DeepEqual(actual, response) {
-		t.Fatalf("full output = %T %#v", output, output)
-	}
-	if got := mustMarshalResponse(t, output); string(got) != string(want) {
-		t.Fatalf("full JSON changed:\n%s\nwant:\n%s", got, want)
-	}
-	if sizing != (responseSizing{OriginalBytes: len(want), StructuredBytes: len(want)}) {
-		t.Fatalf("full sizing = %#v", sizing)
-	}
-	assertBoundedNonJSONHint(t, result, want)
-}
-
 func TestLeanGoldenToolMappings(t *testing.T) {
 	base := strings.Repeat("a", 40)
 	head := strings.Repeat("b", 40)
 	tests := []struct {
-		name string
-		tool string
-		full any
-		want string
+		name  string
+		tool  string
+		input any
+		want  string
 	}{
 		{
 			name: "changed", tool: "changed",
-			full: navigator.ChangedResponse{
+			input: navigator.ChangedResponse{
 				BaseCommit: base, HeadCommit: head, Patch: "+line\n",
 				Results: []navigator.Result{{Path: "b.go", Line: 9, Kind: "changed", Finding: navigator.FindingOther}},
 			},
@@ -133,7 +103,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 		},
 		{
 			name: "find", tool: "find",
-			full: navigator.FindResponse{
+			input: navigator.FindResponse{
 				Query: "Serve", MatchedAs: navigator.FindOutcomeSymbol,
 				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Scope: "Serve", Signature: "func Serve()"}},
 			},
@@ -141,7 +111,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 		},
 		{
 			name: "inspect", tool: "inspect",
-			full: navigator.InspectResponse{
+			input: navigator.InspectResponse{
 				Location: "a.go:7", Symbol: "Serve",
 				Results: []navigator.Result{{Path: "a.go", Line: 7, StartLine: 7, Kind: "scope", Finding: navigator.FindingOther, Symbol: "Serve", Code: "func Serve() {\n\twork()\n}"}},
 			},
@@ -149,7 +119,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 		},
 		{
 			name: "outline", tool: "outline",
-			full: navigator.OutlineResponse{
+			input: navigator.OutlineResponse{
 				Path:    "a.go",
 				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Code: "func Serve()"}},
 			},
@@ -158,7 +128,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			_, output, _, err := prepareToolResponse(test.tool, responseAuto, test.full, 1024)
+			_, output, _, err := prepareToolResponse(test.tool, test.input, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -170,43 +140,39 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 	}
 }
 
-func TestTextContentIsConstantAcrossToolsAndModes(t *testing.T) {
+func TestTextContentIsConstantAcrossTools(t *testing.T) {
 	tests := []struct {
-		tool string
-		full any
+		tool  string
+		input any
 	}{
-		{tool: "changed", full: navigator.ChangedResponse{BaseCommit: "base", HeadCommit: "head", Results: []navigator.Result{}}},
-		{tool: "find", full: navigator.FindResponse{
+		{tool: "changed", input: navigator.ChangedResponse{BaseCommit: "base", HeadCommit: "head", Results: []navigator.Result{}}},
+		{tool: "find", input: navigator.FindResponse{
 			Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
 			Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "def", Symbol: "Target"}},
 		}},
-		{tool: "inspect", full: navigator.InspectResponse{
+		{tool: "inspect", input: navigator.InspectResponse{
 			Location: "target.go:3", Symbol: "Target",
 			Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "scope", Code: "func Target() {}"}},
 		}},
-		{tool: "outline", full: navigator.OutlineResponse{
+		{tool: "outline", input: navigator.OutlineResponse{
 			Path: "target.go", Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "def", Symbol: "Target"}},
 		}},
 	}
 	for _, test := range tests {
-		for _, mode := range []string{responseAuto, responseFull} {
-			t.Run(test.tool+"-"+mode, func(t *testing.T) {
-				result, output, _, err := prepareToolResponse(test.tool, mode, test.full, 1024)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if text := toolResultText(t, result); text != structuredContentTextHint || len(text) != 22 {
-					t.Fatalf("text content = %q (%d bytes)", text, len(text))
-				}
-				if mode == responseAuto {
-					encoded := mustMarshalResponse(t, output)
-					if bytes.Contains(encoded, []byte(`"next"`)) ||
-						bytes.Contains(encoded, []byte(`"next_related"`)) {
-						t.Fatalf("auto output retained nested follow-up: %s", encoded)
-					}
-				}
-			})
-		}
+		t.Run(test.tool, func(t *testing.T) {
+			result, output, _, err := prepareToolResponse(test.tool, test.input, 1024)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if text := toolResultText(t, result); text != structuredContentTextHint || len(text) != 22 {
+				t.Fatalf("text content = %q (%d bytes)", text, len(text))
+			}
+			encoded := mustMarshalResponse(t, output)
+			if bytes.Contains(encoded, []byte(`"next"`)) ||
+				bytes.Contains(encoded, []byte(`"next_related"`)) {
+				t.Fatalf("output retained nested follow-up: %s", encoded)
+			}
+		})
 	}
 }
 
@@ -217,7 +183,7 @@ func TestLeanResponseRemovesFormatterTelemetryAndDuplicateFinding(t *testing.T) 
 		Results: largeResponseResults(), PatchTruncated: true, ResultsTruncated: true,
 		NavigationBudget: &navigator.NavigationBudget{Used: 3, Limit: 20, Remaining: 17},
 	}
-	_, output, _, err := prepareToolResponse("changed", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("changed", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +197,7 @@ func TestLeanResponseRemovesFormatterTelemetryAndDuplicateFinding(t *testing.T) 
 	}
 	for _, forbidden := range []string{
 		`"root"`, `"searched_as"`, `"counts"`, `"omitted_bytes"`,
-		`"original_bytes"`, `"budget_bytes"`, `"compact"`, `"full_response"`,
+		`"original_bytes"`, `"budget_bytes"`, `"compact"`,
 		`"metadata_truncated"`, `"finding"`, `"navigation_budget"`, "subject", "/secret/root",
 	} {
 		if strings.Contains(string(encoded), forbidden) {
@@ -255,7 +221,7 @@ func TestInspectOversizedScopeIsOmittedWhole(t *testing.T) {
 			{Path: "internal/service_test.go", Line: 12, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Serve", Scope: "TestServe"},
 		},
 	}
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 420)
+	_, output, sizing, err := prepareToolResponse("inspect", response, 420)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -282,7 +248,7 @@ func TestInspectEvidenceDropsSingleOversizedLineWhole(t *testing.T) {
 		Location: "a.go:1", Symbol: "payload",
 		Results: []navigator.Result{{Path: "a.go", Line: 1, StartLine: 1, Kind: "scope", Code: line}},
 	}
-	_, output, _, err := prepareToolResponse("inspect", responseAuto, response, 256)
+	_, output, _, err := prepareToolResponse("inspect", response, 256)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -306,7 +272,7 @@ func TestInspectRetainsPrimaryScopeAndSkipsExactSelfDuplicateWithoutSource(t *te
 			{Path: "caller.go", Line: 19, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Serve"},
 		},
 	}
-	result, output, _, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	result, output, _, err := prepareToolResponse("inspect", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +295,7 @@ func TestInspectEvidenceWinsTightBudgetOverCandidateMetadata(t *testing.T) {
 			{Path: strings.Repeat("deep/", 24) + "caller.go", Line: 19, Kind: "ref", Symbol: "Serve"},
 		},
 	}
-	result, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 220)
+	result, output, sizing, err := prepareToolResponse("inspect", response, 220)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +320,7 @@ func TestInspectEvidenceIsAtomicAtExactSerializedBoundary(t *testing.T) {
 			CodeStartLine: 7, CodeEndLine: 10, Kind: "scope", Symbol: "Serve", Code: code,
 		}},
 	}
-	_, completeOutput, _, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	_, completeOutput, _, err := prepareToolResponse("inspect", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +333,7 @@ func TestInspectEvidenceIsAtomicAtExactSerializedBoundary(t *testing.T) {
 	boundary := len(mustMarshalResponse(t, complete))
 
 	_, exactOutput, exactSizing, err := prepareToolResponse(
-		"inspect", responseAuto, response, boundary,
+		"inspect", response, boundary,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +345,7 @@ func TestInspectEvidenceIsAtomicAtExactSerializedBoundary(t *testing.T) {
 	}
 
 	_, fallbackOutput, fallbackSizing, err := prepareToolResponse(
-		"inspect", responseAuto, response, boundary-1,
+		"inspect", response, boundary-1,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -407,7 +373,7 @@ func TestInspectEveryBudgetReturnsCompleteScopeOrExactFallback(t *testing.T) {
 	}
 	firstSuccess := 0
 	for budget := 1; budget <= 1024; budget++ {
-		_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, budget)
+		_, output, sizing, err := prepareToolResponse("inspect", response, budget)
 		if err != nil {
 			if firstSuccess != 0 {
 				t.Fatalf("budget %d failed after success at %d: %v", budget, firstSuccess, err)
@@ -450,7 +416,7 @@ func TestInspectNavigatorTruncationNeverBecomesEvidence(t *testing.T) {
 			Code: partial, CodeTruncated: true,
 		}},
 	}
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("inspect", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -473,7 +439,7 @@ func TestInspectInvalidUTF8NeverBecomesEvidence(t *testing.T) {
 			CodeStartLine: 7, CodeEndLine: 7, Kind: "scope", Symbol: "Serve", Code: invalid,
 		}},
 	}
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("inspect", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +462,7 @@ func TestInspectLateEvidenceEvictionAddsFallbackOnce(t *testing.T) {
 			CodeStartLine: 7, CodeEndLine: 9, Kind: "scope", Symbol: "Serve", Code: code,
 		}},
 	}
-	_, completeOutput, _, err := prepareToolResponse("inspect", responseAuto, base, 1024)
+	_, completeOutput, _, err := prepareToolResponse("inspect", base, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,7 +472,7 @@ func TestInspectLateEvidenceEvictionAddsFallbackOnce(t *testing.T) {
 		Path: strings.Repeat("deep/", 80) + "caller.go", Line: 19,
 		Kind: "ref", Symbol: "Serve",
 	})
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, budget)
+	_, output, sizing, err := prepareToolResponse("inspect", response, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -532,7 +498,7 @@ func TestInspectFallbackCountsTowardResultLimit(t *testing.T) {
 	response := navigator.InspectResponse{
 		Location: "a.go:7", Symbol: "Serve", Results: results,
 	}
-	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("inspect", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -554,7 +520,7 @@ func TestLeanResultsDefinitionFirstWithoutDuplicateFollowup(t *testing.T) {
 			{Path: "other.go", Line: 12, Kind: "ref", Finding: navigator.FindingSymbol, Symbol: "Target"},
 		},
 	}
-	result, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	result, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +547,7 @@ func TestFindResponseNeverEmbedsSource(t *testing.T) {
 			Code: "func Target() {\n\twork()\n}",
 		}},
 	}
-	result, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	result, output, sizing, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +572,7 @@ func TestFindAmbiguousDefinitionsDoNotInlineArbitrarySource(t *testing.T) {
 			{Path: "b.go", Line: 7, Kind: "def", Symbol: "Target", CodeStartLine: 7, Code: "func Target() {}"},
 		},
 	}
-	result, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	result, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,13 +583,6 @@ func TestFindAmbiguousDefinitionsDoNotInlineArbitrarySource(t *testing.T) {
 	}
 	if hint := toolResultText(t, result); hint != structuredContentTextHint {
 		t.Fatalf("ambiguous find hint = %q", hint)
-	}
-	fullResult, _, _, err := prepareToolResponse("find", responseFull, response, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hint := toolResultText(t, fullResult); hint != structuredContentTextHint {
-		t.Fatalf("ambiguous full hint = %q", hint)
 	}
 }
 
@@ -654,7 +613,7 @@ func TestFindSelectionStates(t *testing.T) {
 				Query: "Target", MatchedAs: test.outcome, Results: test.results,
 				ResultsTruncated: test.truncated,
 			}
-			result, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+			result, output, sizing, err := prepareToolResponse("find", response, 1024)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -663,15 +622,7 @@ func TestFindSelectionStates(t *testing.T) {
 				t.Fatalf("selection response = %#v, sizing %#v", lean, sizing)
 			}
 			if toolResultText(t, result) != structuredContentTextHint {
-				t.Fatalf("auto hint = %q", toolResultText(t, result))
-			}
-			fullResult, _, _, err := prepareToolResponse("find", responseFull, response, 0)
-			if err != nil {
-				t.Fatal(err)
-			}
-			fullHint := toolResultText(t, fullResult)
-			if fullHint != structuredContentTextHint {
-				t.Fatalf("full hint = %q", fullHint)
+				t.Fatalf("lean hint = %q", toolResultText(t, result))
 			}
 		})
 	}
@@ -723,7 +674,7 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			firstSuccess := 0
 			for budget := 1; budget <= 1024; budget++ {
-				_, output, sizing, err := prepareToolResponse("find", responseAuto, test.response, budget)
+				_, output, sizing, err := prepareToolResponse("find", test.response, budget)
 				if err != nil {
 					if firstSuccess != 0 {
 						t.Fatalf("budget %d failed after first success at %d: %v", budget, firstSuccess, err)
@@ -745,7 +696,7 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 				t.Fatalf("first successful mandatory response budget = %d", firstSuccess)
 			}
 			if _, _, _, err := prepareToolResponse(
-				"find", responseAuto, test.response, firstSuccess-1,
+				"find", test.response, firstSuccess-1,
 			); err == nil {
 				t.Fatalf("budget %d succeeded without room for mandatory row", firstSuccess-1)
 			}
@@ -770,7 +721,7 @@ func TestFindMandatoryCandidateSurvivesOneKiBPressure(t *testing.T) {
 		Query: strings.Repeat("_make_image", 30), MatchedAs: navigator.FindOutcomeSymbol,
 		Results: results, ResultsTruncated: true,
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -792,7 +743,7 @@ func TestFindIndexOmitsCompleteUTF8Source(t *testing.T) {
 			CodeStartLine: 3, CodeEndLine: 7, Code: code,
 		}},
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	_, output, sizing, err := prepareToolResponse("find", response, 320)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -813,7 +764,7 @@ func TestFindOversizedSingleLineKeepsInspectFallback(t *testing.T) {
 			CodeStartLine: 3, CodeEndLine: 3, Code: strings.Repeat("界", 300),
 		}},
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	_, output, sizing, err := prepareToolResponse("find", response, 320)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -835,7 +786,7 @@ func TestFindIndexOmitsLongPreludeSource(t *testing.T) {
 			CodeStartLine: 1, CodeEndLine: 83, Code: code,
 		}},
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	_, output, sizing, err := prepareToolResponse("find", response, 320)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -856,7 +807,7 @@ func TestFindNavigatorTruncatedEvidenceRetainsExactInspect(t *testing.T) {
 			CodeTruncated: true,
 		}},
 	}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -876,14 +827,14 @@ func TestFindIndexFitsItsExactSerializedBoundary(t *testing.T) {
 			Code: "func Target() {\n\twork()\n}",
 		}},
 	}
-	_, initial, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, initial, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
 	index := initial.(leanResponse)
 	budget := len(mustMarshalResponse(t, index))
 
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, budget)
+	_, output, sizing, err := prepareToolResponse("find", response, budget)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -908,7 +859,7 @@ func TestFindKeepsDefinitionBeforeDiverseReferences(t *testing.T) {
 	response := navigator.FindResponse{
 		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol, Results: results,
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -939,7 +890,7 @@ func TestFindPathDoesNotPrivilegeFollowUp(t *testing.T) {
 			{Path: "cmd/validator/main_test.go", Kind: "file", Finding: navigator.FindingFile},
 		},
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, sizing, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -960,7 +911,7 @@ func TestFindNeverEmitsNestedFollowupJSON(t *testing.T) {
 				{Path: candidate, Kind: "file"},
 			},
 		}
-		_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+		_, output, _, err := prepareToolResponse("find", response, 1024)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -983,7 +934,7 @@ func TestFindPathResponseStaysBoundedWithoutFollowup(t *testing.T) {
 			{Path: "cmd/validator/main_test.go", Kind: "file"},
 		},
 	}
-	_, output, sizing, err := prepareToolResponse("find", responseAuto, response, 320)
+	_, output, sizing, err := prepareToolResponse("find", response, 320)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1005,7 +956,7 @@ func TestLeanResultsPreferDistinctFilesAfterBestDefinition(t *testing.T) {
 			{Path: "d.go", Line: 8, Kind: "ref", Symbol: "Target"},
 		},
 	}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1029,15 +980,13 @@ func TestFindNoMatchUsesConstantBoundedHint(t *testing.T) {
 		Query: "missingTarget", MatchedAs: navigator.FindOutcomeNone,
 		Results: []navigator.Result{},
 	}
-	for _, mode := range []string{responseAuto, responseFull} {
-		result, _, _, err := prepareToolResponse("find", mode, response, 1024)
-		if err != nil {
-			t.Fatal(err)
-		}
-		hint := toolResultText(t, result)
-		if hint != structuredContentTextHint || len(hint) > maximumCompactTextBytes {
-			t.Fatalf("%s no-match hint = %q", mode, hint)
-		}
+	result, _, _, err := prepareToolResponse("find", response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hint := toolResultText(t, result)
+	if hint != structuredContentTextHint || len(hint) > maximumCompactTextBytes {
+		t.Fatalf("no-match hint = %q", hint)
 	}
 }
 
@@ -1049,7 +998,7 @@ func TestOutlinePreservesDefinitionSourceOrder(t *testing.T) {
 			{Path: "a.go", Line: 4, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Earlier", Signature: "func Earlier()"},
 		},
 	}
-	_, output, _, err := prepareToolResponse("outline", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("outline", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1073,7 +1022,7 @@ func TestLeanNeverShortensExactLocations(t *testing.T) {
 		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
 		Results: []navigator.Result{{Path: longPath, Line: 42, Kind: "def", Finding: navigator.FindingSymbol}},
 	}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1084,7 +1033,7 @@ func TestLeanNeverShortensExactLocations(t *testing.T) {
 
 	tooLong := strings.Repeat("deep/", 300) + "file.go:42"
 	inspect := navigator.InspectResponse{Location: tooLong, Symbol: "Target", Results: []navigator.Result{}}
-	_, output, _, err = prepareToolResponse("inspect", responseAuto, inspect, 1024)
+	_, output, _, err = prepareToolResponse("inspect", inspect, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1098,7 +1047,7 @@ func TestLeanNeverShortensExactLocations(t *testing.T) {
 func TestLongQueryIsUTF8BoundedAndExposedAsTruncated(t *testing.T) {
 	query := strings.Repeat("界\"\n", 1200)
 	response := navigator.FindResponse{Query: query, MatchedAs: navigator.FindOutcomeNone, Results: []navigator.Result{}}
-	_, output, _, err := prepareToolResponse("find", responseAuto, response, 1024)
+	_, output, _, err := prepareToolResponse("find", response, 1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1112,17 +1061,14 @@ func TestLongQueryIsUTF8BoundedAndExposedAsTruncated(t *testing.T) {
 
 func TestPrepareToolResponseRejectsInvalidRequests(t *testing.T) {
 	response := navigator.FindResponse{Query: "x", Results: []navigator.Result{}}
-	if _, _, _, err := prepareToolResponse("find", "brief", response, 1024); err == nil {
-		t.Fatal("unsupported response mode succeeded")
+	if _, _, _, err := prepareToolResponse("find", response, 0); err == nil {
+		t.Fatal("zero budget succeeded")
 	}
-	if _, _, _, err := prepareToolResponse("find", responseAuto, response, 0); err == nil {
-		t.Fatal("zero auto budget succeeded")
-	}
-	if _, _, _, err := prepareToolResponse("changed", responseAuto, response, 1024); err == nil {
+	if _, _, _, err := prepareToolResponse("changed", response, 1024); err == nil {
 		t.Fatal("mismatched response type succeeded")
 	}
 	var nilFind *navigator.FindResponse
-	if _, _, _, err := prepareToolResponse("find", responseAuto, nilFind, 1024); err == nil {
+	if _, _, _, err := prepareToolResponse("find", nilFind, 1024); err == nil {
 		t.Fatal("nil response succeeded")
 	}
 }

@@ -176,22 +176,6 @@ func safeLauncherLinkerFlags(flags string) bool {
 			return false
 		}
 	}
-	semanticNames := []string{
-		"main.enforcedNavigationRoot",
-		"main.enforcedNavigationBaseCommit",
-		"main.enforcedChangedReturn",
-		"main.enforcedChangedContext",
-		"main.enforcedNavigationSemantics",
-	}
-	semanticCount := 0
-	for _, name := range semanticNames {
-		if _, found := assignments[name]; found {
-			semanticCount++
-		}
-	}
-	if semanticCount != 0 && semanticCount != len(semanticNames) {
-		return false
-	}
 	_, commandCap := assignments["main.enforcedNavigationCommandCap"]
 	_, transcript := assignments["main.enforcedNavigationTranscriptPath"]
 	return commandCap == transcript
@@ -265,15 +249,9 @@ func validLauncherLinkerValue(name, value string) bool {
 	switch name {
 	case "main.enforcedLimitCap", "main.enforcedContextCap",
 		"main.enforcedMaxCodeLinesCap", "main.enforcedMaxPatchLinesCap",
-		"main.enforcedChangedContext", "main.enforcedNavigationCommandCap":
+		"main.enforcedNavigationCommandCap":
 		return decimalPattern.MatchString(value)
-	case "main.enforcedNavigationBaseCommit":
-		return objectIDPattern.MatchString(value)
-	case "main.enforcedChangedReturn":
-		return oneOf(value, "locations", "line", "context", "scope")
-	case "main.enforcedNavigationSemantics":
-		return value == "1"
-	case "main.enforcedNavigationRoot", "main.enforcedNavigationTranscriptPath":
+	case "main.enforcedNavigationTranscriptPath":
 		return filepath.IsAbs(value) && filepath.Clean(value) == value
 	default:
 		return false
@@ -303,7 +281,7 @@ func (e forwardedSignalError) ExitCode() int {
 	return signalExitStatus(e.signal)
 }
 
-// Run builds the mechanically capped scopesifter binary and runs Codex with it.
+// Run builds the hard-capped scopesifter binary and runs Codex with it.
 // Configuration failures use exit status 2; child-process failures preserve the
 // child exit status.
 func Run(root string, arguments []string, environment []string, streams Streams) int {
@@ -350,27 +328,10 @@ func run(
 	}()
 
 	linkerFlags := []string{
-		"-X main.enforcedLimitCap=" + c.changedLimit,
-		"-X main.enforcedContextCap=" + c.navigationContextCap,
-		"-X main.enforcedMaxCodeLinesCap=" + c.changedMaxCodeLines,
-		"-X main.enforcedMaxPatchLinesCap=" + c.changedMaxPatchLines,
-	}
-	if c.navigationSemanticsConfigured {
-		optional := []string{
-			"main.enforcedNavigationRoot=" + c.requiredNavigationRoot,
-			"main.enforcedNavigationBaseCommit=" + c.requiredNavigationBaseCommit,
-			"main.enforcedChangedReturn=" + c.requiredChangedReturn,
-			"main.enforcedChangedContext=" + c.requiredChangedContext,
-		}
-		for _, argument := range optional {
-			quoted, quoteErr := quoteLinkerArgument(argument)
-			if quoteErr != nil {
-				fmt.Fprintln(streams.Stderr, quoteErr)
-				return 1
-			}
-			linkerFlags = append(linkerFlags, "-X "+quoted)
-		}
-		linkerFlags = append(linkerFlags, "-X main.enforcedNavigationSemantics=1")
+		"-X main.enforcedLimitCap=" + c.limitCap,
+		"-X main.enforcedContextCap=" + c.contextCap,
+		"-X main.enforcedMaxCodeLinesCap=" + c.maxCodeLinesCap,
+		"-X main.enforcedMaxPatchLinesCap=" + c.maxPatchLinesCap,
 	}
 	if !decimalIsZero(c.navigationCommandCap) {
 		transcript, createErr := os.CreateTemp(binDir, "navigation-transcript.*.jsonl")
@@ -439,10 +400,10 @@ func run(
 		},
 		map[string]string{
 			"PATH":                            binDir + string(os.PathListSeparator) + environmentMap(environment)["PATH"],
-			"SCOPESIFTER_LIMIT_CAP":           c.changedLimit,
-			"SCOPESIFTER_CONTEXT_CAP":         c.navigationContextCap,
-			"SCOPESIFTER_MAX_CODE_LINES_CAP":  c.changedMaxCodeLines,
-			"SCOPESIFTER_MAX_PATCH_LINES_CAP": c.changedMaxPatchLines,
+			"SCOPESIFTER_LIMIT_CAP":           c.limitCap,
+			"SCOPESIFTER_CONTEXT_CAP":         c.contextCap,
+			"SCOPESIFTER_MAX_CODE_LINES_CAP":  c.maxCodeLinesCap,
+			"SCOPESIFTER_MAX_PATCH_LINES_CAP": c.maxPatchLinesCap,
 		},
 	)
 	codex := process{
