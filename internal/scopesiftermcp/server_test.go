@@ -73,6 +73,31 @@ func TestBooleanSchemaHonorsDefault(t *testing.T) {
 	}
 }
 
+func TestLiteralSourcePathRequiresOneCanonicalLiteral(t *testing.T) {
+	for _, path := range []string{"target.go", "pkg/target.go", "colon:dir/target.go"} {
+		got, ok := literalSourcePath([]string{path})
+		if !ok || got != path {
+			t.Errorf("literalSourcePath(%q) = %q, %v", path, got, ok)
+		}
+	}
+	for _, patterns := range [][]string{
+		nil,
+		{},
+		{"a.go", "b.go"},
+		{""},
+		{"*.go"},
+		{"pkg/**"},
+		{"/target.go"},
+		{"../target.go"},
+		{"./target.go"},
+		{`pkg\target.go`},
+	} {
+		if got, ok := literalSourcePath(patterns); ok {
+			t.Errorf("literalSourcePath(%q) = %q, true", patterns, got)
+		}
+	}
+}
+
 func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	fixture := newFixture(t)
 	before := snapshotTree(t, fixture.root)
@@ -388,16 +413,15 @@ func TestServerFindPathPrioritizesChangedLocation(t *testing.T) {
 		result.Scope != "Caller" {
 		t.Fatalf("changed path candidate = %#v", result)
 	}
-	if found.Next == nil || found.Next.Tool != "inspect" ||
-		found.Next.Arguments["location"] != "demo.go:7" {
-		t.Fatalf("changed path next = %#v", found.Next)
+	if found.Selection != "" || found.Next != nil || found.Related != nil {
+		t.Fatalf("changed path follow-up = %#v", found)
 	}
 	if len(raw) > structuredOutputBudget {
 		t.Fatalf("enriched path response = %d bytes, want at most %d", len(raw), structuredOutputBudget)
 	}
 }
 
-func TestServerFindRelatedActionIsAcceptedAndUseful(t *testing.T) {
+func TestServerFindPathOmitsSingularRelatedAction(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
@@ -417,27 +441,9 @@ func TestServerFindRelatedActionIsAcceptedAndUseful(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Related == nil || found.Related.Tool != "find" {
-		t.Fatalf("related action = %#v in %#v", found.Related, found)
-	}
-	related, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: found.Related.Tool, Arguments: found.Related.Arguments,
-	})
-	if err != nil || related.IsError {
-		t.Fatalf("related find = %#v, %v", related, err)
-	}
-	relatedRaw, err := json.Marshal(related.StructuredContent)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var references leanResponse
-	if err := json.Unmarshal(relatedRaw, &references); err != nil {
-		t.Fatal(err)
-	}
-	if len(references.Results) != 1 ||
-		references.Results[0].Location != "demo_test.go:3" ||
-		references.Results[0].Kind != "ref" {
-		t.Fatalf("related references = %#v", references)
+	if found.Selection != "" || found.Next != nil || found.Related != nil ||
+		len(found.Results) != 2 {
+		t.Fatalf("path response = %#v", found)
 	}
 }
 
@@ -463,7 +469,7 @@ func TestServerFindUniqueDefinitionStaysLocationIndex(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Evidence != nil || len(found.Results) < 1 ||
+	if found.Selection != selectionUnique || found.Evidence != nil || len(found.Results) < 1 ||
 		found.Results[0].Location != "demo.go:3" || found.Results[0].Kind != "def" {
 		t.Fatalf("unique definition index = %#v in %s", found, raw)
 	}
@@ -531,7 +537,8 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 	ambiguous := call(map[string]any{
 		"query": "Helper", "match": "symbol", "include": "defs",
 	})
-	if ambiguous.Evidence != nil || ambiguous.Next == nil || len(ambiguous.Results) != 2 {
+	if ambiguous.Selection != selectionAmbiguous || ambiguous.Evidence != nil ||
+		ambiguous.Next != nil || len(ambiguous.Results) != 2 {
 		t.Fatalf("ambiguous definitions = %#v", ambiguous)
 	}
 	locations := []string{ambiguous.Results[0].Location, ambiguous.Results[1].Location}
@@ -542,7 +549,8 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 	truncatedAmbiguous := call(map[string]any{
 		"query": "Helper", "match": "symbol", "include": "defs", "limit": 1,
 	})
-	if truncatedAmbiguous.Evidence != nil || truncatedAmbiguous.Next == nil ||
+	if truncatedAmbiguous.Selection != selectionIncomplete ||
+		truncatedAmbiguous.Evidence != nil || truncatedAmbiguous.Next != nil ||
 		!containsString(truncatedAmbiguous.Truncated, "results") {
 		t.Fatalf("truncated ambiguity claimed source = %#v", truncatedAmbiguous)
 	}
@@ -551,10 +559,53 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 		"query": "Helper", "match": "symbol", "include": "defs",
 		"path_globs": []string{"other.go"},
 	})
-	if narrowed.Evidence != nil || len(narrowed.Results) != 1 ||
+	if narrowed.Selection != selectionUnique || narrowed.Evidence != nil ||
+		len(narrowed.Results) != 1 ||
 		narrowed.Results[0].Location != "other.go:3" || narrowed.Next == nil ||
 		narrowed.Next.Arguments["location"] != "other.go:3" {
 		t.Fatalf("narrowed definition = %#v", narrowed)
+	}
+}
+
+func TestServerFindPrioritizesExactLiteralPathFilter(t *testing.T) {
+	fixture := newFixture(t)
+	for path, content := range map[string]string{
+		"a/z/target.go": "package collision\n\nfunc PreferredTarget() {}\n",
+		"z/target.go":   "package collision\n\nfunc PreferredTarget() {}\n",
+	} {
+		fullPath := filepath.Join(fixture.root, filepath.FromSlash(path))
+		if err := os.MkdirAll(filepath.Dir(fullPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fullPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := newFixtureServer(t, fixture)
+	client, closeSessions := connect(t, server)
+	defer closeSessions()
+
+	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: "find", Arguments: map[string]any{
+			"query": "PreferredTarget", "include": "defs",
+			"path_globs": []string{"z/target.go"}, "limit": 1,
+		},
+	})
+	if err != nil || response.IsError {
+		t.Fatalf("find = %#v, %v", response, err)
+	}
+	raw, err := json.Marshal(response.StructuredContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found leanResponse
+	if err := json.Unmarshal(raw, &found); err != nil {
+		t.Fatal(err)
+	}
+	if found.Selection != selectionIncomplete || found.Next != nil ||
+		len(found.Results) != 1 || found.Results[0].Location != "z/target.go:3" ||
+		!containsString(found.Truncated, "results") || len(raw) > structuredOutputBudget {
+		t.Fatalf("exact-path priority = %#v (%d bytes)", found, len(raw))
 	}
 }
 
@@ -590,8 +641,7 @@ func TestServerFindOneDefinitionManyRefsStaysBoundedIndex(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Evidence != nil || found.Next == nil ||
-		found.Next.Arguments["location"] != "demo.go:3" ||
+	if found.Selection != selectionIncomplete || found.Evidence != nil || found.Next != nil ||
 		!containsString(found.Truncated, "results") ||
 		len(raw) > structuredOutputBudget {
 		t.Fatalf("bounded definition index = %#v (%d bytes)", found, len(raw))
@@ -613,7 +663,8 @@ func TestServerFindOneDefinitionManyRefsStaysBoundedIndex(t *testing.T) {
 	if err := json.Unmarshal(refsRaw, &refs); err != nil {
 		t.Fatal(err)
 	}
-	if refs.Evidence != nil || len(refs.Results) != 1 || refs.Results[0].Kind != "ref" {
+	if refs.Selection != selectionIncomplete || refs.Evidence != nil || refs.Next != nil ||
+		len(refs.Results) != 1 || refs.Results[0].Kind != "ref" {
 		t.Fatalf("refs-only find injected definition = %#v", refs)
 	}
 }

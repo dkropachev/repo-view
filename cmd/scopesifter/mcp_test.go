@@ -132,6 +132,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	structured, err := json.Marshal(response.StructuredContent)
 	if err != nil || len(structured) > 1024 ||
 		bytes.Contains(structured, []byte(`"evidence"`)) ||
+		!bytes.Contains(structured, []byte(`"selection":"unique"`)) ||
 		!bytes.Contains(structured, []byte(`"location":"demo.go:3"`)) ||
 		!bytes.Contains(structured, []byte(`"next":{"arguments":{"location":"demo.go:3"}`)) ||
 		bytes.Contains(structured, []byte(`func Target() {}`)) {
@@ -150,7 +151,8 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 	structured, err = json.Marshal(response.StructuredContent)
 	if err != nil || !bytes.Contains(structured, []byte(`"outcome":"file"`)) ||
 		!bytes.Contains(structured, []byte(`"kind":"file"`)) ||
-		!bytes.Contains(structured, []byte(`"location":"demo.go"`)) {
+		!bytes.Contains(structured, []byte(`"location":"demo.go"`)) ||
+		bytes.Contains(structured, []byte(`"next"`)) {
 		_ = session.Close()
 		t.Fatalf("find path structured output = %s, %v", structured, err)
 	}

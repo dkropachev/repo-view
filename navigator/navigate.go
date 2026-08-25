@@ -239,10 +239,28 @@ type positionedFindScopeResolver interface {
 }
 
 func (r *View) Find(query string, opts Options) (FindResponse, error) {
+	return r.find(query, opts, "")
+}
+
+// FindSourceFirst behaves like Find but scans one exact repository-relative
+// source path first when it is already admitted by the requested filters.
+// Other files retain their normal order, and the source path is never injected.
+func (r *View) FindSourceFirst(
+	query, sourcePath string,
+	opts Options,
+) (FindResponse, error) {
+	clean, err := cleanRepositoryPath(sourcePath)
+	if err != nil {
+		return FindResponse{}, err
+	}
+	return r.find(query, opts, clean)
+}
+
+func (r *View) find(query string, opts Options, preferredSource string) (FindResponse, error) {
 	if err := r.checkContext(); err != nil {
 		return FindResponse{}, err
 	}
-	responses, err := r.FindMany([]string{query}, opts)
+	responses, err := r.findMany([]string{query}, opts, preferredSource)
 	if err != nil {
 		return FindResponse{}, err
 	}
@@ -254,6 +272,14 @@ func (r *View) Find(query string, opts Options) (FindResponse, error) {
 // lookup only when one query has no symbol results. Limit is shared fairly
 // across queries.
 func (r *View) FindMany(queries []string, opts Options) ([]FindResponse, error) {
+	return r.findMany(queries, opts, "")
+}
+
+func (r *View) findMany(
+	queries []string,
+	opts Options,
+	preferredSource string,
+) ([]FindResponse, error) {
 	if err := r.checkContext(); err != nil {
 		return nil, err
 	}
@@ -274,7 +300,7 @@ func (r *View) FindMany(queries []string, opts Options) ([]FindResponse, error) 
 	var symbolResponses []FindResponse
 	var err error
 	if opts.Match != FindMatchPath {
-		symbolResponses, err = r.findSymbolCandidates(queries, opts)
+		symbolResponses, err = r.findSymbolCandidates(queries, opts, preferredSource)
 		if err != nil {
 			return nil, err
 		}
@@ -333,8 +359,13 @@ func (r *View) FindMany(queries []string, opts Options) ([]FindResponse, error) 
 func (r *View) findSymbolCandidates(
 	queries []string,
 	opts Options,
+	preferredSource string,
 ) ([]FindResponse, error) {
 	files, err := r.filteredFiles(opts)
+	if err != nil {
+		return nil, err
+	}
+	files, err = prioritizeExactFile(r.root, files, preferredSource)
 	if err != nil {
 		return nil, err
 	}
@@ -600,6 +631,30 @@ func (r *View) findSymbolCandidates(
 		responses = append(responses, response)
 	}
 	return responses, nil
+}
+
+func prioritizeExactFile(root string, files []string, preferred string) ([]string, error) {
+	if preferred == "" || len(files) < 2 {
+		return files, nil
+	}
+	for index, file := range files {
+		relative, err := filepath.Rel(root, file)
+		if err != nil {
+			return nil, err
+		}
+		if filepath.ToSlash(relative) != preferred {
+			continue
+		}
+		if index == 0 {
+			return files, nil
+		}
+		ordered := make([]string, 0, len(files))
+		ordered = append(ordered, file)
+		ordered = append(ordered, files[:index]...)
+		ordered = append(ordered, files[index+1:]...)
+		return ordered, nil
+	}
+	return files, nil
 }
 
 func (r *View) findPathCandidates(

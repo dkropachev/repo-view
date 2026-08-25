@@ -9,8 +9,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	pathpkg "path"
 	"path/filepath"
 	"regexp"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/yapless/scopesifter/navigator"
@@ -20,7 +22,7 @@ const (
 	// ImplementationName is the stable MCP implementation name.
 	ImplementationName = "scopesifter"
 	// ImplementationVersion changes when the public MCP tool contract changes.
-	ImplementationVersion = "scopesifter-mcp/v7"
+	ImplementationVersion = "scopesifter-mcp/v8"
 
 	structuredOutputBudget = 1024
 
@@ -228,7 +230,9 @@ func (service *service) find(
 	options.ChangedOnly = input.ChangedOnly
 	options.NoComments = !input.IncludeComments
 	options.NoStrings = !input.IncludeStrings
-	response, err := service.view.WithContext(ctx).Find(input.Query, options)
+	response, err := findWithLiteralSource(
+		service.view.WithContext(ctx), input.Query, input.PathGlobs, options,
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -258,7 +262,9 @@ func (service *service) ensureUniqueFindDefinition(
 	options.NoComments = !input.IncludeComments
 	options.NoStrings = !input.IncludeStrings
 	options.Limit = 2
-	definitions, err := service.view.WithContext(ctx).Find(response.Query, options)
+	definitions, err := findWithLiteralSource(
+		service.view.WithContext(ctx), response.Query, input.PathGlobs, options,
+	)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return response, err
@@ -473,6 +479,37 @@ func defaultString(value, fallback string) string {
 		return fallback
 	}
 	return value
+}
+
+func findWithLiteralSource(
+	view *navigator.View,
+	query string,
+	pathGlobs []string,
+	options navigator.Options,
+) (navigator.FindResponse, error) {
+	if options.Match != navigator.FindMatchPath {
+		if source, ok := literalSourcePath(pathGlobs); ok {
+			return view.FindSourceFirst(query, source, options)
+		}
+	}
+	return view.Find(query, options)
+}
+
+func literalSourcePath(patterns []string) (string, bool) {
+	if len(patterns) != 1 {
+		return "", false
+	}
+	path := patterns[0]
+	if path == "" || strings.ContainsAny(path, `\*?[`) ||
+		strings.ContainsRune(path, '\x00') || pathpkg.IsAbs(path) {
+		return "", false
+	}
+	clean := pathpkg.Clean(path)
+	if clean != path || clean == "." || clean == ".." ||
+		strings.HasPrefix(clean, "../") {
+		return "", false
+	}
+	return clean, true
 }
 
 func validSHA256(value string) bool {

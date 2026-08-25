@@ -167,6 +167,80 @@ func TestFindPathHonorsFiltersChangedOnlyLimitAndTruncation(t *testing.T) {
 	}
 }
 
+func TestFindSourceFirstPrioritizesOnlyAdmittedExactFile(t *testing.T) {
+	root := t.TempDir()
+	for path, symbol := range map[string]string{
+		"a/target.go":     "PreferredTarget",
+		"target.go":       "PreferredTarget",
+		"a/pkg/target.go": "NestedTarget",
+		"pkg/target.go":   "NestedTarget",
+	} {
+		writeFile(t, root, path, fmt.Sprintf("package collision\n\nfunc %s() {}\n", symbol))
+	}
+	runGit(t, root, "init")
+	runGit(t, root, "config", "user.email", "scopesifter@example.test")
+	runGit(t, root, "config", "user.name", "scopesifter test")
+	runGit(t, root, "add", ".")
+	runGit(t, root, "commit", "-m", "base")
+	view := mustView(t, root)
+	for _, test := range []struct {
+		symbol string
+		source string
+		first  string
+	}{
+		{symbol: "PreferredTarget", source: "target.go", first: "a/target.go"},
+		{symbol: "NestedTarget", source: "pkg/target.go", first: "a/pkg/target.go"},
+	} {
+		t.Run(test.symbol, func(t *testing.T) {
+			options := Options{
+				Match: FindMatchSymbol, Include: IncludeDefs, Return: ReturnLocations,
+				PathGlobs: []string{test.source}, Limit: 1,
+			}
+			ordinary, err := view.Find(test.symbol, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ordinary.Results) != 1 || ordinary.Results[0].Path != test.first ||
+				!ordinary.ResultsTruncated {
+				t.Fatalf("ordinary result = %#v", ordinary)
+			}
+			preferred, err := view.FindSourceFirst(test.symbol, test.source, options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(preferred.Results) != 1 || preferred.Results[0].Path != test.source ||
+				!preferred.ResultsTruncated {
+				t.Fatalf("preferred result = %#v", preferred)
+			}
+		})
+	}
+
+	filtered, err := view.FindSourceFirst("PreferredTarget", "target.go", Options{
+		Match: FindMatchSymbol, Include: IncludeDefs, Return: ReturnLocations,
+		PathGlobs: []string{"a/target.go"}, Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Results) != 1 || filtered.Results[0].Path != "a/target.go" {
+		t.Fatalf("preferred path bypassed filters: %#v", filtered)
+	}
+	writeFile(t, root, "a/target.go", "package collision\n\nfunc PreferredTarget() {}\n// changed\n")
+	changed, err := view.FindSourceFirst("PreferredTarget", "target.go", Options{
+		Match: FindMatchSymbol, Include: IncludeDefs, Return: ReturnLocations,
+		PathGlobs: []string{"target.go"}, ChangedOnly: true, Limit: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed.Results) != 1 || changed.Results[0].Path != "a/target.go" {
+		t.Fatalf("preferred path bypassed changed-only: %#v", changed)
+	}
+	if _, err := view.FindSourceFirst("PreferredTarget", "../target.go", Options{}); err == nil {
+		t.Fatal("escaping preferred path succeeded")
+	}
+}
+
 func TestFindingForKindReportsFileSymbolOrOther(t *testing.T) {
 	t.Parallel()
 	for kind, want := range map[string]Finding{
