@@ -108,13 +108,13 @@ Multiple includes are ORed; any matching exclude wins.
   includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
   and an actionable `hint` when nothing matched. Identifier findings honor
   `--include defs|refs|both`; default `both`.
-  CLI default return is `scope`; MCP v9 returns a bounded location index and
+  CLI default return is `scope`; MCP v10 returns a bounded location index and
   leaves source retrieval to `inspect`. Its `--limit` is shared across all
   supplied queries. Exact text such as a dependency module
   path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
   `query` always reports the requested selector; source-match JSON also retains
-  the legacy `symbol` field. MCP v9 accepts `query` instead of the v2 `symbol`
+  the legacy `symbol` field. MCP v10 accepts `query` instead of the v2 `symbol`
   input.
 - `inspect`: `--include symbol|scope|imports|defs|refs|both|all`; default `scope`.
   Use `all` only when the enclosing scope, imports, and repository-wide related
@@ -137,20 +137,21 @@ Multiple includes are ORed; any matching exclude wins.
 
 ## MCP Lean Output
 
-MCP v9 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
+MCP v10 keeps the four explicit navigation verbs (`changed`, `find`, `inspect`,
 and `outline`) but exposes only routing-critical inputs. Every successful call
 returns one stable structured envelope containing `target`, `outcome`, bounded
-`results`, semantic `truncated` fields, and at most one exact `next` action.
+`results`, and semantic `truncated` fields.
 Symbol finds also report `selection` as `unique`, `ambiguous`, or `incomplete`.
-Only a unique symbol selection may advertise a singular follow-up. Results
-retain complete `PATH:LINE` locations, prefer distinct files, and keep the
-primary actionable row even when optional fields do not fit.
+Results retain complete `PATH:LINE` locations, prefer distinct files, and keep
+the primary actionable row even when optional fields do not fit. No nested
+follow-up JSON duplicates those locations.
 
 Structured output is fixed at no more than 1 KiB. `find`, `changed`, and
 `outline` are routing indexes without source or patch text. `inspect` emits
 `evidence.kind="scope"` only when the complete navigator scope fits unchanged.
 Otherwise it emits no code, retains the exact inspected `PATH:LINE` result, and
-marks `source` truncated. A separate non-JSON text hint is at most 160 bytes.
+marks `source` truncated. Separate text content is the constant
+`See structuredContent.` and never repeats a target or structured JSON.
 There is no public full response or adaptive cache. CLI and Go navigator
 response shapes are unchanged.
 

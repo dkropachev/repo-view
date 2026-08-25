@@ -134,7 +134,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		bytes.Contains(structured, []byte(`"evidence"`)) ||
 		!bytes.Contains(structured, []byte(`"selection":"unique"`)) ||
 		!bytes.Contains(structured, []byte(`"location":"demo.go:3"`)) ||
-		!bytes.Contains(structured, []byte(`"next":{"arguments":{"location":"demo.go:3"}`)) ||
+		bytes.Contains(structured, []byte(`"next"`)) ||
 		bytes.Contains(structured, []byte(`func Target() {}`)) {
 		_ = session.Close()
 		t.Fatalf("find symbol structured output = %s, %v", structured, err)
@@ -157,7 +157,7 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		t.Fatalf("find path structured output = %s, %v", structured, err)
 	}
 	text := mcpCommandText(response)
-	if text == "" || len(text) > 160 || strings.Contains(text, string(structured)) ||
+	if text != "See structuredContent." || len(text) > 160 || strings.Contains(text, string(structured)) ||
 		strings.HasPrefix(strings.TrimSpace(text), "{") {
 		_ = session.Close()
 		t.Fatalf("find path text output = %q", text)
