@@ -129,7 +129,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 				BaseCommit: base, HeadCommit: head, Patch: "+line\n",
 				Results: []navigator.Result{{Path: "b.go", Line: 9, Kind: "changed", Finding: navigator.FindingOther}},
 			},
-			want: `{"target":"` + base + `..` + head + `","outcome":"changed","results":[{"location":"b.go:9","kind":"changed"}],"truncated":["patch"],"next":{"tool":"inspect","arguments":{"location":"b.go:9"}}}`,
+			want: `{"target":"` + base + `..` + head + `","outcome":"changed","results":[{"location":"b.go:9","kind":"changed"}],"truncated":["patch"]}`,
 		},
 		{
 			name: "find", tool: "find",
@@ -137,7 +137,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 				Query: "Serve", MatchedAs: navigator.FindOutcomeSymbol,
 				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Scope: "Serve", Signature: "func Serve()"}},
 			},
-			want: `{"target":"Serve","outcome":"symbol","selection":"unique","results":[{"location":"a.go:7","kind":"def","symbol":"Serve","scope":"Serve"}],"truncated":[],"next":{"tool":"inspect","arguments":{"location":"a.go:7"}}}`,
+			want: `{"target":"Serve","outcome":"symbol","selection":"unique","results":[{"location":"a.go:7","kind":"def","symbol":"Serve","scope":"Serve"}],"truncated":[]}`,
 		},
 		{
 			name: "inspect", tool: "inspect",
@@ -153,7 +153,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 				Path:    "a.go",
 				Results: []navigator.Result{{Path: "a.go", Line: 7, Kind: "def", Finding: navigator.FindingSymbol, Symbol: "Serve", Code: "func Serve()"}},
 			},
-			want: `{"target":"a.go","outcome":"definitions","results":[{"location":"a.go:7","kind":"def","symbol":"Serve"}],"truncated":["source"],"next":{"tool":"inspect","arguments":{"location":"a.go:7"}}}`,
+			want: `{"target":"a.go","outcome":"definitions","results":[{"location":"a.go:7","kind":"def","symbol":"Serve"}],"truncated":["source"]}`,
 		},
 	}
 	for _, test := range tests {
@@ -167,6 +167,46 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 				t.Fatalf("lean golden changed:\n%s\nwant:\n%s", got, test.want)
 			}
 		})
+	}
+}
+
+func TestTextContentIsConstantAcrossToolsAndModes(t *testing.T) {
+	tests := []struct {
+		tool string
+		full any
+	}{
+		{tool: "changed", full: navigator.ChangedResponse{BaseCommit: "base", HeadCommit: "head", Results: []navigator.Result{}}},
+		{tool: "find", full: navigator.FindResponse{
+			Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
+			Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "def", Symbol: "Target"}},
+		}},
+		{tool: "inspect", full: navigator.InspectResponse{
+			Location: "target.go:3", Symbol: "Target",
+			Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "scope", Code: "func Target() {}"}},
+		}},
+		{tool: "outline", full: navigator.OutlineResponse{
+			Path: "target.go", Results: []navigator.Result{{Path: "target.go", Line: 3, Kind: "def", Symbol: "Target"}},
+		}},
+	}
+	for _, test := range tests {
+		for _, mode := range []string{responseAuto, responseFull} {
+			t.Run(test.tool+"-"+mode, func(t *testing.T) {
+				result, output, _, err := prepareToolResponse(test.tool, mode, test.full, 1024)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if text := toolResultText(t, result); text != structuredContentTextHint || len(text) != 22 {
+					t.Fatalf("text content = %q (%d bytes)", text, len(text))
+				}
+				if mode == responseAuto {
+					encoded := mustMarshalResponse(t, output)
+					if bytes.Contains(encoded, []byte(`"next"`)) ||
+						bytes.Contains(encoded, []byte(`"next_related"`)) {
+						t.Fatalf("auto output retained nested follow-up: %s", encoded)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -257,7 +297,7 @@ func TestInspectEvidenceDropsSingleOversizedLineWhole(t *testing.T) {
 	}
 }
 
-func TestInspectRetainsPrimaryScopeAndSkipsExactSelfFollowupWithoutSource(t *testing.T) {
+func TestInspectRetainsPrimaryScopeAndSkipsExactSelfDuplicateWithoutSource(t *testing.T) {
 	response := navigator.InspectResponse{
 		Location: "a.go:7", Symbol: "Serve",
 		Results: []navigator.Result{
@@ -274,18 +314,14 @@ func TestInspectRetainsPrimaryScopeAndSkipsExactSelfFollowupWithoutSource(t *tes
 	if len(lean.Results) != 2 || lean.Results[0].Location != "a.go:7" ||
 		lean.Results[0].Kind != "scope" || lean.Results[1].Location != "caller.go:19" ||
 		!containsString(lean.Truncated, "source") {
-		t.Fatalf("inspect results retained self action: %#v", lean.Results)
+		t.Fatalf("inspect results retained self duplicate: %#v", lean.Results)
 	}
-	if lean.Next == nil || lean.Next.Arguments["location"] != "caller.go:19" {
-		t.Fatalf("inspect next = %#v", lean.Next)
-	}
-	if hint := toolResultText(t, result); hint !=
-		"Inspect caller.go:19; details in structuredContent." {
+	if hint := toolResultText(t, result); hint != structuredContentTextHint {
 		t.Fatalf("inspect hint = %q", hint)
 	}
 }
 
-func TestInspectEvidenceWinsTightBudgetOverFollowupMetadata(t *testing.T) {
+func TestInspectEvidenceWinsTightBudgetOverCandidateMetadata(t *testing.T) {
 	response := navigator.InspectResponse{
 		Location: "a.go:7", Symbol: "Serve",
 		Results: []navigator.Result{
@@ -299,13 +335,12 @@ func TestInspectEvidenceWinsTightBudgetOverFollowupMetadata(t *testing.T) {
 	}
 	lean := output.(leanResponse)
 	if lean.Evidence == nil || lean.Evidence.Text != response.Results[0].Code {
-		t.Fatalf("direct evidence lost to follow-up metadata: %#v", lean)
+		t.Fatalf("direct evidence lost to candidate metadata: %#v", lean)
 	}
-	if lean.Next != nil || len(lean.Results) != 0 || sizing.StructuredBytes > 220 {
+	if len(lean.Results) != 0 || sizing.StructuredBytes > 220 {
 		t.Fatalf("tight response = %#v, sizing %#v", lean, sizing)
 	}
-	if hint := toolResultText(t, result); hint !=
-		"Source a.go:7; details in structuredContent." {
+	if hint := toolResultText(t, result); hint != structuredContentTextHint {
 		t.Fatalf("evidence hint = %q", hint)
 	}
 }
@@ -510,7 +545,7 @@ func TestInspectFallbackCountsTowardResultLimit(t *testing.T) {
 	}
 }
 
-func TestLeanResultsDefinitionFirstWithExactlyOneExactNext(t *testing.T) {
+func TestLeanResultsDefinitionFirstWithoutDuplicateFollowup(t *testing.T) {
 	response := navigator.FindResponse{
 		Query: "Target", MatchedAs: navigator.FindOutcomeSymbol,
 		Results: []navigator.Result{
@@ -528,14 +563,10 @@ func TestLeanResultsDefinitionFirstWithExactlyOneExactNext(t *testing.T) {
 		lean.Results[0].Location != "target.go:3" {
 		t.Fatalf("definition-first results = %#v", lean.Results)
 	}
-	if lean.Next == nil || lean.Next.Tool != "inspect" ||
-		lean.Next.Arguments["location"] != "target.go:3" {
-		t.Fatalf("next = %#v", lean.Next)
-	}
 	text := toolResultText(t, result)
-	if text != "Inspect target.go:3; details in structuredContent." ||
+	if text != structuredContentTextHint ||
 		len(text) > maximumCompactTextBytes {
-		t.Fatalf("actionable text hint = %q", text)
+		t.Fatalf("constant text hint = %q", text)
 	}
 }
 
@@ -559,11 +590,10 @@ func TestFindResponseNeverEmbedsSource(t *testing.T) {
 		lean.Results[0].Location != "target.go:3" || lean.Results[0].Signature != "" {
 		t.Fatalf("find index = %#v", lean)
 	}
-	if lean.Next == nil || lean.Next.Arguments["location"] != "target.go:3" ||
-		!containsString(lean.Truncated, "source") || sizing.StructuredBytes > 1024 {
+	if !containsString(lean.Truncated, "source") || sizing.StructuredBytes > 1024 {
 		t.Fatalf("find source omission = %#v, sizing %#v", lean, sizing)
 	}
-	if text := toolResultText(t, result); text != "Inspect target.go:3; details in structuredContent." {
+	if text := toolResultText(t, result); text != structuredContentTextHint {
 		t.Fatalf("find index hint = %q", text)
 	}
 }
@@ -581,8 +611,7 @@ func TestFindAmbiguousDefinitionsDoNotInlineArbitrarySource(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Evidence != nil || lean.Selection != selectionAmbiguous || lean.Next != nil ||
-		lean.Related != nil || len(lean.Results) != 2 ||
+	if lean.Evidence != nil || lean.Selection != selectionAmbiguous || len(lean.Results) != 2 ||
 		lean.Results[0].Location != "a.go:3" || lean.Results[1].Location != "b.go:7" {
 		t.Fatalf("ambiguous find = %#v", lean)
 	}
@@ -609,14 +638,13 @@ func TestFindSelectionStates(t *testing.T) {
 		results   []navigator.Result
 		truncated bool
 		selection string
-		allowNext bool
 	}{
-		{name: "unique", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3)}, selection: selectionUnique, allowNext: true},
+		{name: "unique", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3)}, selection: selectionUnique},
 		{name: "ambiguous", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3), definition("b.go", 7)}, selection: selectionAmbiguous},
 		{name: "truncated", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3)}, truncated: true, selection: selectionIncomplete},
 		{name: "known ambiguity wins over truncation", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3), definition("b.go", 7)}, truncated: true, selection: selectionAmbiguous},
 		{name: "references only", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{reference}, selection: selectionIncomplete},
-		{name: "duplicate location", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3), definition("a.go", 3)}, selection: selectionUnique, allowNext: true},
+		{name: "duplicate location", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{definition("a.go", 3), definition("a.go", 3)}, selection: selectionUnique},
 		{name: "unactionable definition", outcome: navigator.FindOutcomeSymbol, results: []navigator.Result{{Path: "a.go", Kind: "def", Symbol: "Target"}}, selection: selectionIncomplete},
 		{name: "file outcome", outcome: navigator.FindOutcomeFile, results: []navigator.Result{{Path: "a.go", Kind: "file"}}},
 	}
@@ -631,25 +659,19 @@ func TestFindSelectionStates(t *testing.T) {
 				t.Fatal(err)
 			}
 			lean := output.(leanResponse)
-			if lean.Selection != test.selection || (lean.Next != nil) != test.allowNext ||
-				lean.Related != nil || sizing.StructuredBytes > 1024 {
+			if lean.Selection != test.selection || sizing.StructuredBytes > 1024 {
 				t.Fatalf("selection response = %#v, sizing %#v", lean, sizing)
 			}
-			if !test.allowNext && test.outcome != navigator.FindOutcomeNone &&
-				toolResultText(t, result) != structuredContentTextHint {
-				t.Fatalf("non-unique hint = %q", toolResultText(t, result))
+			if toolResultText(t, result) != structuredContentTextHint {
+				t.Fatalf("auto hint = %q", toolResultText(t, result))
 			}
 			fullResult, _, _, err := prepareToolResponse("find", responseFull, response, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
 			fullHint := toolResultText(t, fullResult)
-			if test.allowNext && !strings.HasPrefix(fullHint, "Inspect ") {
-				t.Fatalf("unique full hint = %q", fullHint)
-			}
-			if !test.allowNext && test.outcome != navigator.FindOutcomeNone &&
-				fullHint != structuredContentTextHint {
-				t.Fatalf("non-unique full hint = %q", fullHint)
+			if fullHint != structuredContentTextHint {
+				t.Fatalf("full hint = %q", fullHint)
 			}
 		})
 	}
@@ -660,6 +682,7 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 		name      string
 		response  navigator.FindResponse
 		location  string
+		kind      string
 		selection string
 	}{
 		{
@@ -671,7 +694,7 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 					Kind: "def", Symbol: strings.Repeat("Target", 30),
 				}},
 			},
-			location: strings.Repeat("deep/", 30) + "target.go:42", selection: selectionUnique,
+			location: strings.Repeat("deep/", 30) + "target.go:42", kind: "def", selection: selectionUnique,
 		},
 		{
 			name: "incomplete",
@@ -683,7 +706,17 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 				}},
 				ResultsTruncated: true,
 			},
-			location: strings.Repeat("nested/", 25) + "target.go:17", selection: selectionIncomplete,
+			location: strings.Repeat("nested/", 25) + "target.go:17", kind: "def", selection: selectionIncomplete,
+		},
+		{
+			name: "path only",
+			response: navigator.FindResponse{
+				Query: "target.go", MatchedAs: navigator.FindOutcomeFile,
+				Results: []navigator.Result{{
+					Path: strings.Repeat("deep/", 30) + "target.go", Kind: "file",
+				}},
+			},
+			location: strings.Repeat("deep/", 30) + "target.go", kind: "file",
 		},
 	}
 	for _, test := range tests {
@@ -703,7 +736,7 @@ func TestFindMandatoryPrimaryCandidateAtEveryBudgetBoundary(t *testing.T) {
 				lean := output.(leanResponse)
 				encoded := mustMarshalResponse(t, lean)
 				if lean.Selection != test.selection || len(lean.Results) == 0 ||
-					lean.Results[0].Location != test.location || lean.Results[0].Kind != "def" ||
+					lean.Results[0].Location != test.location || lean.Results[0].Kind != test.kind ||
 					len(encoded) > budget || sizing.StructuredBytes != len(encoded) {
 					t.Fatalf("budget %d response = %#v, sizing %#v", budget, lean, sizing)
 				}
@@ -742,7 +775,7 @@ func TestFindMandatoryCandidateSurvivesOneKiBPressure(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Selection != selectionIncomplete || lean.Evidence != nil || lean.Next != nil ||
+	if lean.Selection != selectionIncomplete || lean.Evidence != nil ||
 		len(lean.Results) == 0 || lean.Results[0].Location != primaryPath+":307" ||
 		lean.Results[0].Kind != "def" || !containsString(lean.Truncated, "results") ||
 		!containsString(lean.Truncated, "source") || sizing.StructuredBytes > 1024 {
@@ -766,7 +799,7 @@ func TestFindIndexOmitsCompleteUTF8Source(t *testing.T) {
 	lean := output.(leanResponse)
 	encoded := mustMarshalResponse(t, lean)
 	if sizing.StructuredBytes > 320 || !utf8.Valid(encoded) || lean.Evidence != nil ||
-		lean.Next == nil || lean.Next.Arguments["location"] != "unicode.go:3" ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "unicode.go:3" ||
 		!containsString(lean.Truncated, "source") || bytes.Contains(encoded, []byte(code)) {
 		t.Fatalf("tight UTF-8 index = %#v (%d bytes)", lean, sizing.StructuredBytes)
 	}
@@ -785,8 +818,8 @@ func TestFindOversizedSingleLineKeepsInspectFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if sizing.StructuredBytes > 320 || lean.Evidence != nil || lean.Next == nil ||
-		lean.Next.Arguments["location"] != "target.go:3" ||
+	if sizing.StructuredBytes > 320 || lean.Evidence != nil || len(lean.Results) != 1 ||
+		lean.Results[0].Location != "target.go:3" ||
 		!containsString(lean.Truncated, "source") {
 		t.Fatalf("oversized-line fallback = %#v, sizing %#v", lean, sizing)
 	}
@@ -808,8 +841,8 @@ func TestFindIndexOmitsLongPreludeSource(t *testing.T) {
 	}
 	lean := output.(leanResponse)
 	if sizing.StructuredBytes > 320 || lean.Evidence != nil ||
-		!containsString(lean.Truncated, "source") || lean.Next == nil ||
-		lean.Next.Arguments["location"] != "target.go:81" {
+		!containsString(lean.Truncated, "source") || len(lean.Results) != 1 ||
+		lean.Results[0].Location != "target.go:81" {
 		t.Fatalf("long-prelude index = %#v, sizing %#v", lean, sizing)
 	}
 }
@@ -828,8 +861,8 @@ func TestFindNavigatorTruncatedEvidenceRetainsExactInspect(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Evidence != nil || !containsString(lean.Truncated, "source") || lean.Next == nil ||
-		lean.Next.Arguments["location"] != "target.go:3" {
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "target.go:3" {
 		t.Fatalf("navigator-truncated index = %#v", lean)
 	}
 }
@@ -855,8 +888,8 @@ func TestFindIndexFitsItsExactSerializedBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if sizing.StructuredBytes != budget || lean.Evidence != nil || lean.Next == nil ||
-		lean.Next.Arguments["location"] != "target.go:3" ||
+	if sizing.StructuredBytes != budget || lean.Evidence != nil ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "target.go:3" ||
 		!containsString(lean.Truncated, "source") {
 		t.Fatalf("boundary response = %#v, sizing %#v", lean, sizing)
 	}
@@ -880,7 +913,7 @@ func TestFindKeepsDefinitionBeforeDiverseReferences(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Evidence != nil || lean.Next == nil || len(lean.Results) != maximumLeanResults ||
+	if lean.Evidence != nil || len(lean.Results) != maximumLeanResults ||
 		lean.Results[0].Location != "target.go:3" ||
 		!containsString(lean.Truncated, "results") || sizing.StructuredBytes > 1024 {
 		t.Fatalf("definition/reference index = %#v, sizing %#v", lean, sizing)
@@ -911,13 +944,14 @@ func TestFindPathDoesNotPrivilegeFollowUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Selection != "" || lean.Next != nil || lean.Related != nil ||
-		sizing.StructuredBytes > 1024 {
+	encoded := mustMarshalResponse(t, lean)
+	if lean.Selection != "" || sizing.StructuredBytes > 1024 ||
+		bytes.Contains(encoded, []byte(`"next"`)) {
 		t.Fatalf("path response = %#v, sizing %#v", lean, sizing)
 	}
 }
 
-func TestFindRelatedActionRejectsUnrelatedPaths(t *testing.T) {
+func TestFindNeverEmitsNestedFollowupJSON(t *testing.T) {
 	for _, candidate := range []string{"README.md", "cmd/validator/other_test.go", "cmd/validator/main.go"} {
 		response := navigator.FindResponse{
 			Query: "validator", MatchedAs: navigator.FindOutcomeFile,
@@ -930,13 +964,15 @@ func TestFindRelatedActionRejectsUnrelatedPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if related := output.(leanResponse).Related; related != nil {
-			t.Fatalf("candidate %q produced related action %#v", candidate, related)
+		encoded := mustMarshalResponse(t, output)
+		if bytes.Contains(encoded, []byte(`"next"`)) ||
+			bytes.Contains(encoded, []byte(`"next_related"`)) {
+			t.Fatalf("candidate %q produced nested follow-up: %s", candidate, encoded)
 		}
 	}
 }
 
-func TestFindRelatedActionIsDroppedAtomicallyWhenItCannotFit(t *testing.T) {
+func TestFindPathResponseStaysBoundedWithoutFollowup(t *testing.T) {
 	response := navigator.FindResponse{
 		Query: "validator", MatchedAs: navigator.FindOutcomeFile,
 		Results: []navigator.Result{
@@ -952,8 +988,8 @@ func TestFindRelatedActionIsDroppedAtomicallyWhenItCannotFit(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Related != nil || lean.Next != nil || sizing.StructuredBytes > 320 {
-		t.Fatalf("tight related response = %#v, sizing %#v", lean, sizing)
+	if sizing.StructuredBytes > 320 {
+		t.Fatalf("tight path response = %#v, sizing %#v", lean, sizing)
 	}
 }
 
@@ -982,13 +1018,13 @@ func TestLeanResultsPreferDistinctFilesAfterBestDefinition(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("diverse definition-first results = %q, want %q", got, want)
 	}
-	if lean.Selection != selectionAmbiguous || lean.Next != nil ||
+	if lean.Selection != selectionAmbiguous ||
 		!containsString(lean.Truncated, "results") {
 		t.Fatalf("action/truncation = %#v", lean)
 	}
 }
 
-func TestFindNoMatchHintIsUsefulAndBounded(t *testing.T) {
+func TestFindNoMatchUsesConstantBoundedHint(t *testing.T) {
 	response := navigator.FindResponse{
 		Query: "missingTarget", MatchedAs: navigator.FindOutcomeNone,
 		Results: []navigator.Result{},
@@ -999,8 +1035,7 @@ func TestFindNoMatchHintIsUsefulAndBounded(t *testing.T) {
 			t.Fatal(err)
 		}
 		hint := toolResultText(t, result)
-		if hint != noMatchTextHint || len(hint) > maximumCompactTextBytes ||
-			strings.Contains(strings.ToLower(hint), "full result") {
+		if hint != structuredContentTextHint || len(hint) > maximumCompactTextBytes {
 			t.Fatalf("%s no-match hint = %q", mode, hint)
 		}
 	}
@@ -1031,7 +1066,7 @@ func TestOutlinePreservesDefinitionSourceOrder(t *testing.T) {
 	}
 }
 
-func TestLeanNeverShortensExactLocationsOrActions(t *testing.T) {
+func TestLeanNeverShortensExactLocations(t *testing.T) {
 	longPath := strings.Repeat("deep/", 80) + "file.go"
 	location := longPath + ":42"
 	response := navigator.FindResponse{
@@ -1043,9 +1078,8 @@ func TestLeanNeverShortensExactLocationsOrActions(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if len(lean.Results) != 1 || lean.Results[0].Location != location ||
-		lean.Next == nil || lean.Next.Arguments["location"] != location {
-		t.Fatalf("location/action changed: %#v", lean)
+	if len(lean.Results) != 1 || lean.Results[0].Location != location {
+		t.Fatalf("location changed: %#v", lean)
 	}
 
 	tooLong := strings.Repeat("deep/", 300) + "file.go:42"
@@ -1073,15 +1107,6 @@ func TestLongQueryIsUTF8BoundedAndExposedAsTruncated(t *testing.T) {
 	if len(encoded) > 1024 || !utf8.Valid(encoded) || lean.Target == query ||
 		!containsString(lean.Truncated, "target") {
 		t.Fatalf("bounded query = %#v (%d bytes)", lean, len(encoded))
-	}
-}
-
-func TestActionHintFallsBackInsteadOfTruncatingLocation(t *testing.T) {
-	location := strings.Repeat("deep/", 40) + "file.go:1"
-	next := &leanNext{Tool: "inspect", Arguments: map[string]any{"location": location}}
-	hint := leanNextHint(next)
-	if hint != structuredContentTextHint || strings.Contains(hint, location[:20]) {
-		t.Fatalf("long action hint was partially emitted: %q", hint)
 	}
 }
 
@@ -1156,7 +1181,7 @@ func sortedTopLevelKeys(t *testing.T, encoded []byte) []string {
 	}
 	keys := make([]string, 0, len(decoded))
 	for _, candidate := range []string{
-		"target", "outcome", "selection", "evidence", "results", "truncated", "next", "next_related", "error",
+		"target", "outcome", "selection", "evidence", "results", "truncated", "error",
 	} {
 		if _, ok := decoded[candidate]; ok {
 			keys = append(keys, candidate)
@@ -1171,7 +1196,8 @@ func sortedTopLevelKeys(t *testing.T, encoded []byte) []string {
 func assertBoundedNonJSONHint(t *testing.T, result *mcp.CallToolResult, structuredJSON []byte) {
 	t.Helper()
 	text := toolResultText(t, result)
-	if text == "" || len(text) > maximumCompactTextBytes || !utf8.ValidString(text) {
+	if text != structuredContentTextHint || len(text) > maximumCompactTextBytes ||
+		!utf8.ValidString(text) {
 		t.Fatalf("text hint = %q", text)
 	}
 	if text == string(structuredJSON) || strings.Contains(text, string(structuredJSON)) ||

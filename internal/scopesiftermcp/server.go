@@ -22,12 +22,12 @@ const (
 	// ImplementationName is the stable MCP implementation name.
 	ImplementationName = "scopesifter"
 	// ImplementationVersion changes when the public MCP tool contract changes.
-	ImplementationVersion = "scopesifter-mcp/v9"
+	ImplementationVersion = "scopesifter-mcp/v10"
 
 	structuredOutputBudget = 1024
 
 	changedDescription = "Start bug/branch/PR with bounded base-to-HEAD changes."
-	findDescription    = "Find exact symbol/path; return ranked locations."
+	findDescription    = "Find exact symbol/path; return ranked locations"
 	inspectDescription = "Read complete scope or exact fallback at PATH:LINE."
 	outlineDescription = "Index known file; inspect PATH:LINE for source."
 )

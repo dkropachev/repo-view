@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"unicode/utf8"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,7 +33,7 @@ type responseSizing struct {
 }
 
 // leanResponse is the stable auto-response shape for every tool. Optional
-// evidence and follow-up actions are useful payload, never formatter telemetry.
+// evidence is useful payload, never formatter telemetry.
 //
 //nolint:govet,nolintlint // Declaration order is the intentional model-visible JSON order.
 type leanResponse struct {
@@ -44,8 +43,6 @@ type leanResponse struct {
 	Evidence  *leanEvidence `json:"evidence,omitempty"`
 	Results   []leanResult  `json:"results"`
 	Truncated []string      `json:"truncated"`
-	Next      *leanNext     `json:"next,omitempty"`
-	Related   *leanNext     `json:"next_related,omitempty"`
 	Error     string        `json:"error,omitempty"`
 }
 
@@ -61,12 +58,6 @@ type leanResult struct {
 	Symbol    string `json:"symbol,omitempty"`
 	Scope     string `json:"scope,omitempty"`
 	Signature string `json:"signature,omitempty"`
-}
-
-//nolint:govet,nolintlint // Tool-before-arguments is the intentional model-visible JSON order.
-type leanNext struct {
-	Tool      string         `json:"tool"`
-	Arguments map[string]any `json:"arguments"`
 }
 
 type leanResultSource struct {
@@ -120,7 +111,7 @@ func prepareToolResponse(
 		StructuredBytes: len(originalJSON),
 	}
 	if mode == responseFull {
-		return responseResult(actionableResponseHint(tool, full, nil)), full, sizing, nil
+		return responseResult(), full, sizing, nil
 	}
 
 	plan, err := leanResponseFor(tool, full)
@@ -129,7 +120,7 @@ func prepareToolResponse(
 	}
 	if !fitLeanResponse(&plan, tool, budget) {
 		return nil, nil, responseSizing{}, fmt.Errorf(
-			"%d-byte structured-output budget is too small for exact %s actions",
+			"%d-byte structured-output budget is too small for exact %s candidates",
 			budget,
 			tool,
 		)
@@ -148,20 +139,14 @@ func prepareToolResponse(
 	}
 	sizing.StructuredBytes = len(leanJSON)
 	sizing.Compacted = len(originalJSON) > budget
-	return responseResult(actionableResponseHint(tool, full, &plan.response)), plan.response, sizing, nil
+	return responseResult(), plan.response, sizing, nil
 }
 
-const (
-	structuredContentTextHint = "Details in structuredContent."
-	noMatchTextHint           = "No match. Try a shorter query or broader path filters; details in structuredContent."
-)
+const structuredContentTextHint = "See structuredContent."
 
-func responseResult(hint string) *mcp.CallToolResult {
-	if hint == "" || len(hint) > maximumCompactTextBytes || !utf8.ValidString(hint) {
-		hint = structuredContentTextHint
-	}
+func responseResult() *mcp.CallToolResult {
 	return &mcp.CallToolResult{
-		Content: []mcp.Content{&mcp.TextContent{Text: hint}},
+		Content: []mcp.Content{&mcp.TextContent{Text: structuredContentTextHint}},
 	}
 }
 
@@ -214,8 +199,8 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		if tool != "inspect" {
 			return plan, responseTypeError(tool, full)
 		}
-		// Target describes the completed call, not a follow-up action. Bound it as
-		// metadata while preserving every emitted result and next location exactly.
+		// Target describes the completed call. Bound it as metadata while
+		// preserving every emitted result location exactly.
 		plan.response.Target, plan.response.Truncated = boundedLeanField(
 			response.Location, "target", plan.response.Truncated,
 		)
@@ -514,7 +499,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 		evidenceFit = fitLeanEvidence(response, plan.evidence, budget)
 	}
 	if tool == "inspect" && !evidenceFit && plan.inspectFallback != nil {
-		if !tryRequiredLeanResult(response, coreLeanResult(plan.inspectFallback.lean), nil, budget) {
+		if !tryRequiredLeanResult(response, coreLeanResult(plan.inspectFallback.lean), budget) {
 			return false
 		}
 		minimumResults = 1
@@ -524,18 +509,14 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	selected := make([]int, 0, min(len(plan.results), maximumLeanResults))
 	primary := firstActionableResult(tool, plan.results)
 	if primary >= 0 {
-		next := leanNextFor(tool, plan.results[primary].result)
-		if tool == "find" && !findAllowsNext(response) {
-			next = nil
-		}
 		candidate := coreLeanResult(plan.results[primary].lean)
 		if tool == "find" {
-			if !tryRequiredLeanResult(response, candidate, next, budget) {
+			if !tryRequiredLeanResult(response, candidate, budget) {
 				return false
 			}
 			selected = append(selected, primary)
 			minimumResults = 1
-		} else if tryPrimaryLeanResult(response, candidate, next, budget) {
+		} else if tryLeanResult(response, candidate, budget) {
 			selected = append(selected, primary)
 		}
 	}
@@ -553,32 +534,20 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	if len(selected) != len(plan.results) {
 		markLeanTruncated(response, "results")
 	}
-	if related := relatedFindNext(tool, response, plan.results); related != nil {
-		response.Related = related
-		if !leanFits(response, budget) {
-			response.Related = nil
-		}
-	}
 	if !leanFits(response, budget) {
-		// Truncation markers are mandatory. Evict result metadata first, then
-		// its separately represented follow-up. Preserve direct source evidence
-		// until nothing else can make the response fit.
+		// Truncation markers are mandatory. Evict optional results first and
+		// preserve direct source evidence until nothing else can make the
+		// response fit.
 		for !leanFits(response, budget) && len(response.Results) > minimumResults {
 			response.Results = response.Results[:len(response.Results)-1]
 			selected = selected[:len(selected)-1]
-		}
-		if !leanFits(response, budget) {
-			response.Related = nil
-		}
-		if !leanFits(response, budget) {
-			response.Next = nil
 		}
 		if !leanFits(response, budget) && response.Evidence != nil {
 			response.Evidence = nil
 			markLeanTruncated(response, "source")
 			if tool == "inspect" && plan.inspectFallback != nil {
 				if !tryRequiredLeanResult(
-					response, coreLeanResult(plan.inspectFallback.lean), nil, budget,
+					response, coreLeanResult(plan.inspectFallback.lean), budget,
 				) {
 					return false
 				}
@@ -594,7 +563,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 		return false
 	}
 
-	// Scope and signature are optional enrichment after exact actions, evidence,
+	// Scope and signature are optional enrichment after exact candidates, evidence,
 	// and core result identities have fit.
 	for selectedIndex, sourceIndex := range selected {
 		resultIndex := resultOffset + selectedIndex
@@ -635,80 +604,12 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 
 func firstActionableResult(tool string, results []leanResultSource) int {
 	for index := range results {
-		if leanNextFor(tool, results[index].result) != nil {
+		result := &results[index].result
+		if result.Path != "" && (actionableResultLine(result) > 0 || tool == "find") {
 			return index
 		}
 	}
 	return -1
-}
-
-func leanNextFor(tool string, result navigator.Result) *leanNext {
-	if result.Path == "" {
-		return nil
-	}
-	if line := actionableResultLine(&result); line > 0 {
-		return &leanNext{Tool: "inspect", Arguments: map[string]any{
-			"location": fmt.Sprintf("%s:%d", result.Path, line),
-		}}
-	}
-	if tool == "find" {
-		return &leanNext{Tool: "outline", Arguments: map[string]any{
-			"path": result.Path,
-		}}
-	}
-	return nil
-}
-
-// relatedFindNext turns a path match's changed scope plus its exact Go test
-// counterpart into a focused reference lookup. This avoids asking callers to
-// invent a test line or scan an entire outline.
-func relatedFindNext(
-	tool string,
-	response *leanResponse,
-	results []leanResultSource,
-) *leanNext {
-	if tool != "find" || !findAllowsNext(response) {
-		return nil
-	}
-	symbol := ""
-	primaryPath := ""
-	for index := range results {
-		result := results[index].result
-		if actionableResultLine(&result) <= 0 || result.Scope == "" {
-			continue
-		}
-		symbol = result.Scope
-		primaryPath = result.Path
-		break
-	}
-	if symbol == "" {
-		return nil
-	}
-	for index := range results {
-		result := results[index].result
-		if !goTestCounterpart(primaryPath, result.Path) || actionableResultLine(&result) > 0 {
-			continue
-		}
-		return &leanNext{Tool: "find", Arguments: map[string]any{
-			"query":      symbol,
-			"match":      "symbol",
-			"include":    "refs",
-			"path_globs": []string{result.Path},
-		}}
-	}
-	return nil
-}
-
-func findAllowsNext(response *leanResponse) bool {
-	return response != nil &&
-		response.Outcome == string(navigator.FindOutcomeSymbol) &&
-		response.Selection == selectionUnique
-}
-
-func goTestCounterpart(sourcePath, candidatePath string) bool {
-	return strings.HasSuffix(sourcePath, ".go") &&
-		!strings.HasSuffix(sourcePath, "_test.go") &&
-		candidatePath == strings.TrimSuffix(sourcePath, ".go")+"_test.go"
 }
 
 func coreLeanResult(result leanResult) leanResult {
@@ -717,33 +618,9 @@ func coreLeanResult(result leanResult) leanResult {
 	return result
 }
 
-func tryPrimaryLeanResult(
-	response *leanResponse,
-	result leanResult,
-	next *leanNext,
-	budget int,
-) bool {
-	if next == nil {
-		return false
-	}
-	response.Results = append(response.Results, result)
-	response.Next = next
-	if leanFits(response, budget) {
-		return true
-	}
-	response.Results[len(response.Results)-1].Symbol = ""
-	if leanFits(response, budget) {
-		return true
-	}
-	response.Results = response.Results[:len(response.Results)-1]
-	response.Next = nil
-	return false
-}
-
 func tryRequiredLeanResult(
 	response *leanResponse,
 	result leanResult,
-	next *leanNext,
 	budget int,
 ) bool {
 	response.Results = append(response.Results, result)
@@ -753,12 +630,6 @@ func tryRequiredLeanResult(
 	if !leanFits(response, budget) {
 		response.Results = response.Results[:len(response.Results)-1]
 		return false
-	}
-	if next != nil {
-		response.Next = next
-		if !leanFits(response, budget) {
-			response.Next = nil
-		}
 	}
 	return true
 }
@@ -806,69 +677,6 @@ func actionableResultLine(result *navigator.Result) int {
 		}
 	}
 	return 0
-}
-
-func actionableResponseHint(tool string, full any, lean *leanResponse) string {
-	if lean != nil {
-		if lean.Evidence != nil {
-			return boundedLocationHint("Source", lean.Evidence.Start)
-		}
-		if hint := leanNextHint(lean.Next); hint != "" {
-			return hint
-		}
-		return outcomeResponseHint(tool, lean)
-	}
-	plan, err := leanResponseFor(tool, full)
-	if err != nil {
-		return structuredContentTextHint
-	}
-	if plan.evidence != nil {
-		return boundedLocationHint(
-			"Source",
-			evidenceLocation(plan.evidence.path, plan.evidence.startLine),
-		)
-	}
-	if tool == "find" && !findAllowsNext(&plan.response) {
-		return outcomeResponseHint(tool, &plan.response)
-	}
-	if index := firstActionableResult(tool, plan.results); index >= 0 {
-		return leanNextHint(leanNextFor(tool, plan.results[index].result))
-	}
-	return outcomeResponseHint(tool, &plan.response)
-}
-
-func outcomeResponseHint(tool string, response *leanResponse) string {
-	if tool == "find" && response != nil && response.Outcome == string(navigator.FindOutcomeNone) {
-		return noMatchTextHint
-	}
-	return structuredContentTextHint
-}
-
-func leanNextHint(next *leanNext) string {
-	if next == nil {
-		return ""
-	}
-	switch next.Tool {
-	case "inspect":
-		location, _ := next.Arguments["location"].(string)
-		return boundedLocationHint("Inspect", location)
-	case "outline":
-		path, _ := next.Arguments["path"].(string)
-		return boundedLocationHint("Outline", path)
-	default:
-		return ""
-	}
-}
-
-func boundedLocationHint(label, target string) string {
-	if target == "" || !utf8.ValidString(target) || strings.ContainsAny(target, "\r\n") {
-		return structuredContentTextHint
-	}
-	hint := fmt.Sprintf("%s %s; details in structuredContent.", label, target)
-	if len(hint) > maximumCompactTextBytes {
-		return structuredContentTextHint
-	}
-	return hint
 }
 
 func markLeanTruncated(response *leanResponse, field string) {

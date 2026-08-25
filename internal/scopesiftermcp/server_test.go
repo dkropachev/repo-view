@@ -358,9 +358,8 @@ func TestServerChangedReturnsExactEditedLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(changed.Results) != 1 || changed.Results[0].Location != "demo.go:7" ||
-		changed.Next == nil || changed.Next.Tool != "inspect" ||
-		changed.Next.Arguments["location"] != "demo.go:7" {
-		t.Fatalf("changed action = %#v", changed)
+		bytes.Contains(raw, []byte(`"next"`)) {
+		t.Fatalf("changed location = %#v", changed)
 	}
 }
 
@@ -414,15 +413,15 @@ func TestServerFindPathPrioritizesChangedLocation(t *testing.T) {
 		result.Scope != "Caller" {
 		t.Fatalf("changed path candidate = %#v", result)
 	}
-	if found.Selection != "" || found.Next != nil || found.Related != nil {
-		t.Fatalf("changed path follow-up = %#v", found)
+	if found.Selection != "" || bytes.Contains(raw, []byte(`"next"`)) {
+		t.Fatalf("changed path response = %#v", found)
 	}
 	if len(raw) > structuredOutputBudget {
 		t.Fatalf("enriched path response = %d bytes, want at most %d", len(raw), structuredOutputBudget)
 	}
 }
 
-func TestServerFindPathOmitsSingularRelatedAction(t *testing.T) {
+func TestServerFindPathReturnsOnlyCandidates(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
@@ -442,8 +441,8 @@ func TestServerFindPathOmitsSingularRelatedAction(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Selection != "" || found.Next != nil || found.Related != nil ||
-		len(found.Results) != 2 {
+	if found.Selection != "" || len(found.Results) != 2 ||
+		bytes.Contains(raw, []byte(`"next"`)) {
 		t.Fatalf("path response = %#v", found)
 	}
 }
@@ -474,9 +473,8 @@ func TestServerFindUniqueDefinitionStaysLocationIndex(t *testing.T) {
 		found.Results[0].Location != "demo.go:3" || found.Results[0].Kind != "def" {
 		t.Fatalf("unique definition index = %#v in %s", found, raw)
 	}
-	if found.Next == nil || found.Next.Tool != "inspect" ||
-		found.Next.Arguments["location"] != "demo.go:3" || len(raw) > structuredOutputBudget {
-		t.Fatalf("unique definition action = %#v (%d bytes)", found.Next, len(raw))
+	if len(raw) > structuredOutputBudget || bytes.Contains(raw, []byte(`"next"`)) {
+		t.Fatalf("unique definition index = %#v (%d bytes)", found, len(raw))
 	}
 	if found.Results[0].Signature != "" || bytes.Contains(raw, []byte("func Helper()")) {
 		t.Fatalf("find leaked source = %#v in %s", found.Results, raw)
@@ -541,7 +539,7 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 		"query": "Helper", "match": "symbol", "include": "defs",
 	})
 	if ambiguous.Selection != selectionAmbiguous || ambiguous.Evidence != nil ||
-		ambiguous.Next != nil || len(ambiguous.Results) != 2 {
+		len(ambiguous.Results) != 2 {
 		t.Fatalf("ambiguous definitions = %#v", ambiguous)
 	}
 	locations := []string{ambiguous.Results[0].Location, ambiguous.Results[1].Location}
@@ -553,7 +551,7 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 		"query": "Helper", "match": "symbol", "include": "defs", "limit": 1,
 	})
 	if truncatedAmbiguous.Selection != selectionIncomplete ||
-		truncatedAmbiguous.Evidence != nil || truncatedAmbiguous.Next != nil ||
+		truncatedAmbiguous.Evidence != nil ||
 		!containsString(truncatedAmbiguous.Truncated, "results") {
 		t.Fatalf("truncated ambiguity claimed source = %#v", truncatedAmbiguous)
 	}
@@ -564,8 +562,7 @@ func TestServerFindPreservesAmbiguousDefinitionsUntilPathNarrows(t *testing.T) {
 	})
 	if narrowed.Selection != selectionUnique || narrowed.Evidence != nil ||
 		len(narrowed.Results) != 1 ||
-		narrowed.Results[0].Location != "other.go:3" || narrowed.Next == nil ||
-		narrowed.Next.Arguments["location"] != "other.go:3" {
+		narrowed.Results[0].Location != "other.go:3" {
 		t.Fatalf("narrowed definition = %#v", narrowed)
 	}
 }
@@ -605,7 +602,7 @@ func TestServerFindPrioritizesExactLiteralPathFilter(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Selection != selectionIncomplete || found.Next != nil ||
+	if found.Selection != selectionIncomplete ||
 		len(found.Results) != 1 || found.Results[0].Location != "z/target.go:3" ||
 		!containsString(found.Truncated, "results") || len(raw) > structuredOutputBudget {
 		t.Fatalf("exact-path priority = %#v (%d bytes)", found, len(raw))
@@ -644,7 +641,7 @@ func TestServerFindOneDefinitionManyRefsStaysBoundedIndex(t *testing.T) {
 	if err := json.Unmarshal(raw, &found); err != nil {
 		t.Fatal(err)
 	}
-	if found.Selection != selectionIncomplete || found.Evidence != nil || found.Next != nil ||
+	if found.Selection != selectionIncomplete || found.Evidence != nil ||
 		!containsString(found.Truncated, "results") ||
 		len(raw) > structuredOutputBudget {
 		t.Fatalf("bounded definition index = %#v (%d bytes)", found, len(raw))
@@ -666,7 +663,7 @@ func TestServerFindOneDefinitionManyRefsStaysBoundedIndex(t *testing.T) {
 	if err := json.Unmarshal(refsRaw, &refs); err != nil {
 		t.Fatal(err)
 	}
-	if refs.Selection != selectionIncomplete || refs.Evidence != nil || refs.Next != nil ||
+	if refs.Selection != selectionIncomplete || refs.Evidence != nil ||
 		len(refs.Results) != 1 || refs.Results[0].Kind != "ref" {
 		t.Fatalf("refs-only find injected definition = %#v", refs)
 	}
@@ -711,8 +708,7 @@ func TestServerFindIndexHonorsFiltersAndChangedOnly(t *testing.T) {
 		"changed_only": true,
 	})
 	if changed.Evidence != nil || len(changed.Results) != 1 ||
-		changed.Results[0].Location != "demo.go:3" || changed.Next == nil ||
-		changed.Next.Arguments["location"] != "demo.go:3" {
+		changed.Results[0].Location != "demo.go:3" {
 		t.Fatalf("changed-only index = %#v", changed)
 	}
 }
@@ -746,8 +742,7 @@ func first() {}; func second() {
 		t.Fatal(err)
 	}
 	if found.Evidence != nil || len(found.Results) != 1 ||
-		found.Results[0].Location != "demo.go:2" || found.Next == nil ||
-		found.Next.Arguments["location"] != "demo.go:2" ||
+		found.Results[0].Location != "demo.go:2" ||
 		bytes.Contains(raw, []byte(`println("target body")`)) {
 		t.Fatalf("column-aware definition = %#v", found)
 	}
@@ -788,13 +783,12 @@ func TestServerFindColonPathEmitsExecutableInspectLocation(t *testing.T) {
 	}
 	location := path + ":3"
 	if found.Evidence != nil || len(found.Results) != 1 ||
-		found.Results[0].Location != location || found.Next == nil ||
-		found.Next.Tool != "inspect" || found.Next.Arguments["location"] != location {
+		found.Results[0].Location != location || bytes.Contains(raw, []byte(`"next"`)) {
 		t.Fatalf("colon-path find = %#v", found)
 	}
 
 	inspected, err := client.CallTool(context.Background(), &mcp.CallToolParams{
-		Name: found.Next.Tool, Arguments: found.Next.Arguments,
+		Name: "inspect", Arguments: map[string]any{"location": location},
 	})
 	if err != nil || inspected.IsError {
 		t.Fatalf("emitted inspect = %#v, %v", inspected, err)
@@ -870,8 +864,7 @@ func TestServerFindDefinitionLocationsAcrossLanguages(t *testing.T) {
 				len(found.Results) != 1 || found.Results[0].Kind != "def" ||
 				found.Results[0].Symbol != test.symbol ||
 				!strings.HasPrefix(found.Results[0].Location, test.path+":") ||
-				found.Results[0].Signature != "" || found.Next == nil ||
-				found.Next.Arguments["location"] != found.Results[0].Location {
+				found.Results[0].Signature != "" || bytes.Contains(raw, []byte(`"next"`)) {
 				t.Fatalf("cross-language index = %#v (%d bytes)", found, len(raw))
 			}
 		})
@@ -1195,7 +1188,8 @@ func assertToolOutput[T any](
 		t.Fatalf("call %s returned tool error: %s", name, toolText(response))
 	}
 	text := toolText(response)
-	if text == "" || len(text) > maximumCompactTextBytes || strings.HasPrefix(strings.TrimSpace(text), "{") {
+	if text != structuredContentTextHint || len(text) > maximumCompactTextBytes ||
+		strings.HasPrefix(strings.TrimSpace(text), "{") {
 		t.Fatalf("%s text content = %q", name, text)
 	}
 	expected, err := direct()
