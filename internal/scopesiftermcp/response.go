@@ -78,12 +78,12 @@ type leanEvidenceSource struct {
 	path      string
 	text      string
 	startLine int
-	focusLine int
 	truncated bool
 }
 
 type leanResponsePlan struct {
 	evidence         *leanEvidenceSource
+	inspectFallback  *leanResultSource
 	response         leanResponse
 	results          []leanResultSource
 	resultsTruncated bool
@@ -234,10 +234,17 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 			primaryLocation := ""
 			if lean, ok := leanResultFor(results[primary]); ok {
 				primaryLocation = lean.Location
+				fallback := leanResultSource{result: results[primary], lean: lean}
+				plan.inspectFallback = &fallback
 			}
 			if evidence := inspectEvidenceSource(results[primary]); evidence != nil {
-				plan.evidence = evidence
-				plan.sourceTruncated = evidence.truncated
+				if evidence.truncated {
+					plan.sourceTruncated = true
+				} else {
+					plan.evidence = evidence
+				}
+			} else {
+				plan.sourceTruncated = true
 			}
 			// Inspecting the scope that was just inspected wastes a turn. Exclude
 			// it even when locations-only output supplied no source evidence. Any
@@ -385,15 +392,10 @@ func inspectEvidenceSource(result navigator.Result) *leanEvidenceSource {
 	if result.Path == "" || line < 1 || result.Code == "" || !utf8.ValidString(result.Code) {
 		return nil
 	}
-	focusLine := actionableResultLine(&result)
-	if focusLine < line {
-		focusLine = line
-	}
 	return &leanEvidenceSource{
 		path:      result.Path,
 		text:      result.Code,
 		startLine: line,
-		focusLine: focusLine,
 		truncated: result.CodeTruncated,
 	}
 }
@@ -505,13 +507,20 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 		return false
 	}
 
-	// Source is the direct answer to inspect. Fit it before follow-up actions
-	// and candidate metadata so a tight budget cannot replace evidence with a
-	// redundant navigation suggestion.
+	// A complete scope is the direct answer to inspect. It is atomic: if the
+	// whole block cannot fit, retain the exact inspected location instead.
+	evidenceFit := false
 	if plan.evidence != nil {
-		fitLeanEvidence(response, plan.evidence, budget)
+		evidenceFit = fitLeanEvidence(response, plan.evidence, budget)
+	}
+	if tool == "inspect" && !evidenceFit && plan.inspectFallback != nil {
+		if !tryRequiredLeanResult(response, coreLeanResult(plan.inspectFallback.lean), nil, budget) {
+			return false
+		}
+		minimumResults = 1
 	}
 
+	resultOffset := len(response.Results)
 	selected := make([]int, 0, min(len(plan.results), maximumLeanResults))
 	primary := firstActionableResult(tool, plan.results)
 	if primary >= 0 {
@@ -532,7 +541,7 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 	}
 
 	for index := range plan.results {
-		if len(selected) == maximumLeanResults || containsIndex(selected, index) {
+		if len(response.Results) >= maximumLeanResults || containsIndex(selected, index) {
 			continue
 		}
 		candidate := coreLeanResult(plan.results[index].lean)
@@ -564,9 +573,18 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 		if !leanFits(response, budget) {
 			response.Next = nil
 		}
-		if !leanFits(response, budget) {
+		if !leanFits(response, budget) && response.Evidence != nil {
 			response.Evidence = nil
 			markLeanTruncated(response, "source")
+			if tool == "inspect" && plan.inspectFallback != nil {
+				if !tryRequiredLeanResult(
+					response, coreLeanResult(plan.inspectFallback.lean), nil, budget,
+				) {
+					return false
+				}
+				minimumResults = 1
+				resultOffset = len(response.Results)
+			}
 		}
 		if !leanFits(response, budget) && minimumResults > 0 {
 			response.Results[0].Symbol = ""
@@ -578,7 +596,8 @@ func fitLeanResponse(plan *leanResponsePlan, tool string, budget int) bool {
 
 	// Scope and signature are optional enrichment after exact actions, evidence,
 	// and core result identities have fit.
-	for resultIndex, sourceIndex := range selected {
+	for selectedIndex, sourceIndex := range selected {
+		resultIndex := resultOffset + selectedIndex
 		if resultIndex >= len(response.Results) {
 			break
 		}
@@ -757,62 +776,17 @@ func tryLeanResult(response *leanResponse, result leanResult, budget int) bool {
 	return false
 }
 
-func fitLeanEvidence(response *leanResponse, source *leanEvidenceSource, budget int) {
+func fitLeanEvidence(response *leanResponse, source *leanEvidenceSource, budget int) bool {
 	evidence := &leanEvidence{
-		Kind: "source", Start: evidenceLocation(source.path, source.startLine), Text: source.text,
+		Kind: "scope", Start: evidenceLocation(source.path, source.startLine), Text: source.text,
 	}
 	response.Evidence = evidence
 	if leanFits(response, budget) {
-		return
-	}
-	markLeanTruncated(response, "source")
-	lines := strings.Split(source.text, "\n")
-	if len(lines) > 1 && lines[len(lines)-1] == "" {
-		lines = lines[:len(lines)-1]
-	}
-	focus := source.focusLine - source.startLine
-	if focus < 0 || focus >= len(lines) {
-		response.Evidence = nil
-		return
-	}
-	if fitLeanEvidenceLines(
-		response, evidence, source.path, lines, 0, focus, source.startLine, budget,
-	) {
-		return
-	}
-	if fitLeanEvidenceLines(
-		response, evidence, source.path, lines, focus, focus, source.focusLine, budget,
-	) {
-		return
+		return true
 	}
 	response.Evidence = nil
-}
-
-func fitLeanEvidenceLines(
-	response *leanResponse,
-	evidence *leanEvidence,
-	path string,
-	lines []string,
-	start, required int,
-	startLine, budget int,
-) bool {
-	best := -1
-	for low, high := required+1, len(lines); low <= high; {
-		middle := low + (high-low)/2
-		evidence.Start = evidenceLocation(path, startLine)
-		evidence.Text = strings.Join(lines[start:middle], "\n")
-		if evidence.Text != "" && leanFits(response, budget) {
-			best = middle
-			low = middle + 1
-		} else {
-			high = middle - 1
-		}
-	}
-	if best < 0 {
-		return false
-	}
-	evidence.Text = strings.Join(lines[start:best], "\n")
-	return true
+	markLeanTruncated(response, "source")
+	return false
 }
 
 func evidenceLocation(path string, line int) string {

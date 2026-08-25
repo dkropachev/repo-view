@@ -145,7 +145,7 @@ func TestLeanGoldenToolMappings(t *testing.T) {
 				Location: "a.go:7", Symbol: "Serve",
 				Results: []navigator.Result{{Path: "a.go", Line: 7, StartLine: 7, Kind: "scope", Finding: navigator.FindingOther, Symbol: "Serve", Code: "func Serve() {\n\twork()\n}"}},
 			},
-			want: `{"target":"a.go:7","outcome":"Serve","evidence":{"kind":"source","start":"a.go:7","text":"func Serve() {\n\twork()\n}"},"results":[],"truncated":[]}`,
+			want: `{"target":"a.go:7","outcome":"Serve","evidence":{"kind":"scope","start":"a.go:7","text":"func Serve() {\n\twork()\n}"},"results":[],"truncated":[]}`,
 		},
 		{
 			name: "outline", tool: "outline",
@@ -200,7 +200,7 @@ func TestLeanResponseRemovesFormatterTelemetryAndDuplicateFinding(t *testing.T) 
 	}
 }
 
-func TestInspectEvidenceUsesOnlyCompleteUTF8LinesWithinBudget(t *testing.T) {
+func TestInspectOversizedScopeIsOmittedWhole(t *testing.T) {
 	lines := []string{
 		"func Serve() {",
 		"\toversized := \"" + strings.Repeat("界", 120) + "\"",
@@ -224,24 +224,14 @@ func TestInspectEvidenceUsesOnlyCompleteUTF8LinesWithinBudget(t *testing.T) {
 	if len(encoded) > 420 || sizing.StructuredBytes != len(encoded) || !utf8.Valid(encoded) {
 		t.Fatalf("lean evidence bytes = %d, sizing %#v", len(encoded), sizing)
 	}
-	if lean.Evidence == nil || lean.Evidence.Start != "internal/service.go:40" {
-		t.Fatalf("evidence = %#v", lean.Evidence)
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") ||
+		len(lean.Results) == 0 || lean.Results[0].Location != "internal/service.go:40" ||
+		lean.Results[0].Kind != "scope" {
+		t.Fatalf("atomic evidence fallback = %#v", lean)
 	}
-	if !strings.HasPrefix(lean.Evidence.Text, "\tthird()") ||
-		!strings.HasSuffix(code, lean.Evidence.Text) {
-		t.Fatalf("evidence omitted inspected line or cut through source: %q", lean.Evidence.Text)
-	}
-	for _, line := range lines {
-		if strings.HasPrefix(line, lean.Evidence.Text) && line != lean.Evidence.Text {
-			t.Fatalf("partial source line survived: %q", lean.Evidence.Text)
-		}
-	}
-	if !containsString(lean.Truncated, "source") {
-		t.Fatalf("source omission not exposed: %#v", lean.Truncated)
-	}
-	for _, result := range lean.Results {
-		if result.Location == "internal/service.go:40" {
-			t.Fatalf("primary inspect result duplicated evidence: %#v", lean.Results)
+	for _, line := range lines[:len(lines)-1] {
+		if strings.Contains(string(encoded), line) {
+			t.Fatalf("partial scope line survived: %q in %s", line, encoded)
 		}
 	}
 }
@@ -257,7 +247,9 @@ func TestInspectEvidenceDropsSingleOversizedLineWhole(t *testing.T) {
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if lean.Evidence != nil || !containsString(lean.Truncated, "source") {
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "a.go:1" ||
+		lean.Results[0].Kind != "scope" {
 		t.Fatalf("oversized single line was split: %#v", lean)
 	}
 	if strings.Contains(string(mustMarshalResponse(t, lean)), "const payload") {
@@ -265,7 +257,7 @@ func TestInspectEvidenceDropsSingleOversizedLineWhole(t *testing.T) {
 	}
 }
 
-func TestInspectSkipsPrimaryScopeAndExactSelfFollowupWithoutSource(t *testing.T) {
+func TestInspectRetainsPrimaryScopeAndSkipsExactSelfFollowupWithoutSource(t *testing.T) {
 	response := navigator.InspectResponse{
 		Location: "a.go:7", Symbol: "Serve",
 		Results: []navigator.Result{
@@ -279,7 +271,9 @@ func TestInspectSkipsPrimaryScopeAndExactSelfFollowupWithoutSource(t *testing.T)
 		t.Fatal(err)
 	}
 	lean := output.(leanResponse)
-	if len(lean.Results) != 1 || lean.Results[0].Location != "caller.go:19" {
+	if len(lean.Results) != 2 || lean.Results[0].Location != "a.go:7" ||
+		lean.Results[0].Kind != "scope" || lean.Results[1].Location != "caller.go:19" ||
+		!containsString(lean.Truncated, "source") {
 		t.Fatalf("inspect results retained self action: %#v", lean.Results)
 	}
 	if lean.Next == nil || lean.Next.Arguments["location"] != "caller.go:19" {
@@ -313,6 +307,206 @@ func TestInspectEvidenceWinsTightBudgetOverFollowupMetadata(t *testing.T) {
 	if hint := toolResultText(t, result); hint !=
 		"Source a.go:7; details in structuredContent." {
 		t.Fatalf("evidence hint = %q", hint)
+	}
+}
+
+func TestInspectEvidenceIsAtomicAtExactSerializedBoundary(t *testing.T) {
+	code := "func Serve() {\n\tprintln(\"界🚀\")\n\twork()\n}"
+	response := navigator.InspectResponse{
+		Location: "internal/service.go:9", Symbol: "Serve",
+		Results: []navigator.Result{{
+			Path: "internal/service.go", Line: 9, StartLine: 7, EndLine: 10,
+			CodeStartLine: 7, CodeEndLine: 10, Kind: "scope", Symbol: "Serve", Code: code,
+		}},
+	}
+	_, completeOutput, _, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	complete := completeOutput.(leanResponse)
+	if complete.Evidence == nil || complete.Evidence.Kind != "scope" ||
+		complete.Evidence.Start != "internal/service.go:7" ||
+		complete.Evidence.Text != code {
+		t.Fatalf("complete evidence = %#v", complete)
+	}
+	boundary := len(mustMarshalResponse(t, complete))
+
+	_, exactOutput, exactSizing, err := prepareToolResponse(
+		"inspect", responseAuto, response, boundary,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exact := exactOutput.(leanResponse)
+	if exact.Evidence == nil || exact.Evidence.Text != code ||
+		exactSizing.StructuredBytes != boundary {
+		t.Fatalf("exact boundary = %#v, sizing %#v", exact, exactSizing)
+	}
+
+	_, fallbackOutput, fallbackSizing, err := prepareToolResponse(
+		"inspect", responseAuto, response, boundary-1,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback := fallbackOutput.(leanResponse)
+	if fallback.Evidence != nil || !containsString(fallback.Truncated, "source") ||
+		len(fallback.Results) != 1 ||
+		fallback.Results[0].Location != "internal/service.go:9" ||
+		fallback.Results[0].Kind != "scope" || fallbackSizing.StructuredBytes > boundary-1 {
+		t.Fatalf("below boundary = %#v, sizing %#v", fallback, fallbackSizing)
+	}
+	if bytes.Contains(mustMarshalResponse(t, fallback), []byte("println")) {
+		t.Fatalf("below-boundary fallback leaked source: %#v", fallback)
+	}
+}
+
+func TestInspectEveryBudgetReturnsCompleteScopeOrExactFallback(t *testing.T) {
+	code := "func Serve() {\n" + strings.Repeat("\twork(\"界🚀\")\n", 40) + "}"
+	response := navigator.InspectResponse{
+		Location: "deep/service.go:7", Symbol: "Serve",
+		Results: []navigator.Result{{
+			Path: "deep/service.go", Line: 7, StartLine: 7, EndLine: 48,
+			CodeStartLine: 7, CodeEndLine: 48, Kind: "scope", Symbol: "Serve", Code: code,
+		}},
+	}
+	firstSuccess := 0
+	for budget := 1; budget <= 1024; budget++ {
+		_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, budget)
+		if err != nil {
+			if firstSuccess != 0 {
+				t.Fatalf("budget %d failed after success at %d: %v", budget, firstSuccess, err)
+			}
+			continue
+		}
+		if firstSuccess == 0 {
+			firstSuccess = budget
+		}
+		lean := output.(leanResponse)
+		encoded := mustMarshalResponse(t, lean)
+		if len(encoded) > budget || sizing.StructuredBytes != len(encoded) || !utf8.Valid(encoded) {
+			t.Fatalf("budget %d sizing = %d, %#v", budget, len(encoded), sizing)
+		}
+		if lean.Evidence != nil {
+			if lean.Evidence.Kind != "scope" || lean.Evidence.Start != "deep/service.go:7" ||
+				lean.Evidence.Text != code || len(lean.Results) != 0 {
+				t.Fatalf("budget %d incomplete evidence = %#v", budget, lean)
+			}
+			continue
+		}
+		if !containsString(lean.Truncated, "source") || len(lean.Results) != 1 ||
+			lean.Results[0].Location != "deep/service.go:7" || lean.Results[0].Kind != "scope" ||
+			bytes.Contains(encoded, []byte("work(")) {
+			t.Fatalf("budget %d invalid fallback = %#v", budget, lean)
+		}
+	}
+	if firstSuccess <= 1 {
+		t.Fatalf("first successful fallback budget = %d", firstSuccess)
+	}
+}
+
+func TestInspectNavigatorTruncationNeverBecomesEvidence(t *testing.T) {
+	partial := "func Serve() {\n\twork()"
+	response := navigator.InspectResponse{
+		Location: "a.go:7", Symbol: "Serve",
+		Results: []navigator.Result{{
+			Path: "a.go", Line: 7, StartLine: 7, EndLine: 100,
+			CodeStartLine: 7, CodeEndLine: 8, Kind: "scope", Symbol: "Serve",
+			Code: partial, CodeTruncated: true,
+		}},
+	}
+	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	encoded := mustMarshalResponse(t, lean)
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "a.go:7" ||
+		lean.Results[0].Kind != "scope" || bytes.Contains(encoded, []byte(partial)) ||
+		sizing.StructuredBytes > 1024 {
+		t.Fatalf("navigator-truncated evidence = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestInspectInvalidUTF8NeverBecomesEvidence(t *testing.T) {
+	invalid := string([]byte{'f', 'u', 'n', 'c', ' ', 0xff, '(', ')'})
+	response := navigator.InspectResponse{
+		Location: "a.go:7", Symbol: "Serve",
+		Results: []navigator.Result{{
+			Path: "a.go", Line: 7, StartLine: 7, EndLine: 7,
+			CodeStartLine: 7, CodeEndLine: 7, Kind: "scope", Symbol: "Serve", Code: invalid,
+		}},
+	}
+	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	encoded := mustMarshalResponse(t, lean)
+	if lean.Evidence != nil || !containsString(lean.Truncated, "source") ||
+		len(lean.Results) != 1 || lean.Results[0].Location != "a.go:7" ||
+		lean.Results[0].Kind != "scope" || bytes.Contains(encoded, []byte("func")) ||
+		!utf8.Valid(encoded) || sizing.StructuredBytes > 1024 {
+		t.Fatalf("invalid UTF-8 evidence = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestInspectLateEvidenceEvictionAddsFallbackOnce(t *testing.T) {
+	code := "func Serve() {\n\twork()\n}"
+	base := navigator.InspectResponse{
+		Location: "a.go:7", Symbol: "Serve",
+		Results: []navigator.Result{{
+			Path: "a.go", Line: 7, StartLine: 7, EndLine: 9,
+			CodeStartLine: 7, CodeEndLine: 9, Kind: "scope", Symbol: "Serve", Code: code,
+		}},
+	}
+	_, completeOutput, _, err := prepareToolResponse("inspect", responseAuto, base, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := len(mustMarshalResponse(t, completeOutput))
+	response := base
+	response.Results = append(response.Results, navigator.Result{
+		Path: strings.Repeat("deep/", 80) + "caller.go", Line: 19,
+		Kind: "ref", Symbol: "Serve",
+	})
+	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, budget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence != nil || len(lean.Results) != 1 ||
+		lean.Results[0].Location != "a.go:7" || lean.Results[0].Kind != "scope" ||
+		!containsString(lean.Truncated, "source") ||
+		!containsString(lean.Truncated, "results") || sizing.StructuredBytes > budget {
+		t.Fatalf("late evidence fallback = %#v, sizing %#v", lean, sizing)
+	}
+}
+
+func TestInspectFallbackCountsTowardResultLimit(t *testing.T) {
+	results := []navigator.Result{{
+		Path: "a.go", Line: 7, StartLine: 7, Kind: "scope", Symbol: "Serve",
+	}}
+	for index := range maximumLeanResults + 2 {
+		results = append(results, navigator.Result{
+			Path: fmt.Sprintf("caller%d.go", index), Line: index + 1,
+			Kind: "ref", Symbol: "Serve",
+		})
+	}
+	response := navigator.InspectResponse{
+		Location: "a.go:7", Symbol: "Serve", Results: results,
+	}
+	_, output, sizing, err := prepareToolResponse("inspect", responseAuto, response, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lean := output.(leanResponse)
+	if lean.Evidence != nil || len(lean.Results) != maximumLeanResults ||
+		lean.Results[0].Location != "a.go:7" || lean.Results[0].Kind != "scope" ||
+		!containsString(lean.Truncated, "source") ||
+		!containsString(lean.Truncated, "results") || sizing.StructuredBytes > 1024 {
+		t.Fatalf("fallback result cap = %#v, sizing %#v", lean, sizing)
 	}
 }
 
