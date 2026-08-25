@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -178,26 +177,12 @@ type NavigationBudget struct {
 type FindResponse struct {
 	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
 	Query            string            `json:"query"`
-	// Symbol is a deprecated Go API alias for Query. JSON retains it for source
-	// match outcomes, but omits it when the query resolved to a file or nothing.
-	Symbol           string      `json:"symbol,omitempty"`
-	MatchedAs        FindOutcome `json:"matched_as"`
-	Root             string      `json:"root"`
-	SearchedAs       []FindMatch `json:"searched_as"`
-	Hint             string      `json:"hint,omitempty"`
-	Results          []Result    `json:"results"`
-	ResultsTruncated bool        `json:"results_truncated"`
-}
-
-// MarshalJSON keeps the legacy symbol field for compatible source-search
-// responses without labeling file-path queries as symbols.
-func (response FindResponse) MarshalJSON() ([]byte, error) {
-	type findResponseJSON FindResponse
-	encoded := findResponseJSON(response)
-	if response.MatchedAs != FindOutcomeSymbol {
-		encoded.Symbol = ""
-	}
-	return json.Marshal(encoded)
+	MatchedAs        FindOutcome       `json:"matched_as"`
+	Root             string            `json:"root"`
+	SearchedAs       []FindMatch       `json:"searched_as"`
+	Hint             string            `json:"hint,omitempty"`
+	Results          []Result          `json:"results"`
+	ResultsTruncated bool              `json:"results_truncated"`
 }
 
 type InspectResponse struct {
@@ -326,9 +311,8 @@ func (r *View) findMany(
 
 	for index, query := range queries {
 		response := FindResponse{
-			Query:  query,
-			Symbol: query,
-			Root:   r.root,
+			Query: query,
+			Root:  r.root,
 		}
 		switch opts.Match {
 		case FindMatchSymbol:
@@ -622,7 +606,6 @@ func (r *View) findSymbolCandidates(
 	for _, state := range states {
 		response := FindResponse{
 			Query:      state.symbol,
-			Symbol:     state.symbol,
 			MatchedAs:  findOutcomeForResults(state.results),
 			Root:       r.root,
 			SearchedAs: []FindMatch{FindMatchSymbol},
@@ -719,7 +702,6 @@ func (r *View) findPathCandidates(
 		}
 		responses = append(responses, FindResponse{
 			Query:      query,
-			Symbol:     query,
 			MatchedAs:  FindOutcomeFile,
 			Root:       r.root,
 			SearchedAs: []FindMatch{FindMatchPath},

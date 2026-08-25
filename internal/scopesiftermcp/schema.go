@@ -17,7 +17,7 @@ const (
 func findInputSchema() map[string]any {
 	properties := commonInputProperties("locations")
 	for _, name := range []string{
-		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+		"return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
 	} {
 		delete(properties, name)
 	}
@@ -37,7 +37,7 @@ func findInputSchema() map[string]any {
 func inspectInputSchema() map[string]any {
 	properties := commonInputProperties("scope")
 	for _, name := range []string{
-		"response", "return", "context", "limit", "max_code_lines", "drop_comments", "drop_docstrings",
+		"return", "context", "limit", "max_code_lines", "drop_comments", "drop_docstrings",
 	} {
 		delete(properties, name)
 	}
@@ -64,7 +64,7 @@ func outlineInputSchema() map[string]any {
 func changedInputSchema() map[string]any {
 	properties := commonInputProperties("context")
 	for _, name := range []string{
-		"response", "return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
+		"return", "context", "max_code_lines", "drop_comments", "drop_docstrings",
 	} {
 		delete(properties, name)
 	}
@@ -73,10 +73,6 @@ func changedInputSchema() map[string]any {
 
 func commonInputProperties(defaultReturn string) map[string]any {
 	return map[string]any{
-		"response": enumSchema(
-			"auto",
-			"auto", "full",
-		),
 		"return": enumSchema(
 			defaultReturn,
 			"locations", "line", "context", "scope",

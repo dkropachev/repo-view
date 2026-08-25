@@ -11,9 +11,6 @@ import (
 )
 
 const (
-	responseAuto = "auto"
-	responseFull = "full"
-
 	selectionUnique     = "unique"
 	selectionAmbiguous  = "ambiguous"
 	selectionIncomplete = "incomplete"
@@ -32,7 +29,7 @@ type responseSizing struct {
 	Compacted       bool
 }
 
-// leanResponse is the stable auto-response shape for every tool. Optional
+// leanResponse is the stable response shape for every tool. Optional
 // evidence is useful payload, never formatter telemetry.
 //
 //nolint:govet,nolintlint // Declaration order is the intentional model-visible JSON order.
@@ -81,40 +78,28 @@ type leanResponsePlan struct {
 	sourceTruncated  bool
 }
 
-// prepareToolResponse emits the exact v3 shape only for internal full-response
-// compatibility tests. Auto always emits leanResponse, avoiding a schema that
-// changes with response size. Compacted means the original v3 JSON crossed the
-// supplied fixed budget.
+// prepareToolResponse always emits the fixed lean response shape. Compacted
+// means the navigator JSON crossed the supplied fixed budget.
 func prepareToolResponse(
-	tool, mode string,
-	full any,
+	tool string,
+	navigatorResponse any,
 	budget int,
 ) (*mcp.CallToolResult, any, responseSizing, error) {
-	if mode == "" {
-		mode = responseAuto
-	}
-	if mode != responseAuto && mode != responseFull {
-		return nil, nil, responseSizing{}, fmt.Errorf("unsupported response mode %q", mode)
-	}
-	if mode == responseAuto && budget <= 0 {
+	if budget <= 0 {
 		return nil, nil, responseSizing{}, errors.New("structured-output budget must be positive")
 	}
-	if !validToolResponseType(tool, full) {
-		return nil, nil, responseSizing{}, responseTypeError(tool, full)
+	if !validToolResponseType(tool, navigatorResponse) {
+		return nil, nil, responseSizing{}, responseTypeError(tool, navigatorResponse)
 	}
-	originalJSON, err := json.Marshal(full)
+	originalJSON, err := json.Marshal(navigatorResponse)
 	if err != nil {
-		return nil, nil, responseSizing{}, fmt.Errorf("marshal full %s response: %w", tool, err)
+		return nil, nil, responseSizing{}, fmt.Errorf("marshal navigator %s response: %w", tool, err)
 	}
 	sizing := responseSizing{
 		OriginalBytes:   len(originalJSON),
 		StructuredBytes: len(originalJSON),
 	}
-	if mode == responseFull {
-		return responseResult(), full, sizing, nil
-	}
-
-	plan, err := leanResponseFor(tool, full)
+	plan, err := leanResponseFor(tool, navigatorResponse)
 	if err != nil {
 		return nil, nil, responseSizing{}, err
 	}
@@ -150,16 +135,16 @@ func responseResult() *mcp.CallToolResult {
 	}
 }
 
-func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
+func leanResponseFor(tool string, navigatorResponse any) (leanResponsePlan, error) {
 	plan := leanResponsePlan{response: leanResponse{
 		Results:   []leanResult{},
 		Truncated: []string{},
 	}}
 	var results []navigator.Result
-	switch response := full.(type) {
+	switch response := navigatorResponse.(type) {
 	case navigator.ChangedResponse:
 		if tool != "changed" {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		plan.response.Target = changedTarget(response.BaseCommit, response.HeadCommit)
 		plan.response.Outcome = "unchanged"
@@ -174,12 +159,12 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		results = response.Results
 	case *navigator.ChangedResponse:
 		if response == nil {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		return leanResponseFor(tool, *response)
 	case navigator.FindResponse:
 		if tool != "find" {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		plan.response.Target, plan.response.Truncated = boundedLeanField(
 			response.Query, "target", plan.response.Truncated,
@@ -192,12 +177,12 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		results = response.Results
 	case *navigator.FindResponse:
 		if response == nil {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		return leanResponseFor(tool, *response)
 	case navigator.InspectResponse:
 		if tool != "inspect" {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		// Target describes the completed call. Bound it as metadata while
 		// preserving every emitted result location exactly.
@@ -247,12 +232,12 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		}
 	case *navigator.InspectResponse:
 		if response == nil {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		return leanResponseFor(tool, *response)
 	case navigator.OutlineResponse:
 		if tool != "outline" {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		plan.response.Target, plan.response.Truncated = boundedLeanField(
 			response.Path, "target", plan.response.Truncated,
@@ -268,11 +253,11 @@ func leanResponseFor(tool string, full any) (leanResponsePlan, error) {
 		results = response.Results
 	case *navigator.OutlineResponse:
 		if response == nil {
-			return plan, responseTypeError(tool, full)
+			return plan, responseTypeError(tool, navigatorResponse)
 		}
 		return leanResponseFor(tool, *response)
 	default:
-		return plan, responseTypeError(tool, full)
+		return plan, responseTypeError(tool, navigatorResponse)
 	}
 
 	for index := range results {

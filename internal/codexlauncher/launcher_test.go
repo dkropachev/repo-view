@@ -69,21 +69,13 @@ func TestRunPreservesBuildAndCodexContract(t *testing.T) {
 		"CC=/tmp/compiler-wrapper",
 		"SCOPESIFTER_CACHE_DIR=" + cache,
 		"SCOPESIFTER_BIN_DIR=" + binDir,
-		"SCOPESIFTER_CHANGED_RETURN=scope",
-		"SCOPESIFTER_CHANGED_CONTEXT=0004",
-		"SCOPESIFTER_CHANGED_LIMIT=21",
-		"SCOPESIFTER_CHANGED_MAX_CODE_LINES=61",
-		"SCOPESIFTER_CHANGED_MAX_PATCH_LINES=301",
+		"SCOPESIFTER_LIMIT_CAP=21",
+		"SCOPESIFTER_CONTEXT_CAP=25",
+		"SCOPESIFTER_MAX_CODE_LINES_CAP=61",
+		"SCOPESIFTER_MAX_PATCH_LINES_CAP=301",
 		"SCOPESIFTER_REASONING_EFFORT=xhigh",
-		"SCOPESIFTER_NAVIGATION_POLICY=adaptive",
-		"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=25",
 		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=3",
 		"SCOPESIFTER_NAVIGATION_BUDGET_FILE=/must/not/leak",
-		"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1",
-		"SCOPESIFTER_REQUIRED_ROOT=/target repository",
-		"SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"SCOPESIFTER_REQUIRED_CHANGED_RETURN=scope",
-		"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=4",
 	}
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -121,11 +113,6 @@ func TestRunPreservesBuildAndCodexContract(t *testing.T) {
 		"-X main.enforcedContextCap=25",
 		"-X main.enforcedMaxCodeLinesCap=61",
 		"-X main.enforcedMaxPatchLinesCap=301",
-		"-X 'main.enforcedNavigationRoot=/target repository'",
-		"-X main.enforcedNavigationBaseCommit=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"-X main.enforcedChangedReturn=scope",
-		"-X main.enforcedChangedContext=4",
-		"-X main.enforcedNavigationSemantics=1",
 		"-X main.enforcedNavigationCommandCap=3",
 		"main.enforcedNavigationTranscriptPath=",
 	} {
@@ -163,10 +150,8 @@ func TestRunPreservesBuildAndCodexContract(t *testing.T) {
 	}
 	joinedArguments := strings.Join(codex.arguments, "\n")
 	for _, wanted := range []string{
-		"developer_instructions=\"Use scopesifter",
-		"start with changed",
-		"--limit 21 or less",
-		"--context 25 or less",
+		"developer_instructions=\"ScopeSifter CLI is available",
+		"not as a required first action",
 		"model_reasoning_effort=\"xhigh\"",
 	} {
 		if !strings.Contains(joinedArguments, wanted) {
@@ -226,7 +211,7 @@ func TestRunOmitsOptionalReasoningAndTranscript(t *testing.T) {
 	}
 	arguments := strings.Join(executor.processes[1].arguments, "\n")
 	if strings.Contains(arguments, "model_reasoning_effort") ||
-		strings.Contains(arguments, standardAnswerGuard) {
+		strings.Contains(arguments, answerGuardInstructions) {
 		t.Fatalf("optional instructions leaked into arguments: %s", arguments)
 	}
 	if strings.Contains(executor.processes[0].arguments[2], "NavigationTranscript") {
@@ -373,37 +358,47 @@ func TestQuoteLinkerArgument(t *testing.T) {
 	}
 }
 
-func TestDeveloperInstructionsCoverAllPolicies(t *testing.T) {
+func TestDeveloperInstructionsUseExactBoundedText(t *testing.T) {
 	t.Parallel()
-	for _, policy := range []string{"terminal", "adaptive"} {
-		c := config{
-			changedReturn:        "context",
-			changedContext:       "4",
-			changedLimit:         "20",
-			changedMaxCodeLines:  "60",
-			changedMaxPatchLines: "300",
-			navigationContextCap: "20",
-			navigationCommandCap: "40",
-			navigationPolicy:     policy,
-			answerGuard:          "on",
+	const want = `ScopeSifter CLI is available: find an exact symbol/path with scopesifter find, read PATH:LINE with scopesifter inspect, or map changes with scopesifter changed. Use it only when it replaces shell navigation, not as a required first action.`
+	c := config{answerGuard: "off"}
+	instructions := developerInstructions(c)
+	if instructions != want {
+		t.Fatalf("advisory instructions = %q, want %q", instructions, want)
+	}
+	if got := len([]byte(instructions)); got > 240 {
+		t.Fatalf("navigation instruction bytes = %d, want at most 240", got)
+	}
+	assertNoDirectedNavigationInstructions(t, instructions)
+}
+
+func assertNoDirectedNavigationInstructions(t *testing.T, instructions string) {
+	t.Helper()
+	for _, forced := range []string{
+		"Use scopesifter as the primary code-navigation tool.",
+		"Pick exactly one initial command",
+		"scopesifter changed --root . --base <BASE>",
+		"changed is the only navigation command",
+		"start with changed",
+		"wrapper requirements, not suggestions",
+		"invalidates the run",
+	} {
+		if strings.Contains(instructions, forced) {
+			t.Errorf("advisory instructions retain forced language %q", forced)
 		}
-		instructions := developerInstructions(c)
-		wantedInstructions := []string{
-			"Use scopesifter as the primary code-navigation tool.",
-			"scopesifter changed --root . --base <BASE>",
-			"scopesifter find <QUERY>...",
-			"scopesifter inspect <PATH:LINE>...",
-			"scopesifter outline <PATH>...",
-		}
-		wantedInstructions = append(wantedInstructions, standardAnswerGuard)
-		for _, wanted := range wantedInstructions {
-			if !strings.Contains(instructions, wanted) {
-				t.Errorf("%s instructions omit %q", policy, wanted)
-			}
-		}
-		if strings.Contains(instructions, "{{") {
-			t.Errorf("%s instructions retain a template token", policy)
-		}
+	}
+}
+
+func TestDefaultInstructionsFitTotalByteBudget(t *testing.T) {
+	t.Parallel()
+	c := config{answerGuard: defaultAnswerGuard}
+	instructions := developerInstructions(c)
+	if instructions != navigationInstructions+"\n"+answerGuardInstructions {
+		t.Fatalf("default instructions omit expected content: %q", instructions)
+	}
+	assertNoDirectedNavigationInstructions(t, instructions)
+	if got := len([]byte(instructions)); got > 720 {
+		t.Fatalf("default advisory instruction bytes = %d, want at most 720", got)
 	}
 }
 

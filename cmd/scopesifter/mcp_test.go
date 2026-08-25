@@ -66,9 +66,8 @@ func TestMCPCommandServesExactStdioSurface(t *testing.T) {
 		t.Fatalf("invalid command = %v, output = %s", invalidErr, invalidOutput)
 	}
 	help := exec.Command(binary, "mcp", "--help")
-	helpOutput, helpErr := help.CombinedOutput()
-	if helpErr != nil || strings.Contains(string(helpOutput), "adaptive-output-cache") {
-		t.Fatalf("MCP help retained adaptive cache flag: %v\n%s", helpErr, helpOutput)
+	if helpOutput, helpErr := help.CombinedOutput(); helpErr != nil {
+		t.Fatalf("MCP help failed: %v\n%s", helpErr, helpOutput)
 	}
 
 	var serverStderr bytes.Buffer

@@ -22,11 +22,11 @@ const (
 	// ImplementationName is the stable MCP implementation name.
 	ImplementationName = "scopesifter"
 	// ImplementationVersion changes when the public MCP tool contract changes.
-	ImplementationVersion = "scopesifter-mcp/v10"
+	ImplementationVersion = "scopesifter-mcp/v1"
 
 	structuredOutputBudget = 1024
 
-	changedDescription = "Start bug/branch/PR with bounded base-to-HEAD changes."
+	changedDescription = "Base-to-HEAD changes for bug/branch/PR."
 	findDescription    = "Find exact symbol/path; return ranked locations"
 	inspectDescription = "Read complete scope or exact fallback at PATH:LINE."
 	outlineDescription = "Index known file; inspect PATH:LINE for source."
@@ -437,7 +437,6 @@ func (service *service) prepareResponse(
 ) (*mcp.CallToolResult, any, error) {
 	result, output, _, err := prepareToolResponse(
 		tool,
-		responseAuto,
 		response,
 		structuredOutputBudget,
 	)

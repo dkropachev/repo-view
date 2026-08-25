@@ -109,8 +109,8 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 	if initial == nil || initial.ServerInfo == nil {
 		t.Fatal("MCP initialization omitted server identity")
 	}
-	if initial.ServerInfo.Name != ImplementationName ||
-		initial.ServerInfo.Version != ImplementationVersion {
+	if initial.ServerInfo.Name != "scopesifter" ||
+		initial.ServerInfo.Version != "scopesifter-mcp/v1" {
 		t.Fatalf("server identity = %#v", initial.ServerInfo)
 	}
 	if initial.Instructions != "" {
@@ -137,8 +137,14 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("MCP tool-discovery payload: %d bytes", len(discoveryJSON))
-	if len(discoveryJSON) >= 2_650 {
-		t.Fatalf("MCP tool-discovery payload = %d bytes, want below 2650", len(discoveryJSON))
+	if len(discoveryJSON) >= 2_625 {
+		t.Fatalf("MCP tool-discovery payload = %d bytes, want below 2625", len(discoveryJSON))
+	}
+	wantDescriptions := map[string]string{
+		"changed": "Base-to-HEAD changes for bug/branch/PR.",
+		"find":    "Find exact symbol/path; return ranked locations",
+		"inspect": "Read complete scope or exact fallback at PATH:LINE.",
+		"outline": "Index known file; inspect PATH:LINE for source.",
 	}
 	wantProperties := map[string][]string{
 		"changed": {
@@ -170,6 +176,14 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		}
 		if tool.Title != "" || tool.Description == "" || tool.OutputSchema != nil {
 			t.Fatalf("tool %q metadata = %#v", tool.Name, tool)
+		}
+		if tool.Description != wantDescriptions[tool.Name] {
+			t.Fatalf(
+				"tool %q description = %q, want %q",
+				tool.Name,
+				tool.Description,
+				wantDescriptions[tool.Name],
+			)
 		}
 		inputSchemaJSON, err := json.Marshal(tool.InputSchema)
 		if err != nil {
@@ -209,32 +223,11 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		if required := stringArray(schema["required"]); !reflect.DeepEqual(required, wantRequired[tool.Name]) {
 			t.Fatalf("tool %q required = %q, want %q", tool.Name, required, wantRequired[tool.Name])
 		}
-		switch tool.Name {
-		case "changed":
-			if !strings.Contains(tool.Description, "bug/branch/PR") ||
-				!strings.Contains(tool.Description, "base-to-HEAD changes") {
-				t.Fatalf("changed description = %q", tool.Description)
-			}
-		case "find":
-			if !strings.Contains(tool.Description, "exact symbol/path") ||
-				!strings.Contains(tool.Description, "ranked locations") {
-				t.Fatalf("find description = %q", tool.Description)
-			}
+		if tool.Name == "find" {
 			matchSchema := normalizedObject(t, properties["match"])
 			if matchSchema["default"] != "auto" ||
 				!reflect.DeepEqual(stringArray(matchSchema["enum"]), []string{"auto", "symbol", "path"}) {
 				t.Fatalf("find match schema = %#v", matchSchema)
-			}
-		case "inspect":
-			if !strings.Contains(tool.Description, "complete scope") ||
-				!strings.Contains(tool.Description, "exact fallback") ||
-				!strings.Contains(tool.Description, "PATH:LINE") {
-				t.Fatalf("inspect description = %q", tool.Description)
-			}
-		case "outline":
-			if !strings.Contains(tool.Description, "Index known file") ||
-				!strings.Contains(tool.Description, "inspect PATH:LINE") {
-				t.Fatalf("outline description = %q", tool.Description)
 			}
 		}
 		if tool.Name != "inspect" {
@@ -285,7 +278,6 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 			Limit: defaultLimit, MaxCodeLines: defaultMaxCodeLines,
 			MaxPatchLines: defaultMaxPatchLines, NoComments: true, NoStrings: true,
 		})
-		response.Symbol = ""
 		return response, err
 	})
 	assertToolOutput(t, client, "inspect", map[string]any{
@@ -316,10 +308,8 @@ func TestServerManifestAndToolsAreReadOnly(t *testing.T) {
 		{name: "find", arguments: map[string]any{}},
 		{name: "find", arguments: map[string]any{"query": "Helper", "limit": maximumLimit + 1}},
 		{name: "find", arguments: map[string]any{"query": "Helper", "match": "text"}},
-		{name: "find", arguments: map[string]any{"query": "Helper", "response": "full"}},
 		{name: "inspect", arguments: map[string]any{"location": "../outside.go:1"}},
 		{name: "outline", arguments: map[string]any{"path": "demo.go", "return": "context"}},
-		{name: "outline", arguments: map[string]any{"path": "demo.go", "response": "full"}},
 	} {
 		response, err := client.CallTool(ctx, &mcp.CallToolParams{
 			Name: call.name, Arguments: call.arguments,
@@ -932,7 +922,7 @@ func TestChangedFileEnrichmentPreservesOutcomeAndLimit(t *testing.T) {
 	}
 }
 
-func TestServerAutoRejectsNavigatorTruncatedEvidence(t *testing.T) {
+func TestServerRejectsNavigatorTruncatedEvidence(t *testing.T) {
 	fixture := newFixture(t)
 	large := "package demo\n\nfunc Helper() {}\n\nfunc Caller() {\n"
 	for index := range 200 {
@@ -944,47 +934,47 @@ func TestServerAutoRejectsNavigatorTruncatedEvidence(t *testing.T) {
 	client, closeSessions := connect(t, server)
 	defer closeSessions()
 
-	auto, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+	result, err := client.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      "inspect",
 		Arguments: map[string]any{"location": "demo.go:6"},
 	})
-	if err != nil || auto.IsError {
-		t.Fatalf("auto inspect = %#v, %v", auto, err)
+	if err != nil || result.IsError {
+		t.Fatalf("inspect = %#v, %v", result, err)
 	}
-	autoJSON, err := json.Marshal(auto.StructuredContent)
+	structuredJSON, err := json.Marshal(result.StructuredContent)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(autoJSON) > structuredOutputBudget ||
-		!bytes.Contains(autoJSON, []byte(`"target":"demo.go:6"`)) ||
-		bytes.Contains(autoJSON, []byte(`"evidence"`)) ||
-		!bytes.Contains(autoJSON, []byte(`"location":"demo.go:6"`)) ||
-		!bytes.Contains(autoJSON, []byte(`"truncated":["source"]`)) ||
-		bytes.Contains(autoJSON, []byte(`"original_bytes"`)) ||
-		bytes.Contains(autoJSON, []byte("println(")) {
-		t.Fatalf("auto structured output (%d bytes) = %s", len(autoJSON), autoJSON)
+	if len(structuredJSON) > structuredOutputBudget ||
+		!bytes.Contains(structuredJSON, []byte(`"target":"demo.go:6"`)) ||
+		bytes.Contains(structuredJSON, []byte(`"evidence"`)) ||
+		!bytes.Contains(structuredJSON, []byte(`"location":"demo.go:6"`)) ||
+		!bytes.Contains(structuredJSON, []byte(`"truncated":["source"]`)) ||
+		bytes.Contains(structuredJSON, []byte(`"original_bytes"`)) ||
+		bytes.Contains(structuredJSON, []byte("println(")) {
+		t.Fatalf("structured output (%d bytes) = %s", len(structuredJSON), structuredJSON)
 	}
-	if text := toolText(auto); text == "" || len(text) > maximumCompactTextBytes ||
-		strings.Contains(text, string(autoJSON)) {
-		t.Fatalf("auto text content = %q", text)
+	if text := toolText(result); text == "" || len(text) > maximumCompactTextBytes ||
+		strings.Contains(text, string(structuredJSON)) {
+		t.Fatalf("text content = %q", text)
 	}
 }
 
-func TestServerRejectsPublicFullResponse(t *testing.T) {
+func TestServerRejectsUnknownInput(t *testing.T) {
 	fixture := newFixture(t)
 	server := newFixtureServer(t, fixture)
 	client, closeSessions := connect(t, server)
 	defer closeSessions()
 	response, err := client.CallTool(context.Background(), &mcp.CallToolParams{
 		Name: "inspect", Arguments: map[string]any{
-			"location": "demo.go:6", "response": responseFull,
+			"location": "demo.go:6", "unknown": "value",
 		},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !response.IsError {
-		t.Fatalf("public response=full succeeded: %#v", response)
+		t.Fatalf("unknown input succeeded: %#v", response)
 	}
 }
 

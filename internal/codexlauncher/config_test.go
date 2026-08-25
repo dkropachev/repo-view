@@ -12,80 +12,33 @@ func TestLoadConfigDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.cacheDir != "/source/.cache/bin" ||
-		c.changedReturn != "context" ||
-		c.changedContext != "4" ||
-		c.changedLimit != "20" ||
-		c.changedMaxCodeLines != "60" ||
-		c.changedMaxPatchLines != "300" ||
+		c.limitCap != "20" ||
+		c.contextCap != "20" ||
+		c.maxCodeLinesCap != "60" ||
+		c.maxPatchLinesCap != "300" ||
 		c.reasoningEffort != "high" ||
 		c.answerGuard != "on" ||
-		c.navigationPolicy != "terminal" ||
-		c.navigationContextCap != "20" ||
 		c.navigationCommandCap != "0" {
 		t.Fatalf("unexpected defaults: %#v", c)
 	}
 }
 
-func TestLoadConfigComparesArbitrarilyLargeDecimals(t *testing.T) {
-	t.Parallel()
-	huge := strings.Repeat("9", 10_000)
-	c, err := loadConfig("/source", []string{
-		"SCOPESIFTER_CHANGED_CONTEXT=000" + huge,
-		"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=" + huge,
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if c.changedContext != "000"+huge {
-		t.Fatal("the original decimal spelling was not preserved")
-	}
-	_, err = loadConfig("/source", []string{
-		"SCOPESIFTER_CHANGED_CONTEXT=1" + huge,
-		"SCOPESIFTER_NAVIGATION_CONTEXT_CAP=" + huge,
-	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "exceeds navigation_context_cap") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
 func TestLoadConfigRejectsInvalidConfiguration(t *testing.T) {
 	t.Parallel()
-	mechanical := []string{
-		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=1",
-		"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1",
-		"SCOPESIFTER_REQUIRED_ROOT=/tmp",
-		"SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"SCOPESIFTER_REQUIRED_CHANGED_RETURN=context",
-		"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=4",
-	}
 	tests := []struct {
 		name        string
 		environment []string
 		arguments   []string
 		want        string
 	}{
-		{"invalid return", []string{"SCOPESIFTER_CHANGED_RETURN=all"}, nil, "invalid SCOPESIFTER_CHANGED_RETURN"},
-		{"negative context", []string{"SCOPESIFTER_CHANGED_CONTEXT=-1"}, nil, "must be a non-negative integer"},
-		{"empty defaults", []string{"SCOPESIFTER_CHANGED_LIMIT="}, nil, ""},
-		{"zero limit", []string{"SCOPESIFTER_CHANGED_LIMIT=000"}, nil, "changed_limit must be a positive integer"},
-		{"zero code lines", []string{"SCOPESIFTER_CHANGED_MAX_CODE_LINES=0"}, nil, "changed_max_code_lines must be a positive integer"},
-		{"zero patch lines", []string{"SCOPESIFTER_CHANGED_MAX_PATCH_LINES=0"}, nil, "changed_max_patch_lines must be a positive integer"},
+		{"negative context", []string{"SCOPESIFTER_CONTEXT_CAP=-1"}, nil, "must be a non-negative integer"},
+		{"empty uses default", []string{"SCOPESIFTER_LIMIT_CAP="}, nil, ""},
+		{"zero limit", []string{"SCOPESIFTER_LIMIT_CAP=000"}, nil, "must be a positive integer"},
+		{"zero code lines", []string{"SCOPESIFTER_MAX_CODE_LINES_CAP=0"}, nil, "must be a positive integer"},
+		{"zero patch lines", []string{"SCOPESIFTER_MAX_PATCH_LINES_CAP=0"}, nil, "must be a positive integer"},
 		{"invalid reasoning", []string{"SCOPESIFTER_REASONING_EFFORT=max"}, nil, "invalid SCOPESIFTER_REASONING_EFFORT"},
 		{"invalid guard", []string{"SCOPESIFTER_ANSWER_GUARD=yes"}, nil, "invalid SCOPESIFTER_ANSWER_GUARD"},
-		{"invalid policy", []string{"SCOPESIFTER_NAVIGATION_POLICY=unbounded"}, nil, "invalid SCOPESIFTER_NAVIGATION_POLICY"},
-		{"incomplete semantics", []string{"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1"}, nil, "configuration is incomplete"},
-		{"semantics zero commands", replaceEnv(mechanical, "SCOPESIFTER_NAVIGATION_COMMAND_CAP=0"), nil, "require a positive command cap"},
-		{"invalid required context", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=many"), nil, "REQUIRED_CHANGED_CONTEXT must be a non-negative integer"},
-		{"short object ID", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaa"), nil, "must be a full lowercase object ID"},
-		{"uppercase object ID", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_BASE_COMMIT=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"), nil, "must be a full lowercase object ID"},
-		{"invalid required return", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_CHANGED_RETURN=all"), nil, "invalid SCOPESIFTER_REQUIRED_CHANGED_RETURN"},
-		{"return mismatch", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_CHANGED_RETURN=locations"), nil, "must match SCOPESIFTER_CHANGED_RETURN"},
-		{"context mismatch", replaceEnv(mechanical, "SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=5"), nil, "REQUIRED_CHANGED_CONTEXT must match"},
-		{"zero semantic code context", replaceEnv(
-			replaceEnv(mechanical, "SCOPESIFTER_CHANGED_CONTEXT=0"),
-			"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=0",
-		), nil, "must be positive unless return is locations"},
-		{"capped without JSON", mechanical, []string{"exec"}, "requires codex --json events"},
+		{"capped without JSON", []string{"SCOPESIFTER_NAVIGATION_COMMAND_CAP=1"}, []string{"exec"}, "requires codex --json events"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -104,34 +57,24 @@ func TestLoadConfigRejectsInvalidConfiguration(t *testing.T) {
 	}
 }
 
-func TestLoadConfigAcceptsCompleteMechanicalSemantics(t *testing.T) {
+func TestLoadConfigAcceptsOverrides(t *testing.T) {
 	t.Parallel()
 	c, err := loadConfig("/source", []string{
-		"SCOPESIFTER_CHANGED_RETURN=locations",
-		"SCOPESIFTER_CHANGED_CONTEXT=000",
-		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=0002",
-		"SCOPESIFTER_REQUIRE_NAVIGATION_SEMANTICS=1",
-		"SCOPESIFTER_REQUIRED_ROOT=/tmp/source root",
-		"SCOPESIFTER_REQUIRED_BASE_COMMIT=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		"SCOPESIFTER_REQUIRED_CHANGED_RETURN=locations",
-		"SCOPESIFTER_REQUIRED_CHANGED_CONTEXT=0",
+		"SCOPESIFTER_LIMIT_CAP=21",
+		"SCOPESIFTER_CONTEXT_CAP=0",
+		"SCOPESIFTER_MAX_CODE_LINES_CAP=61",
+		"SCOPESIFTER_MAX_PATCH_LINES_CAP=301",
+		"SCOPESIFTER_REASONING_EFFORT=inherit",
+		"SCOPESIFTER_ANSWER_GUARD=off",
+		"SCOPESIFTER_NAVIGATION_COMMAND_CAP=2",
 	}, []string{"exec", "--json"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !c.navigationSemanticsConfigured {
-		t.Fatal("mechanical semantics were not enabled")
+	if c.limitCap != "21" || c.contextCap != "0" ||
+		c.maxCodeLinesCap != "61" || c.maxPatchLinesCap != "301" ||
+		c.reasoningEffort != "inherit" || c.answerGuard != "off" ||
+		c.navigationCommandCap != "2" {
+		t.Fatalf("overrides = %#v", c)
 	}
-}
-
-func replaceEnv(environment []string, replacement string) []string {
-	name, _, _ := strings.Cut(replacement, "=")
-	result := make([]string, 0, len(environment)+1)
-	for _, entry := range environment {
-		entryName, _, _ := strings.Cut(entry, "=")
-		if entryName != name {
-			result = append(result, entry)
-		}
-	}
-	return append(result, replacement)
 }

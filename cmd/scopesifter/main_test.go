@@ -139,7 +139,7 @@ func TestPrintResultsUsesFenceLongerThanEmbeddedBackticks(t *testing.T) {
 		}}, navigator.ReturnScope)
 	})
 	if !strings.Contains(output, "````go\nbefore\n```\nafter\n````\n") {
-		t.Fatalf("adaptive fenced output = %q", output)
+		t.Fatalf("fenced output = %q", output)
 	}
 }
 
@@ -281,6 +281,37 @@ func TestNavigationCapsRejectOversizedOptions(t *testing.T) {
 	}
 }
 
+func TestNavigationCapsClampOnlyUnspecifiedDefaults(t *testing.T) {
+	t.Setenv("SCOPESIFTER_LIMIT_CAP", "20")
+	t.Setenv("SCOPESIFTER_CONTEXT_CAP", "4")
+	t.Setenv("SCOPESIFTER_MAX_CODE_LINES_CAP", "60")
+	t.Setenv("SCOPESIFTER_MAX_PATCH_LINES_CAP", "300")
+
+	flags := flag.NewFlagSet("test", flag.ContinueOnError)
+	common := addCommonFlags(flags, navigator.ReturnScope)
+	if err := flags.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	options, err := common.buildOptions(navigator.IncludeBoth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.Limit != 20 || options.Context != 4 ||
+		options.MaxCodeLines != 60 || options.MaxPatchLines != 300 {
+		t.Fatalf("clamped defaults = %#v", options)
+	}
+
+	flags = flag.NewFlagSet("test", flag.ContinueOnError)
+	common = addCommonFlags(flags, navigator.ReturnScope)
+	if err := flags.Parse([]string{"--limit", "21"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := common.buildOptions(navigator.IncludeBoth); err == nil ||
+		!strings.Contains(err.Error(), "--limit 21 exceeds SCOPESIFTER_LIMIT_CAP 20") {
+		t.Fatalf("explicit oversized limit error = %v", err)
+	}
+}
+
 func TestNavigationRejectsZeroCodeAndPatchLimits(t *testing.T) {
 	tests := []struct {
 		option string
@@ -387,6 +418,27 @@ func TestCompiledOptionCapSurvivesUnsetEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	command := exec.Command(
+		binary,
+		"find",
+		"Target",
+		"--root",
+		root,
+		"--include",
+		"defs",
+		"--return",
+		"locations",
+		"--json",
+	)
+	for _, item := range os.Environ() {
+		if !strings.HasPrefix(item, "SCOPESIFTER_LIMIT_CAP=") {
+			command.Env = append(command.Env, item)
+		}
+	}
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("omitted default was not clamped: %v, output = %s", err, output)
+	}
+
+	command = exec.Command(
 		binary,
 		"find",
 		"Target",
@@ -793,194 +845,6 @@ func TestNavigationBudgetWaitsForCurrentStartedEvent(t *testing.T) {
 	}
 	if budget.Used != 1 || budget.Remaining != 1 {
 		t.Fatalf("budget = %#v", budget)
-	}
-}
-
-func TestMechanicallyEnforcedNavigationSemantics(t *testing.T) {
-	root := t.TempDir()
-	base := strings.Repeat("a", 40)
-	setMechanicalNavigationContract(t, root, base, "locations", "0")
-
-	tests := []struct {
-		name       string
-		subcommand string
-		args       []string
-		wantError  string
-	}{
-		{
-			name:       "changed exact profile with location context zero",
-			subcommand: "changed",
-			args: []string{
-				"--root", root,
-				"--base", base,
-				"--return", "locations",
-				"--context", "0",
-				"--limit", "20",
-				"--max-code-lines", "60",
-				"--max-patch-lines", "300",
-				"--json",
-			},
-		},
-		{
-			name:       "missing bounded option",
-			subcommand: "changed",
-			args: []string{
-				"--root", root,
-				"--base", base,
-				"--return", "locations",
-				"--context", "0",
-				"--limit", "20",
-				"--max-code-lines", "60",
-				"--json",
-			},
-			wantError: "--max-patch-lines",
-		},
-		{
-			name:       "symbolic base",
-			subcommand: "changed",
-			args: []string{
-				"--root", root,
-				"--base", "HEAD^",
-				"--return", "locations",
-				"--context", "0",
-				"--limit", "20",
-				"--max-code-lines", "60",
-				"--max-patch-lines", "300",
-				"--json",
-			},
-			wantError: "does not match enforced base commit",
-		},
-		{
-			name:       "location followup permits zero context",
-			subcommand: "find",
-			args: []string{
-				"--root", root,
-				"--return", "locations",
-				"--context", "0",
-				"--limit", "10",
-				"--max-code-lines", "40",
-				"--max-patch-lines", "200",
-				"--json",
-			},
-		},
-		{
-			name:       "scope followup rejects zero context",
-			subcommand: "find",
-			args: []string{
-				"--root", root,
-				"--return", "scope",
-				"--context", "0",
-				"--limit", "10",
-				"--max-code-lines", "40",
-				"--max-patch-lines", "200",
-				"--json",
-			},
-			wantError: "positive --context unless --return locations",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			flags := flag.NewFlagSet(test.subcommand, flag.ContinueOnError)
-			flags.SetOutput(io.Discard)
-			common := addCommonFlags(flags, navigator.ReturnScope)
-			if err := flags.Parse(test.args); err != nil {
-				t.Fatal(err)
-			}
-			options, err := common.buildOptions(navigator.IncludeAll)
-			if err == nil {
-				err = common.enforceNavigationSemantics(
-					test.subcommand,
-					options,
-				)
-			}
-			if test.wantError == "" {
-				if err != nil {
-					t.Fatal(err)
-				}
-			} else if err == nil || !strings.Contains(err.Error(), test.wantError) {
-				t.Fatalf("error = %v, want %q", err, test.wantError)
-			}
-		})
-	}
-}
-
-func TestMechanicallyEnforcedNavigationSequence(t *testing.T) {
-	valid := [][]string{
-		{"changed"},
-		{"changed", "find"},
-		{"changed", "find", "inspect", "outline"},
-	}
-	for _, subcommands := range valid {
-		if err := validateNavigationSequence(
-			subcommands,
-			subcommands[len(subcommands)-1],
-		); err != nil {
-			t.Errorf("valid sequence %v: %v", subcommands, err)
-		}
-	}
-	invalid := []struct {
-		subcommands []string
-		current     string
-	}{
-		{[]string{"find"}, "find"},
-		{[]string{"changed", "find", "changed"}, "changed"},
-		{[]string{"changed", "find"}, "inspect"},
-	}
-	for _, test := range invalid {
-		if err := validateNavigationSequence(
-			test.subcommands,
-			test.current,
-		); err == nil {
-			t.Errorf("invalid sequence accepted: %v / %s", test.subcommands, test.current)
-		}
-	}
-}
-
-func TestMechanicallyEnforcedLiveTranscriptSequence(t *testing.T) {
-	root := t.TempDir()
-	base := strings.Repeat("a", 40)
-	setMechanicalNavigationContract(t, root, base, "context", "4")
-	transcriptPath := filepath.Join(root, "transcript.jsonl")
-	transcript, err := os.Create(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoder := json.NewEncoder(transcript)
-	writeEvent := func(eventType, command string) {
-		t.Helper()
-		if err := encoder.Encode(map[string]any{
-			"type": eventType,
-			"item": map[string]any{
-				"type":    "command_execution",
-				"command": command,
-			},
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
-	changed := "scopesifter changed --root . --json"
-	find := "scopesifter find Symbol --root . --json"
-	writeEvent("item.started", changed)
-	if budget, err := consumeNavigationBudgetFor("changed"); err != nil {
-		t.Fatal(err)
-	} else if budget.Used != 1 {
-		t.Fatalf("changed budget = %#v", budget)
-	}
-	writeEvent("item.completed", changed)
-	writeEvent("item.started", find)
-	if budget, err := consumeNavigationBudgetFor("find"); err != nil {
-		t.Fatal(err)
-	} else if budget.Used != 2 {
-		t.Fatalf("find budget = %#v", budget)
-	}
-	writeEvent("item.completed", find)
-	writeEvent("item.started", changed)
-	if _, err := consumeNavigationBudgetFor("changed"); err == nil ||
-		!strings.Contains(err.Error(), "exactly once") {
-		t.Fatalf("repeated changed error = %v", err)
-	}
-	if err := transcript.Close(); err != nil {
-		t.Fatal(err)
 	}
 }
 
@@ -1536,53 +1400,6 @@ func TestOutlineBatchFailsWhenEveryPathIsInvalid(t *testing.T) {
 	if len(responses) != 2 || responses[0].Error == "" || responses[1].Error == "" {
 		t.Fatalf("responses = %#v", responses)
 	}
-}
-
-func setMechanicalNavigationContract(
-	t *testing.T,
-	root string,
-	base string,
-	returnMode string,
-	context string,
-) {
-	t.Helper()
-	previous := []string{
-		enforcedNavigationCommandCap,
-		enforcedNavigationTranscriptPath,
-		enforcedLimitCap,
-		enforcedContextCap,
-		enforcedMaxCodeLinesCap,
-		enforcedMaxPatchLinesCap,
-		enforcedNavigationRoot,
-		enforcedNavigationBaseCommit,
-		enforcedChangedReturn,
-		enforcedChangedContext,
-		enforcedNavigationSemantics,
-	}
-	enforcedNavigationCommandCap = "3"
-	enforcedNavigationTranscriptPath = filepath.Join(root, "transcript.jsonl")
-	enforcedLimitCap = "20"
-	enforcedContextCap = "20"
-	enforcedMaxCodeLinesCap = "60"
-	enforcedMaxPatchLinesCap = "300"
-	enforcedNavigationRoot = root
-	enforcedNavigationBaseCommit = base
-	enforcedChangedReturn = returnMode
-	enforcedChangedContext = context
-	enforcedNavigationSemantics = "1"
-	t.Cleanup(func() {
-		enforcedNavigationCommandCap = previous[0]
-		enforcedNavigationTranscriptPath = previous[1]
-		enforcedLimitCap = previous[2]
-		enforcedContextCap = previous[3]
-		enforcedMaxCodeLinesCap = previous[4]
-		enforcedMaxPatchLinesCap = previous[5]
-		enforcedNavigationRoot = previous[6]
-		enforcedNavigationBaseCommit = previous[7]
-		enforcedChangedReturn = previous[8]
-		enforcedChangedContext = previous[9]
-		enforcedNavigationSemantics = previous[10]
-	})
 }
 
 func captureStdout(t *testing.T, fn func()) string {
