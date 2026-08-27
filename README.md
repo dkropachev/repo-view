@@ -108,9 +108,8 @@ Multiple includes are ORed; any matching exclude wins.
   includes `matched_as` (`file`, `symbol`, `other`, or `none`), `searched_as`,
   and an actionable `hint` when nothing matched. Identifier findings honor
   `--include defs|refs|both`; default `both`.
-  CLI default return is `scope`; MCP v1 returns a bounded location index and
-  leaves source retrieval to `inspect`. Its `--limit` is shared across all
-  supplied queries. Exact text such as a dependency module
+  Default return is `scope`. Its `--limit` is shared across all supplied
+  queries. Exact text such as a dependency module
   path can still be searched in `go.mod`, for example
   `scopesifter find golang.org/x/time --path go.mod --include refs --return line`.
   `query` always reports the requested selector.
@@ -132,76 +131,6 @@ Multiple includes are ORed; any matching exclude wins.
   `--max-patch-lines` cuts the exact patch or its 16 MiB safety ceiling is
   reached. The byte ceiling also bounds temporary snapshots used to diff
   untracked files.
-
-## MCP Lean Output
-
-MCP v1 provides four explicit navigation verbs (`changed`, `find`, `inspect`,
-and `outline`) but exposes only routing-critical inputs. Every successful call
-returns one stable structured envelope containing `target`, `outcome`, bounded
-`results`, and semantic `truncated` fields.
-Symbol finds also report `selection` as `unique`, `ambiguous`, or `incomplete`.
-Results retain complete `PATH:LINE` locations, prefer distinct files, and keep
-the primary actionable row even when optional fields do not fit. No nested
-follow-up JSON duplicates those locations.
-
-Structured output is fixed at no more than 1 KiB. `find`, `changed`, and
-`outline` are routing indexes without source or patch text. `inspect` emits
-`evidence.kind="scope"` only when the complete navigator scope fits unchanged.
-Otherwise it emits no code, retains the exact inspected `PATH:LINE` result, and
-marks `source` truncated. Separate text content is the constant
-`See structuredContent.` and never repeats a target or structured JSON.
-MCP always returns this lean response shape.
-
-## Codex Integration
-
-Build the typed launcher, then use it to inject `scopesifter` into PATH and add
-navigation instructions for one Codex invocation. It does not modify Codex
-config, Codex source, or the target repository. The root Makefile exposes the
-target from `make/launcher.mk`.
-
-```console
-$ make scopesifter-codex
-$ bin/scopesifter-codex exec \
-  -C /path/to/repository \
-  -s read-only \
-  --json \
-  "Explain this branch compared with main."
-```
-
-The launcher uses a bounded navigation profile:
-
-```text
-SCOPESIFTER_LIMIT_CAP=20
-SCOPESIFTER_CONTEXT_CAP=20
-SCOPESIFTER_MAX_CODE_LINES_CAP=60
-SCOPESIFTER_MAX_PATCH_LINES_CAP=300
-SCOPESIFTER_REASONING_EFFORT=high
-SCOPESIFTER_ANSWER_GUARD=on
-```
-
-Each value can be overridden for one invocation. `SCOPESIFTER_ANSWER_GUARD`
-accepts `on|off`; reasoning accepts `inherit|low|medium|high|xhigh|ultra`.
-The launcher tells Codex that the CLI is available for exact symbols, paths,
-locations, and change maps, and to use it only when it replaces shell
-navigation. It never requires ScopeSifter as a first action or prescribes a
-navigation sequence. The optional answer guard and the child binary's safety
-ceilings are independent. With the defaults above, the launcher compiles result
-limit `20`, context `20`, embedded code `60`, and changed patch `300` ceilings
-into every child `scopesifter` binary.
-Environment values are fallback-only, so a command cannot disable these
-ceilings with `env -u`. When a capped child command omits an option whose CLI
-default is above its ceiling, the omitted default is reduced to the ceiling;
-an explicit request above a ceiling still exits with a cap error and is counted
-as a navigation-bound violation by the transcript validator.
-When both `SCOPESIFTER_NAVIGATION_COMMAND_CAP` and
-`SCOPESIFTER_NAVIGATION_BUDGET_FILE` are set in a writable integration, JSON
-responses include `navigation_budget` with `used`, `limit`, and `remaining`,
-and scopesifter invocations after the limit are rejected. For read-only capped
-Codex runs, the launcher requires `--json`, mirrors live events to an ignored
-local transcript, and compiles its path and cap into scopesifter. Each
-scopesifter CLI invocation is counted from started and completed navigation
-events, so the model cannot bypass the cumulative budget by unsetting
-environment variables. The transcript is removed when the launcher exits.
 
 ## Validation
 

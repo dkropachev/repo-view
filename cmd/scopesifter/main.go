@@ -1,8 +1,6 @@
 package main
 
 import (
-	"bufio"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,23 +9,15 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/yapless/scopesifter/internal/navigationcommand"
 	"github.com/yapless/scopesifter/navigator"
 )
 
 var (
-	enforcedNavigationCommandCap     string
-	enforcedNavigationTranscriptPath string
-	enforcedLimitCap                 string
-	enforcedContextCap               string
-	enforcedMaxCodeLinesCap          string
-	enforcedMaxPatchLinesCap         string
-	releaseRevision                  = "development"
-	releaseRevisionMarker            = "scopesifter.release-revision=development"
+	releaseRevision       = "development"
+	releaseRevisionMarker = "scopesifter.release-revision=development"
 )
 
 func main() {
@@ -57,8 +47,6 @@ func run(args []string) int {
 		return runOutline(args[1:])
 	case "changed":
 		return runChanged(args[1:])
-	case "mcp":
-		return runMCP(args[1:])
 	case "version":
 		if releaseRevisionMarker != "scopesifter.release-revision="+releaseRevision {
 			fmt.Fprintln(os.Stderr, "scopesifter: release revision marker is invalid")
@@ -127,18 +115,10 @@ func runFind(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudget()
-	if err != nil {
-		printCLIError(err)
-		return 2
-	}
 	responses, err := view.FindMany(queries, options)
 	if err != nil {
 		printCLIError(err)
 		return 1
-	}
-	for index := range responses {
-		responses[index].NavigationBudget = budget
 	}
 	if *common.jsonOut {
 		return printJSON(responses, *common.prettyJSON)
@@ -223,11 +203,6 @@ func runInspect(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudget()
-	if err != nil {
-		printCLIError(err)
-		return 2
-	}
 	remaining := options.Limit
 	responses := make([]navigator.InspectResponse, 0, len(locations))
 	successCount := 0
@@ -244,16 +219,14 @@ func runInspect(args []string) int {
 				return 1
 			}
 			responses = append(responses, navigator.InspectResponse{
-				Location:         location,
-				Root:             absoluteRoot,
-				Results:          []navigator.Result{},
-				Error:            err.Error(),
-				NavigationBudget: budget,
+				Location: location,
+				Root:     absoluteRoot,
+				Results:  []navigator.Result{},
+				Error:    err.Error(),
 			})
 			continue
 		}
 		successCount++
-		response.NavigationBudget = budget
 		responses = append(responses, response)
 		if remaining > 0 {
 			remaining -= len(response.Results)
@@ -332,11 +305,6 @@ func runOutline(args []string) int {
 		)
 		return 2
 	}
-	budget, err := consumeNavigationBudget()
-	if err != nil {
-		printCLIError(err)
-		return 2
-	}
 	remaining := options.Limit
 	responses := make([]navigator.OutlineResponse, 0, len(paths))
 	successCount := 0
@@ -353,16 +321,14 @@ func runOutline(args []string) int {
 				return 1
 			}
 			responses = append(responses, navigator.OutlineResponse{
-				Path:             path,
-				Root:             absoluteRoot,
-				Results:          []navigator.Result{},
-				Error:            err.Error(),
-				NavigationBudget: budget,
+				Path:    path,
+				Root:    absoluteRoot,
+				Results: []navigator.Result{},
+				Error:   err.Error(),
 			})
 			continue
 		}
 		successCount++
-		response.NavigationBudget = budget
 		responses = append(responses, response)
 		if remaining > 0 {
 			remaining -= len(response.Results)
@@ -425,17 +391,11 @@ func runChanged(args []string) int {
 		printCLIError(err)
 		return 2
 	}
-	budget, err := consumeNavigationBudget()
-	if err != nil {
-		printCLIError(err)
-		return 2
-	}
 	response, err := view.Changed(opts)
 	if err != nil {
 		printCLIError(err)
 		return 1
 	}
-	response.NavigationBudget = budget
 	if *common.jsonOut {
 		return printJSON(response, *common.prettyJSON)
 	}
@@ -495,22 +455,6 @@ func (c commonFlags) buildOptions(include navigator.Include) (navigator.Options,
 	if err != nil {
 		return navigator.Options{}, err
 	}
-	visited := make(map[string]bool)
-	c.flags.Visit(func(option *flag.Flag) {
-		visited[option.Name] = true
-	})
-	for _, option := range []struct {
-		value       *int
-		name        string
-		environment string
-	}{
-		{name: "limit", environment: "SCOPESIFTER_LIMIT_CAP", value: c.limit},
-		{name: "context", environment: "SCOPESIFTER_CONTEXT_CAP", value: c.context},
-		{name: "max-code-lines", environment: "SCOPESIFTER_MAX_CODE_LINES_CAP", value: c.maxCodeLines},
-		{name: "max-patch-lines", environment: "SCOPESIFTER_MAX_PATCH_LINES_CAP", value: c.maxPatchLines},
-	} {
-		clampUnspecifiedOptionToCap(visited, option.name, option.environment, option.value)
-	}
 	if *c.maxCodeLines < 1 {
 		return navigator.Options{}, fmt.Errorf("--max-code-lines must be positive; use --return locations to omit code")
 	}
@@ -534,366 +478,7 @@ func (c commonFlags) buildOptions(include navigator.Include) (navigator.Options,
 		MaxCodeLines:   *c.maxCodeLines,
 		MaxPatchLines:  *c.maxPatchLines,
 	}
-	for _, cap := range []struct {
-		option string
-		env    string
-		value  int
-	}{
-		{option: "--limit", env: "SCOPESIFTER_LIMIT_CAP", value: options.Limit},
-		{option: "--context", env: "SCOPESIFTER_CONTEXT_CAP", value: options.Context},
-		{option: "--max-code-lines", env: "SCOPESIFTER_MAX_CODE_LINES_CAP", value: options.MaxCodeLines},
-		{option: "--max-patch-lines", env: "SCOPESIFTER_MAX_PATCH_LINES_CAP", value: options.MaxPatchLines},
-	} {
-		if cap.option == "--max-code-lines" &&
-			options.Return == navigator.ReturnLocations &&
-			!visited["max-code-lines"] {
-			continue
-		}
-		if err := enforceOptionCap(cap.option, cap.value, cap.env); err != nil {
-			return navigator.Options{}, err
-		}
-	}
 	return options, nil
-}
-
-func clampUnspecifiedOptionToCap(
-	visited map[string]bool,
-	option string,
-	environment string,
-	value *int,
-) {
-	if visited[option] {
-		return
-	}
-	raw, configured := enforcedOptionCap(environment)
-	if !configured {
-		return
-	}
-	limit, err := strconv.Atoi(raw)
-	if err == nil && limit >= 0 && *value > limit {
-		*value = limit
-	}
-}
-
-func validFullGitObjectID(value string) bool {
-	if (len(value) != 40 && len(value) != 64) ||
-		strings.ToLower(value) != value {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
-}
-
-func enforceOptionCap(option string, value int, environment string) error {
-	raw, ok := enforcedOptionCap(environment)
-	if !ok {
-		return nil
-	}
-	limitCap, err := strconv.Atoi(raw)
-	if err != nil || limitCap < 0 {
-		return fmt.Errorf("%s must be a non-negative integer: %s", environment, raw)
-	}
-	if value == 0 {
-		switch option {
-		case "--limit":
-			return fmt.Errorf("%s 0 disables the result limit while %s is set", option, environment)
-		case "--max-code-lines":
-			return fmt.Errorf("%s must be positive; use --return locations to omit code", option)
-		case "--max-patch-lines":
-			return fmt.Errorf("%s must be positive", option)
-		}
-	}
-	if value > limitCap {
-		return fmt.Errorf("%s %d exceeds %s %d", option, value, environment, limitCap)
-	}
-	return nil
-}
-
-func enforcedOptionCap(environment string) (string, bool) {
-	var enforced string
-	switch environment {
-	case "SCOPESIFTER_LIMIT_CAP":
-		enforced = enforcedLimitCap
-	case "SCOPESIFTER_CONTEXT_CAP":
-		enforced = enforcedContextCap
-	case "SCOPESIFTER_MAX_CODE_LINES_CAP":
-		enforced = enforcedMaxCodeLinesCap
-	case "SCOPESIFTER_MAX_PATCH_LINES_CAP":
-		enforced = enforcedMaxPatchLinesCap
-	}
-	if enforced != "" {
-		return enforced, true
-	}
-	return os.LookupEnv(environment)
-}
-
-func consumeNavigationBudget() (*navigator.NavigationBudget, error) {
-	rawLimit := enforcedNavigationCommandCap
-	configured := rawLimit != ""
-	if !configured {
-		rawLimit, configured = os.LookupEnv("SCOPESIFTER_NAVIGATION_COMMAND_CAP")
-	}
-	if !configured || rawLimit == "" || rawLimit == "0" {
-		return nil, nil
-	}
-	limit, err := strconv.Atoi(rawLimit)
-	if err != nil || limit < 1 {
-		return nil, fmt.Errorf(
-			"SCOPESIFTER_NAVIGATION_COMMAND_CAP must be a positive integer: %s",
-			rawLimit,
-		)
-	}
-	if enforcedNavigationTranscriptPath != "" {
-		return consumeNavigationTranscriptBudget(
-			enforcedNavigationTranscriptPath,
-			limit,
-		)
-	}
-	statePath := os.Getenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE")
-	if statePath == "" {
-		return nil, fmt.Errorf(
-			"SCOPESIFTER_NAVIGATION_BUDGET_FILE is required when SCOPESIFTER_NAVIGATION_COMMAND_CAP is set",
-		)
-	}
-	return consumeNavigationFileBudget(statePath, limit)
-}
-
-func consumeNavigationFileBudget(
-	statePath string,
-	limit int,
-) (_ *navigator.NavigationBudget, returnErr error) {
-	release, err := acquireNavigationBudgetLock(statePath)
-	if err != nil {
-		return nil, err
-	}
-	defer func() {
-		if err := release(); err != nil && returnErr == nil {
-			returnErr = err
-		}
-	}()
-
-	if info, err := os.Lstat(statePath); err == nil {
-		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-			return nil, fmt.Errorf(
-				"navigation budget state must be a regular non-symlink file: %s",
-				statePath,
-			)
-		}
-	} else if !os.IsNotExist(err) {
-		return nil, fmt.Errorf("inspect navigation budget: %w", err)
-	}
-	state, err := os.OpenFile(statePath, os.O_CREATE|os.O_RDWR, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open navigation budget: %w", err)
-	}
-	defer state.Close()
-	stateInfo, err := state.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("inspect open navigation budget: %w", err)
-	}
-	pathInfo, err := os.Lstat(statePath)
-	if err != nil {
-		return nil, fmt.Errorf("inspect navigation budget after open: %w", err)
-	}
-	if pathInfo.Mode()&os.ModeSymlink != 0 ||
-		!pathInfo.Mode().IsRegular() ||
-		!os.SameFile(stateInfo, pathInfo) {
-		return nil, fmt.Errorf(
-			"navigation budget state changed while it was opened: %s",
-			statePath,
-		)
-	}
-
-	content, err := io.ReadAll(state)
-	if err != nil {
-		return nil, fmt.Errorf("read navigation budget: %w", err)
-	}
-	used := 0
-	if value := strings.TrimSpace(string(content)); value != "" {
-		used, err = strconv.Atoi(value)
-		if err != nil || used < 0 {
-			return nil, fmt.Errorf("invalid navigation budget state: %q", value)
-		}
-	}
-	if used >= limit {
-		return nil, fmt.Errorf("scopesifter navigation command budget exhausted: %d/%d used", used, limit)
-	}
-	used++
-	if err := state.Truncate(0); err != nil {
-		return nil, fmt.Errorf("reset navigation budget: %w", err)
-	}
-	if _, err := state.Seek(0, io.SeekStart); err != nil {
-		return nil, fmt.Errorf("seek navigation budget: %w", err)
-	}
-	if _, err := fmt.Fprintln(state, used); err != nil {
-		return nil, fmt.Errorf("write navigation budget: %w", err)
-	}
-	if err := state.Sync(); err != nil {
-		return nil, fmt.Errorf("sync navigation budget: %w", err)
-	}
-	pathInfo, err = os.Lstat(statePath)
-	if err != nil ||
-		pathInfo.Mode()&os.ModeSymlink != 0 ||
-		!pathInfo.Mode().IsRegular() ||
-		!os.SameFile(stateInfo, pathInfo) {
-		return nil, fmt.Errorf(
-			"navigation budget state changed while it was updated: %s",
-			statePath,
-		)
-	}
-	return &navigator.NavigationBudget{
-		Used:      used,
-		Limit:     limit,
-		Remaining: limit - used,
-	}, nil
-}
-
-func acquireNavigationBudgetLock(statePath string) (func() error, error) {
-	lockPath := statePath + ".lock"
-	for attempt := 0; ; attempt++ {
-		err := os.Mkdir(lockPath, 0o700)
-		if err == nil {
-			break
-		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("create navigation budget lock: %w", err)
-		}
-		if attempt >= 999 {
-			return nil, fmt.Errorf(
-				"navigation budget lock is held or stale: %s",
-				lockPath,
-			)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	lock, err := os.Open(lockPath)
-	if err != nil {
-		return nil, fmt.Errorf("open navigation budget lock: %w", err)
-	}
-	lockInfo, err := lock.Stat()
-	if err != nil {
-		_ = lock.Close()
-		return nil, fmt.Errorf("inspect navigation budget lock: %w", err)
-	}
-	pathInfo, err := os.Lstat(lockPath)
-	if err != nil ||
-		pathInfo.Mode()&os.ModeSymlink != 0 ||
-		!pathInfo.IsDir() ||
-		!os.SameFile(lockInfo, pathInfo) {
-		_ = lock.Close()
-		if err == nil && os.SameFile(lockInfo, pathInfo) {
-			_ = os.Remove(lockPath)
-		}
-		return nil, fmt.Errorf(
-			"navigation budget lock changed while it was acquired: %s",
-			lockPath,
-		)
-	}
-
-	released := false
-	return func() error {
-		if released {
-			return nil
-		}
-		released = true
-		defer lock.Close()
-		current, err := os.Lstat(lockPath)
-		if err != nil ||
-			current.Mode()&os.ModeSymlink != 0 ||
-			!current.IsDir() ||
-			!os.SameFile(lockInfo, current) {
-			return fmt.Errorf(
-				"navigation budget lock changed while it was held: %s",
-				lockPath,
-			)
-		}
-		if err := os.Remove(lockPath); err != nil {
-			return fmt.Errorf("remove navigation budget lock: %w", err)
-		}
-		return nil
-	}, nil
-}
-
-func consumeNavigationTranscriptBudget(path string, limit int) (*navigator.NavigationBudget, error) {
-	for range 100 {
-		state, err := navigationTranscriptStateFor(path)
-		if err != nil {
-			return nil, err
-		}
-		if state.started > state.completed {
-			if state.started > limit {
-				return nil, fmt.Errorf("scopesifter navigation command budget exhausted: %d/%d used", limit, limit)
-			}
-			return &navigator.NavigationBudget{
-				Used:      state.started,
-				Limit:     limit,
-				Remaining: limit - state.started,
-			}, nil
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return nil, fmt.Errorf("current scopesifter invocation is missing from navigation transcript")
-}
-
-type navigationTranscriptState struct {
-	started   int
-	completed int
-}
-
-func navigationTranscriptStateFor(
-	path string,
-) (navigationTranscriptState, error) {
-	transcript, err := os.Open(path)
-	if err != nil {
-		return navigationTranscriptState{}, fmt.Errorf(
-			"open navigation transcript: %w",
-			err,
-		)
-	}
-	defer transcript.Close()
-
-	state := navigationTranscriptState{}
-	scanner := bufio.NewScanner(transcript)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		var event struct {
-			Type string `json:"type"`
-			Item struct {
-				Type    string `json:"type"`
-				Command string `json:"command"`
-			} `json:"item"`
-		}
-		if json.Unmarshal(scanner.Bytes(), &event) != nil ||
-			event.Item.Type != "command_execution" {
-			continue
-		}
-		subcommand, shapeErr := navigationcommand.ValidatedScopeSifterSubcommand(
-			event.Item.Command,
-		)
-		if shapeErr != nil {
-			return navigationTranscriptState{}, fmt.Errorf(
-				"unsafe scopesifter command in navigation transcript: %w",
-				shapeErr,
-			)
-		}
-		if subcommand == "" {
-			continue
-		}
-		switch event.Type {
-		case "item.started":
-			state.started++
-		case "item.completed":
-			state.completed++
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return navigationTranscriptState{}, fmt.Errorf(
-			"read navigation transcript: %w",
-			err,
-		)
-	}
-	return state, nil
 }
 
 func (c commonFlags) resolvedReturn() (navigator.Return, error) {
@@ -950,14 +535,12 @@ Usage:
   scopesifter inspect PATH:LINE... [options]
   scopesifter outline PATH... [options]
   scopesifter changed [options]
-  scopesifter mcp [options]
 
 Commands:
   find      Exact identifiers or literal repository paths; reports matched evidence kind.
   inspect   Enclosing scope, optionally imports or related results; accepts multiple locations.
   outline   Definitions in one or more files, in source order.
   changed   Git metadata, exact patch, and changed-source context.
-  mcp       Stdio MCP server with changed, find, inspect, and outline tools.
 
 Return values:
   --return locations   Result metadata without source code.

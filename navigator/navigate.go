@@ -168,53 +168,43 @@ type Result struct {
 	CodeTruncated bool     `json:"code_truncated"`
 }
 
-type NavigationBudget struct {
-	Used      int `json:"used"`
-	Limit     int `json:"limit"`
-	Remaining int `json:"remaining"`
-}
-
 type FindResponse struct {
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
-	Query            string            `json:"query"`
-	MatchedAs        FindOutcome       `json:"matched_as"`
-	Root             string            `json:"root"`
-	SearchedAs       []FindMatch       `json:"searched_as"`
-	Hint             string            `json:"hint,omitempty"`
-	Results          []Result          `json:"results"`
-	ResultsTruncated bool              `json:"results_truncated"`
+	Query            string      `json:"query"`
+	MatchedAs        FindOutcome `json:"matched_as"`
+	Root             string      `json:"root"`
+	SearchedAs       []FindMatch `json:"searched_as"`
+	Hint             string      `json:"hint,omitempty"`
+	Results          []Result    `json:"results"`
+	ResultsTruncated bool        `json:"results_truncated"`
 }
 
 type InspectResponse struct {
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
-	Location         string            `json:"location"`
-	Root             string            `json:"root"`
-	Symbol           string            `json:"symbol,omitempty"`
-	Error            string            `json:"error,omitempty"`
-	Results          []Result          `json:"results"`
-	ResultsTruncated bool              `json:"results_truncated"`
+	Location         string   `json:"location"`
+	Root             string   `json:"root"`
+	Symbol           string   `json:"symbol,omitempty"`
+	Error            string   `json:"error,omitempty"`
+	Results          []Result `json:"results"`
+	ResultsTruncated bool     `json:"results_truncated"`
 }
 
 type OutlineResponse struct {
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
-	Path             string            `json:"path"`
-	Root             string            `json:"root"`
-	Error            string            `json:"error,omitempty"`
-	Results          []Result          `json:"results"`
-	ResultsTruncated bool              `json:"results_truncated"`
+	Path             string   `json:"path"`
+	Root             string   `json:"root"`
+	Error            string   `json:"error,omitempty"`
+	Results          []Result `json:"results"`
+	ResultsTruncated bool     `json:"results_truncated"`
 }
 
 type ChangedResponse struct {
-	NavigationBudget *NavigationBudget `json:"navigation_budget,omitempty"`
-	Root             string            `json:"root"`
-	Base             string            `json:"base,omitempty"`
-	BaseCommit       string            `json:"base_commit,omitempty"`
-	HeadCommit       string            `json:"head_commit"`
-	HeadSubject      string            `json:"head_subject,omitempty"`
-	Patch            string            `json:"patch,omitempty"`
-	Results          []Result          `json:"results"`
-	PatchTruncated   bool              `json:"patch_truncated"`
-	ResultsTruncated bool              `json:"results_truncated"`
+	Root             string   `json:"root"`
+	Base             string   `json:"base,omitempty"`
+	BaseCommit       string   `json:"base_commit,omitempty"`
+	HeadCommit       string   `json:"head_commit"`
+	HeadSubject      string   `json:"head_subject,omitempty"`
+	Patch            string   `json:"patch,omitempty"`
+	Results          []Result `json:"results"`
+	PatchTruncated   bool     `json:"patch_truncated"`
+	ResultsTruncated bool     `json:"results_truncated"`
 }
 
 type positionedFindScopeResolver interface {

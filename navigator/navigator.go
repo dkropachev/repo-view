@@ -19,7 +19,7 @@ const (
 	// Match the JavaScript backend's 8 MiB per-line budget, with one
 	// Scanner-sized margin for a line terminator and read-ahead. The other
 	// limits make repository traversal and source reads fail closed instead of
-	// allowing an MCP request to consume unbounded memory or time.
+	// allowing one navigation operation to consume unbounded memory or time.
 	maximumSourceLineBytes   = (8 << 20) + bufio.MaxScanTokenSize
 	maximumSourceFileBytes   = 64 << 20
 	maximumSourceTreeBytes   = 1 << 30
