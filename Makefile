@@ -1,5 +1,4 @@
 include make/grammar.mk
-include make/launcher.mk
 include make/release.mk
 
 .PHONY: ci-vet ci-test ci-build ci-json ci-no-scripts ci-lint ci-fieldalignment

@@ -8,9 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
-	"time"
 
 	"github.com/yapless/scopesifter/navigator"
 )
@@ -265,50 +263,176 @@ func TestChangedRejectsPositionalArguments(t *testing.T) {
 	}
 }
 
-func TestNavigationCapsRejectOversizedOptions(t *testing.T) {
-	t.Setenv("SCOPESIFTER_LIMIT_CAP", "20")
-	t.Setenv("SCOPESIFTER_CONTEXT_CAP", "10")
-	t.Setenv("SCOPESIFTER_MAX_CODE_LINES_CAP", "60")
+func TestLegacyLauncherEnvironmentCannotAffectOrdinaryCLI(t *testing.T) {
+	for name, value := range map[string]string{
+		"SCOPESIFTER_LIMIT_CAP":              "0",
+		"SCOPESIFTER_CONTEXT_CAP":            "invalid",
+		"SCOPESIFTER_MAX_CODE_LINES_CAP":     "0",
+		"SCOPESIFTER_MAX_PATCH_LINES_CAP":    "0",
+		"SCOPESIFTER_NAVIGATION_COMMAND_CAP": "1",
+		"SCOPESIFTER_NAVIGATION_BUDGET_FILE": filepath.Join(t.TempDir(), "budget"),
+		"SCOPESIFTER_REASONING_EFFORT":       "ultra",
+		"SCOPESIFTER_ANSWER_GUARD":           "on",
+	} {
+		t.Setenv(name, value)
+	}
 
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	common := addCommonFlags(flags, navigator.ReturnScope)
-	if err := flags.Parse([]string{"--limit", "21", "--context", "11", "--max-code-lines", "61"}); err != nil {
-		t.Fatal(err)
-	}
-	_, err := common.buildOptions(navigator.IncludeBoth)
-	if err == nil || !strings.Contains(err.Error(), "--limit 21 exceeds SCOPESIFTER_LIMIT_CAP 20") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNavigationCapsClampOnlyUnspecifiedDefaults(t *testing.T) {
-	t.Setenv("SCOPESIFTER_LIMIT_CAP", "20")
-	t.Setenv("SCOPESIFTER_CONTEXT_CAP", "4")
-	t.Setenv("SCOPESIFTER_MAX_CODE_LINES_CAP", "60")
-	t.Setenv("SCOPESIFTER_MAX_PATCH_LINES_CAP", "300")
-
-	flags := flag.NewFlagSet("test", flag.ContinueOnError)
-	common := addCommonFlags(flags, navigator.ReturnScope)
-	if err := flags.Parse(nil); err != nil {
+	if err := flags.Parse([]string{
+		"--limit", "51",
+		"--context", "6",
+		"--max-code-lines", "81",
+		"--max-patch-lines", "401",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	options, err := common.buildOptions(navigator.IncludeBoth)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("legacy launcher environment affected options: %v", err)
 	}
-	if options.Limit != 20 || options.Context != 4 ||
-		options.MaxCodeLines != 60 || options.MaxPatchLines != 300 {
-		t.Fatalf("clamped defaults = %#v", options)
+	if options.Limit != 51 || options.Context != 6 ||
+		options.MaxCodeLines != 81 || options.MaxPatchLines != 401 {
+		t.Fatalf("options = %#v", options)
 	}
 
-	flags = flag.NewFlagSet("test", flag.ContinueOnError)
-	common = addCommonFlags(flags, navigator.ReturnScope)
-	if err := flags.Parse([]string{"--limit", "21"}); err != nil {
+	root := t.TempDir()
+	if err := os.WriteFile(
+		filepath.Join(root, "demo.go"),
+		[]byte("package demo\n\nfunc Target() {}\n"),
+		0o600,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := common.buildOptions(navigator.IncludeBoth); err == nil ||
-		!strings.Contains(err.Error(), "--limit 21 exceeds SCOPESIFTER_LIMIT_CAP 20") {
-		t.Fatalf("explicit oversized limit error = %v", err)
+	var status int
+	var stderr string
+	stdout := captureStdout(t, func() {
+		stderr = captureStderr(t, func() {
+			status = run([]string{
+				"find", "Target", "--root", root, "--include", "defs",
+				"--return", "locations", "--json",
+			})
+		})
+	})
+	if status != 0 {
+		t.Fatalf("status = %d, stderr = %s", status, stderr)
+	}
+	if strings.Contains(stdout, "navigation_budget") {
+		t.Fatalf("ordinary JSON retained launcher budget: %s", stdout)
+	}
+}
+
+func TestLauncherIntegrationIsStructurallyAbsent(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, path := range []string{
+		"cmd/scopesifter-codex",
+		"internal/codexlauncher",
+		"internal/navigationcommand",
+		"make/launcher.mk",
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("removed launcher path %q still exists: %v", path, err)
+		}
+	}
+	for _, path := range []string{"Makefile", "README.md"} {
+		contents, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, forbidden := range []string{
+			"scopesifter-codex",
+			"make/launcher.mk",
+			"SCOPESIFTER_ANSWER_GUARD",
+			"SCOPESIFTER_NAVIGATION_COMMAND_CAP",
+		} {
+			if strings.Contains(string(contents), forbidden) {
+				t.Fatalf("%s retains launcher documentation or target %q", path, forbidden)
+			}
+		}
+	}
+
+	command := exec.Command("go", "list", "-deps", "./cmd/scopesifter")
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list scopesifter dependencies: %v\n%s", err, output)
+	}
+	for _, forbidden := range []string{
+		"github.com/yapless/scopesifter/internal/codexlauncher",
+		"github.com/yapless/scopesifter/internal/navigationcommand",
+	} {
+		if strings.Contains(string(output), forbidden) {
+			t.Fatalf("scopesifter command graph retains %q:\n%s", forbidden, output)
+		}
+	}
+}
+
+func TestMCPIntegrationIsStructurallyAbsent(t *testing.T) {
+	root := filepath.Join("..", "..")
+	for _, path := range []string{
+		"cmd/scopesifter/mcp.go",
+		"cmd/scopesifter/mcp_test.go",
+		"internal/scopesiftermcp",
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); !os.IsNotExist(err) {
+			t.Fatalf("removed MCP path %q still exists: %v", path, err)
+		}
+	}
+
+	status := 0
+	stderr := captureStderr(t, func() {
+		status = run([]string{"mcp"})
+	})
+	if status != 2 {
+		t.Fatalf("removed mcp command status = %d, want 2; stderr = %q", status, stderr)
+	}
+
+	help := captureStdout(t, func() {
+		status = run([]string{"--help"})
+	})
+	if status != 0 {
+		t.Fatalf("help status = %d, want 0", status)
+	}
+	if strings.Contains(strings.ToLower(help), "mcp") {
+		t.Fatalf("help retains MCP command:\n%s", help)
+	}
+
+	for _, path := range []string{"README.md", "cmd/scopesifter/main.go"} {
+		contents, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToLower(string(contents)), "mcp") {
+			t.Fatalf("%s retains MCP product text", path)
+		}
+	}
+
+	manifest, err := os.ReadFile(filepath.Join(root, "go.mod"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"github.com/modelcontextprotocol/go-sdk",
+		"github.com/yapless/scopesifter/internal/scopesiftermcp",
+	} {
+		if strings.Contains(string(manifest), forbidden) {
+			t.Fatalf("go.mod retains removed dependency %q", forbidden)
+		}
+	}
+
+	command := exec.Command("go", "list", "-deps", "-test", "./...")
+	command.Dir = root
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("list repository dependencies: %v\n%s", err, output)
+	}
+	for _, forbidden := range []string{
+		"github.com/modelcontextprotocol/go-sdk",
+		"github.com/yapless/scopesifter/internal/scopesiftermcp",
+	} {
+		if strings.Contains(string(output), forbidden) {
+			t.Fatalf("repository dependency graph retains %q:\n%s", forbidden, output)
+		}
 	}
 }
 
@@ -335,12 +459,13 @@ func TestNavigationRejectsZeroCodeAndPatchLimits(t *testing.T) {
 	}
 }
 
-func TestLocationReturnIgnoresOmittedCodeLineCap(t *testing.T) {
-	t.Setenv("SCOPESIFTER_MAX_CODE_LINES_CAP", "60")
-
+func TestLocationReturnAcceptsExplicitPositiveCodeLineLimit(t *testing.T) {
 	flags := flag.NewFlagSet("test", flag.ContinueOnError)
 	common := addCommonFlags(flags, navigator.ReturnScope)
-	if err := flags.Parse([]string{"--return", "locations"}); err != nil {
+	if err := flags.Parse([]string{
+		"--return", "locations",
+		"--max-code-lines", "61",
+	}); err != nil {
 		t.Fatal(err)
 	}
 	options, err := common.buildOptions(navigator.IncludeBoth)
@@ -350,119 +475,8 @@ func TestLocationReturnIgnoresOmittedCodeLineCap(t *testing.T) {
 	if options.Return != navigator.ReturnLocations {
 		t.Fatalf("return = %q", options.Return)
 	}
-
-	flags = flag.NewFlagSet("test", flag.ContinueOnError)
-	common = addCommonFlags(flags, navigator.ReturnScope)
-	if err := flags.Parse([]string{
-		"--return", "locations",
-		"--max-code-lines", "61",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := common.buildOptions(navigator.IncludeBoth); err == nil ||
-		!strings.Contains(err.Error(), "--max-code-lines 61 exceeds") {
-		t.Fatalf("explicit code-line cap error = %v", err)
-	}
-}
-
-func TestEnforcedOptionCapsCannotBeDisabledByEnvironment(t *testing.T) {
-	tests := []struct {
-		name        string
-		option      string
-		environment string
-		enforced    *string
-	}{
-		{"limit", "--limit", "SCOPESIFTER_LIMIT_CAP", &enforcedLimitCap},
-		{"context", "--context", "SCOPESIFTER_CONTEXT_CAP", &enforcedContextCap},
-		{"code lines", "--max-code-lines", "SCOPESIFTER_MAX_CODE_LINES_CAP", &enforcedMaxCodeLinesCap},
-		{"patch lines", "--max-patch-lines", "SCOPESIFTER_MAX_PATCH_LINES_CAP", &enforcedMaxPatchLinesCap},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			previous := *test.enforced
-			*test.enforced = "10"
-			t.Cleanup(func() {
-				*test.enforced = previous
-			})
-			t.Setenv(test.environment, "999")
-
-			err := enforceOptionCap(test.option, 11, test.environment)
-			if err == nil || !strings.Contains(err.Error(), test.environment+" 10") {
-				t.Fatalf("error = %v", err)
-			}
-		})
-	}
-}
-
-func TestCompiledOptionCapSurvivesUnsetEnvironment(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "scopesifter")
-	build := exec.Command(
-		"go",
-		"build",
-		"-ldflags",
-		"-X main.enforcedLimitCap=2",
-		"-o",
-		binary,
-		".",
-	)
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build: %v\n%s", err, output)
-	}
-
-	root := t.TempDir()
-	if err := os.WriteFile(
-		filepath.Join(root, "demo.go"),
-		[]byte("package demo\n\nfunc Target() {}\n"),
-		0o600,
-	); err != nil {
-		t.Fatal(err)
-	}
-	command := exec.Command(
-		binary,
-		"find",
-		"Target",
-		"--root",
-		root,
-		"--include",
-		"defs",
-		"--return",
-		"locations",
-		"--json",
-	)
-	for _, item := range os.Environ() {
-		if !strings.HasPrefix(item, "SCOPESIFTER_LIMIT_CAP=") {
-			command.Env = append(command.Env, item)
-		}
-	}
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("omitted default was not clamped: %v, output = %s", err, output)
-	}
-
-	command = exec.Command(
-		binary,
-		"find",
-		"Target",
-		"--root",
-		root,
-		"--include",
-		"defs",
-		"--return",
-		"locations",
-		"--limit",
-		"3",
-		"--json",
-	)
-	for _, item := range os.Environ() {
-		if !strings.HasPrefix(item, "SCOPESIFTER_LIMIT_CAP=") {
-			command.Env = append(command.Env, item)
-		}
-	}
-	output, err := command.CombinedOutput()
-	if err == nil || !strings.Contains(
-		string(output),
-		"--limit 3 exceeds SCOPESIFTER_LIMIT_CAP 2",
-	) {
-		t.Fatalf("error = %v, output = %s", err, output)
+	if options.MaxCodeLines != 61 {
+		t.Fatalf("max code lines = %d", options.MaxCodeLines)
 	}
 }
 
@@ -579,272 +593,6 @@ func TestCommonFlagsPreserveRepeatablePathFilters(t *testing.T) {
 	}
 	if got := strings.Join(options.ExcludeGlobs, ","); got != "*_test.go" {
 		t.Fatalf("exclude globs = %q", got)
-	}
-}
-
-func TestOptionCapRejectsInvalidEnvironment(t *testing.T) {
-	t.Setenv("SCOPESIFTER_LIMIT_CAP", "many")
-	err := enforceOptionCap("--limit", 20, "SCOPESIFTER_LIMIT_CAP")
-	if err == nil || !strings.Contains(err.Error(), "must be a non-negative integer") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestOptionCapRejectsZeroValueBypasses(t *testing.T) {
-	t.Setenv("SCOPESIFTER_LIMIT_CAP", "20")
-	if err := enforceOptionCap("--limit", 0, "SCOPESIFTER_LIMIT_CAP"); err == nil ||
-		!strings.Contains(err.Error(), "disables the result limit") {
-		t.Fatalf("limit error = %v", err)
-	}
-
-	t.Setenv("SCOPESIFTER_MAX_CODE_LINES_CAP", "60")
-	if err := enforceOptionCap("--max-code-lines", 0, "SCOPESIFTER_MAX_CODE_LINES_CAP"); err == nil ||
-		!strings.Contains(err.Error(), "use --return locations to omit code") {
-		t.Fatalf("code error = %v", err)
-	}
-}
-
-func TestContextCapAllowsExplicitZero(t *testing.T) {
-	t.Setenv("SCOPESIFTER_CONTEXT_CAP", "0")
-	if err := enforceOptionCap("--context", 0, "SCOPESIFTER_CONTEXT_CAP"); err != nil {
-		t.Fatalf("explicit zero context rejected: %v", err)
-	}
-}
-
-func TestNavigationBudgetPersistsAcrossCommands(t *testing.T) {
-	statePath := filepath.Join(t.TempDir(), "budget")
-	t.Setenv("SCOPESIFTER_NAVIGATION_COMMAND_CAP", "2")
-	t.Setenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE", statePath)
-
-	first, err := consumeNavigationBudget()
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := consumeNavigationBudget()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Used != 1 || first.Remaining != 1 || second.Used != 2 || second.Remaining != 0 {
-		t.Fatalf("budgets = %#v, %#v", first, second)
-	}
-	if _, err := consumeNavigationBudget(); err == nil ||
-		!strings.Contains(err.Error(), "budget exhausted: 2/2 used") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNavigationBudgetSerializesConcurrentCommands(t *testing.T) {
-	const (
-		limit    = 8
-		attempts = 24
-	)
-	statePath := filepath.Join(t.TempDir(), "budget")
-	t.Setenv("SCOPESIFTER_NAVIGATION_COMMAND_CAP", "8")
-	t.Setenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE", statePath)
-
-	type result struct {
-		budget *navigator.NavigationBudget
-		err    error
-	}
-	start := make(chan struct{})
-	results := make(chan result, attempts)
-	var wait sync.WaitGroup
-	for range attempts {
-		wait.Add(1)
-		go func() {
-			defer wait.Done()
-			<-start
-			budget, err := consumeNavigationBudget()
-			results <- result{budget: budget, err: err}
-		}()
-	}
-	close(start)
-	wait.Wait()
-	close(results)
-
-	seen := make([]bool, limit+1)
-	successes := 0
-	exhausted := 0
-	for current := range results {
-		if current.err != nil {
-			if !strings.Contains(current.err.Error(), "budget exhausted: 8/8 used") {
-				t.Fatalf("unexpected budget error: %v", current.err)
-			}
-			exhausted++
-			continue
-		}
-		successes++
-		if current.budget.Used < 1 ||
-			current.budget.Used > limit ||
-			seen[current.budget.Used] {
-			t.Fatalf("duplicate or invalid budget: %#v", current.budget)
-		}
-		seen[current.budget.Used] = true
-	}
-	if successes != limit || exhausted != attempts-limit {
-		t.Fatalf("successes = %d, exhausted = %d", successes, exhausted)
-	}
-	content, err := os.ReadFile(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(content) != "8\n" {
-		t.Fatalf("budget state = %q", content)
-	}
-	if _, err := os.Lstat(statePath + ".lock"); !os.IsNotExist(err) {
-		t.Fatalf("navigation lock was not removed: %v", err)
-	}
-}
-
-func TestNavigationBudgetCountsLiveTranscript(t *testing.T) {
-	transcript, err := os.CreateTemp(t.TempDir(), "transcript.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-	writeStarted := func(command string) {
-		t.Helper()
-		event := map[string]any{
-			"type": "item.started",
-			"item": map[string]any{
-				"type":    "command_execution",
-				"command": command,
-			},
-		}
-		if err := json.NewEncoder(transcript).Encode(event); err != nil {
-			t.Fatal(err)
-		}
-	}
-	writeStarted("scopesifter changed --root . --json")
-	if err := json.NewEncoder(transcript).Encode(map[string]any{
-		"type": "item.completed",
-		"item": map[string]any{
-			"type":    "command_execution",
-			"command": "scopesifter changed --root . --json",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	writeStarted("scopesifter find First Second --root . --json")
-
-	budget, err := consumeNavigationTranscriptBudget(transcript.Name(), 3)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if budget.Used != 2 || budget.Remaining != 1 {
-		t.Fatalf("budget = %#v", budget)
-	}
-
-	writeStarted("scopesifter inspect first.go:1 --root . --json; scopesifter outline first.go --root . --json")
-	if _, err := consumeNavigationTranscriptBudget(transcript.Name(), 3); err == nil ||
-		!strings.Contains(err.Error(), "unsafe scopesifter command") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestNavigationBudgetRejectsLoopedInvocation(t *testing.T) {
-	transcript, err := os.CreateTemp(t.TempDir(), "transcript.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-	if err := json.NewEncoder(transcript).Encode(map[string]any{
-		"type": "item.started",
-		"item": map[string]any{
-			"type": "command_execution",
-			"command": "for name in A B C; do " +
-				"scopesifter find \"$name\" --root . --json; done",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if _, err := consumeNavigationTranscriptBudget(
-		transcript.Name(),
-		1,
-	); err == nil || !strings.Contains(err.Error(), "unsafe scopesifter command") {
-		t.Fatalf("error = %v", err)
-	}
-}
-
-func TestEnforcedNavigationBudgetUsesReadOnlyTranscriptWithoutEnvironment(t *testing.T) {
-	directory := t.TempDir()
-	transcriptPath := filepath.Join(directory, "transcript.jsonl")
-	transcript, err := os.Create(transcriptPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.NewEncoder(transcript).Encode(map[string]any{
-		"type": "item.started",
-		"item": map[string]any{
-			"type":    "command_execution",
-			"command": "scopesifter changed --root . --json",
-		},
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if err := transcript.Close(); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(transcriptPath, 0o444); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(directory, 0o555); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = os.Chmod(directory, 0o755)
-		_ = os.Chmod(transcriptPath, 0o644)
-	})
-
-	previousCap := enforcedNavigationCommandCap
-	previousPath := enforcedNavigationTranscriptPath
-	enforcedNavigationCommandCap = "2"
-	enforcedNavigationTranscriptPath = transcriptPath
-	t.Cleanup(func() {
-		enforcedNavigationCommandCap = previousCap
-		enforcedNavigationTranscriptPath = previousPath
-	})
-	t.Setenv("SCOPESIFTER_NAVIGATION_COMMAND_CAP", "0")
-	t.Setenv("SCOPESIFTER_NAVIGATION_BUDGET_FILE", filepath.Join(directory, "unwritable-state"))
-
-	budget, err := consumeNavigationBudget()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if budget.Used != 1 || budget.Limit != 2 || budget.Remaining != 1 {
-		t.Fatalf("budget = %#v", budget)
-	}
-}
-
-func TestNavigationBudgetWaitsForCurrentStartedEvent(t *testing.T) {
-	transcript, err := os.CreateTemp(t.TempDir(), "transcript.jsonl")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer transcript.Close()
-
-	writeDone := make(chan error, 1)
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		writeDone <- json.NewEncoder(transcript).Encode(map[string]any{
-			"type": "item.started",
-			"item": map[string]any{
-				"type":    "command_execution",
-				"command": "scopesifter changed --root . --json",
-			},
-		})
-	}()
-
-	budget, err := consumeNavigationTranscriptBudget(transcript.Name(), 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := <-writeDone; err != nil {
-		t.Fatal(err)
-	}
-	if budget.Used != 1 || budget.Remaining != 1 {
-		t.Fatalf("budget = %#v", budget)
 	}
 }
 
